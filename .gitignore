@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Runtime data, build output
+portal/data/
+*.db
+*.sqlite
+*.zip
+*.tar.gz
+portal/wheels/
+
+# Configuration with real values, secrets
+sites.yml
+auth.yml
+*.key
+*.pem
+*.crt
+.env
+*.local.*
+
+# Editors, OS
+.DS_Store
+.idea/
+.vscode/

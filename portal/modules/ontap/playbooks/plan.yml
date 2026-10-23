@@ -1,0 +1,118 @@
+# Restore plan (READ ONLY): check the OpenStack volume and its instance, the target project, the Cinder pools with the
+# same type (with their capacity), the LUN, the FlexVol, and the selected snapshot.
+#
+# Example from a terminal (ONTAP password through the environment, not as an argument):
+#   read -rsp 'ONTAP password: ' ONTAP_PASSWORD; export ONTAP_PASSWORD ONTAP_USER=admin
+#   ansible-playbook plan.yml -e @/etc/ontap_restore/sites.yml \
+#     -e site=DCA -e volume_id=<uuid> -e snapshot=hourly.2025-12-17_1905 [-e project_id=<id>]
+- name: Plan a volume restore from an ONTAP snapshot
+  hosts: localhost
+  gather_facts: false
+  vars:
+    ontap_user: "{{ lookup('ansible.builtin.env', 'ONTAP_USER') }}"
+    ontap_password: "{{ lookup('ansible.builtin.env', 'ONTAP_PASSWORD') }}"
+  module_defaults:
+    ansible.builtin.uri:
+      url_username: "{{ ontap_user }}"
+      url_password: "{{ ontap_password }}"
+      force_basic_auth: true
+      validate_certs: "{{ cfg.ontap.validate_certs | default(false) | bool }}"
+      use_proxy: false
+      timeout: 60
+  tasks:
+    - name: Restore plan
+      block:
+        - name: Preparation
+          ansible.builtin.import_tasks: tasks/prepare.yml
+
+        - name: Collect and check prerequisites
+          ansible.builtin.import_tasks: tasks/discover.yml
+
+        - name: Build plan result
+          ansible.builtin.set_fact:
+            job_result:
+              ok: true
+              mode: plan
+              site: "{{ site }}"
+              summary: >-
+                Plan ready: {{ lun.name }} from snapshot {{ snapshot }} to {{ restore_path }}, then cinder manage
+                (volume type {{ manage_volume_type or '-' }}, {{ pool_options.selectable }} selectable pool{{ '' if pool_options.selectable | int == 1 else 's' }})
+                and move to project {{ target_project_info.name | default(target_project) }}.
+              cluster: "{{ ontap_cluster.name }}"
+              volume:
+                id: "{{ volume_id }}"
+                name: "{{ os_volume.name | default('', true) }}"
+                size_gb: "{{ os_volume.size }}"
+                status: "{{ os_volume.status }}"
+                type: "{{ os_volume.type | default('', true) }}"
+                bootable: "{{ (os_volume.bootable | default('false') | string | lower) == 'true' }}"
+                host: "{{ cinder_host }}"
+                project_id: "{{ source_project }}"
+              project:
+                id: "{{ target_project }}"
+                name: "{{ target_project_info.name | default('') }}"
+                same_as_source: "{{ target_project == source_project }}"
+              transfer:
+                needed: "{{ needs_transfer }}"
+                temporary_role: "{{ transfer_role if (needs_transfer | bool and admin_roles | length == 0) else '' }}"
+              name_id: "{{ volume_name_id }}"
+              # Cinder pools with the volume type of the original volume, with their capacity; the operator picks one in
+              # Review.
+              pools: "{{ pool_options }}"
+              # Volume types the new volume can use (original type first), each with its pools; the operator may pick
+              # another type (its pool is reached with lun move in the same SVM).
+              type_options: "{{ type_options }}"
+              # Instance the volume is attached to and the role of the volume (boot / extended like vdb / detached).
+              instance: "{{ instance }}"
+              instance_error: "{{ instance_error }}"
+              role: "{{ volume_role_info }}"
+              # Choice after the restore: transfer only, attach to an instance in the target project, or a new instance
+              # (boot volume).
+              after_restore:
+                servers: "{{ attach_choices }}"
+                servers_read: "{{ target_servers_read }}"
+                new_instance: "{{ new_instance }}"
+              image_properties: "{{ image_props }}"
+              # Original volume: deletion is scheduled after N hours, only with administrator approval (Approvals menu).
+              delete_after_hours: "{{ (cfg.openstack | default({})).delete_after_hours | default(72, true) | int }}"
+              lun:
+                name: "{{ lun.name }}"
+                ref_id: "{{ lun_ref_id }}"
+                svm: "{{ lun.svm.name }}"
+                flexvol: "{{ lun.location.volume.name }}"
+                size: "{{ lun.space.size }}"
+                used: "{{ lun.space.used | default(lun.space.size) }}"
+                state: "{{ lun.status.state }}"
+              flexvol:
+                name: "{{ flexvol.name }}"
+                state: "{{ flexvol.state }}"
+                available: "{{ flexvol.space.available }}"
+                size: "{{ flexvol.space.size }}"
+              snapshot: "{{ chosen_snapshot }}"
+              restore_path: "{{ restore_path }}"
+              checks: "{{ checks }}"
+              ready: "{{ checks | rejectattr('ok') | list | length == 0 }}"
+              default_new_name: >-
+                {{ ((os_volume.name | default('', true) | regex_replace('[^A-Za-z0-9_.:-]', '-') | regex_replace('^[^A-Za-z0-9]+', '')) or 'volume')
+                   ~ '-restore-' ~ (chosen_snapshot.local_time | default('') | replace('-', '') | replace(':', '') | replace(' ', '-')) }}
+              restore_file_cli: >-
+                volume snapshot restore-file -vserver {{ lun.svm.name }} -volume {{ lun.location.volume.name }}
+                -snapshot {{ snapshot }} -path {{ lun.name }} -restore-path {{ restore_path }}
+
+      rescue:
+        - name: Build failure result
+          ansible.builtin.set_fact:
+            job_result:
+              ok: false
+              mode: plan
+              step: "{{ ansible_failed_task.name | default('') }}"
+              error: "{{ ansible_failed_result.msg | default('no message') }}"
+
+      always:
+        - name: Save result
+          ansible.builtin.import_tasks: tasks/write_result.yml
+
+    - name: End with failed status
+      ansible.builtin.fail:
+        msg: "{{ job_result.error }}"
+      when: not job_result.ok

@@ -1,0 +1,334 @@
+# Delete the old volume (the original volume of a restore) AFTER an administrator approved it in the Web UI (Approvals).
+# check_only=true: only check. Before anything is deleted, these are checked (tasks/delete_check.yml):
+#   - OpenStack: the volume still exists, is still in the same project as at restore time, is available and not
+#     attached, has no Cinder snapshot, and is not the restored volume (keep_volume_id)
+#   - NetApp: whether the LUN volume-<ID> / volume-<name_id> still exists (it may already be deleted through OpenStack
+#     by the team that did the restore). Volume gone AND LUN gone = already deleted: only recorded. A LUN without an
+#     OpenStack volume (orphan) is never deleted by this portal.
+# detach=true: the volume is first detached from the instances named in detach_servers (must match the attachments at
+# that time; not a boot disk), then checked again and deleted. No --force and no --cascade.
+# delete_instance=true: the volume is the boot disk (vda) of one instance: that instance (delete_server, whose name the
+# administrator types: delete_server_name) is deleted first, after another check (restore project, no running task, the
+# restored volume is not attached, no other disk is deleted with it). Delete on termination = yes: Nova deletes the
+# volume too, and the portal only makes sure the volume and its LUN are gone; otherwise the volume becomes available
+# and is then deleted.
+#
+#   ansible-playbook delete_volume.yml -e @/etc/ontap_restore/sites.yml -e site=DCA -e volume_id=<uuid> \
+#     -e expect_project=<project id> -e keep_volume_id=<uuid of the restored volume> [-e check_only=true] \
+#     [-e lun_ref_id=<uuid>] [-e detach=true -e '{"detach_servers": ["<instance uuid>"]}']
+- name: Delete the original volume of a restore (approved by an administrator)
+  hosts: localhost
+  gather_facts: false
+  vars:
+    ontap_user: "{{ lookup('ansible.builtin.env', 'ONTAP_USER') }}"
+    ontap_password: "{{ lookup('ansible.builtin.env', 'ONTAP_PASSWORD') }}"
+  module_defaults:
+    ansible.builtin.uri:
+      url_username: "{{ ontap_user }}"
+      url_password: "{{ ontap_password }}"
+      force_basic_auth: true
+      validate_certs: "{{ cfg.ontap.validate_certs | default(false) | bool }}"
+      use_proxy: false
+      timeout: 60
+  tasks:
+    - name: Delete volume
+      block:
+        - name: Validate input
+          ansible.builtin.assert:
+            that:
+              - sites is defined and site | default('') in sites
+              - volume_id | default('') is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+              - expect_project | default('') is match('^[0-9A-Za-z_-]{8,64}$')
+              - (keep_volume_id | default('')) == '' or keep_volume_id is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+              - volume_id != keep_volume_id | default('')
+              - (lun_ref_id | default('')) == '' or lun_ref_id is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+              - (lun_path | default('')) == '' or lun_path is match('^/vol/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$')
+              - detach_servers | default([]) | select('match', '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') | list | length
+                == detach_servers | default([]) | length
+              - not (detach | default(false) | bool) or detach_servers | default([]) | length > 0
+              - not (delete_instance | default(false) | bool) or delete_server | default('') is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+              - not (delete_instance | default(false) | bool) or (delete_server_name | default('') | length) in range(1, 256)
+              - not (delete_instance | default(false) | bool and detach | default(false) | bool)
+              - ontap_user | length > 0 and ontap_password | length > 0
+            fail_msg: >-
+              Invalid input. Requires site (one of {{ (sites | default({})).keys() | list }}), volume_id and keep_volume_id as
+              different UUIDs, expect_project, detach_servers as instance UUIDs when detach=true, and ONTAP credentials in
+              env ONTAP_USER/ONTAP_PASSWORD.
+            quiet: true
+
+        - name: Site configuration
+          ansible.builtin.import_tasks: tasks/site.yml
+
+        - name: Check the volume in OpenStack and its LUN in NetApp
+          ansible.builtin.include_tasks: tasks/delete_check.yml
+
+        - name: Check result
+          ansible.builtin.set_fact:
+            job_result:
+              ok: true
+              mode: check
+              summary: "{{ delete_eval.summary }}"
+              gone: "{{ delete_eval.gone }}"
+              orphan: "{{ delete_eval.orphan }}"
+              can_delete: "{{ delete_eval.can_delete }}"
+              can_detach: "{{ delete_eval.can_detach }}"
+              can_delete_instance: "{{ delete_eval.can_delete_instance }}"
+              checks: "{{ delete_eval.checks }}"
+              warnings: "{{ delete_eval.warnings }}"
+              attachments: "{{ delete_eval.attachments }}"
+              luns: "{{ delete_eval.luns }}"
+              volume:
+                id: "{{ volume_id }}"
+                name: "{{ old_volume.name | default('', true) }}"
+                status: "{{ old_volume.status | default('') }}"
+                size_gb: "{{ old_volume.size | default('') }}"
+          when: check_only | default(false) | bool
+
+        # ---------------- delete (only with administrator approval) ----------------
+        - name: Volume already gone in OpenStack and NetApp
+          ansible.builtin.assert:
+            that: delete_eval.gone
+            fail_msg: "Nothing was deleted: {{ delete_eval.summary }}"
+            quiet: true
+          when: not (check_only | default(false) | bool) and volume_gone | bool
+
+        # Decided once: the condition of a block is evaluated again for each of its tasks, and volume_gone changes in it.
+        - name: Whether the instance is deleted first
+          ansible.builtin.set_fact:
+            instance_first: "{{ not (check_only | default(false) | bool) and not volume_gone | bool and delete_instance | default(false) | bool }}"
+
+        - name: Delete the instance first (the volume is its boot disk)
+          when: instance_first | bool
+          block:
+            - name: Verify the instance can be deleted
+              ansible.builtin.assert:
+                that:
+                  - delete_eval.can_delete_instance
+                  - delete_eval.attachments[0].server_id == delete_server | lower
+                  - delete_eval.attachments[0].server_name == delete_server_name
+                fail_msg: >-
+                  Nothing was deleted: {{ delete_eval.summary if not delete_eval.can_delete_instance else
+                  ('the volume is now the boot disk of ' ~ (delete_eval.attachments[0].server_name or delete_eval.attachments[0].server_id)
+                   ~ ' (' ~ delete_eval.attachments[0].server_id ~ '), not of the instance confirmed when it was approved ('
+                   ~ delete_server_name ~ ', ' ~ delete_server ~ '); check it again') }}
+                quiet: true
+
+            - name: Remember the instance
+              ansible.builtin.set_fact:
+                instance_plan: "{{ delete_eval.attachments[0] }}"
+
+            - name: "OpenStack: delete instance {{ instance_plan.server_name }}"
+              ansible.builtin.include_tasks: tasks/openstack_cmd.yml
+              vars:
+                os_label: "delete instance {{ instance_plan.server_name }} ({{ instance_plan.server_id }}), boot disk {{ volume_id }}"
+                os_command: "openstack server delete {{ instance_plan.server_id | quote }}"
+
+            - name: "OpenStack: wait until instance {{ instance_plan.server_name }} is gone"
+              ansible.builtin.raw: "{{ director_prefix }} {{ ('source ' ~ overcloudrc ~ ' && openstack server show ' ~ (instance_plan.server_id | quote) ~ ' -f json') | quote }}"
+              delegate_to: mgmt
+              register: server_gone_out
+              changed_when: false
+              # "No server with a name or ID ... exists." = deleted; ERROR: the deletion failed, it is reported
+              until: >-
+                'No server with a name or ID' in (server_gone_out.stdout | default('')) ~ (server_gone_out.stderr | default(''))
+                or (server_gone_out.rc | default(1) == 0 and (server_gone_out.stdout | extract_json).status | default('') == 'ERROR')
+              retries: 72
+              delay: 5
+              failed_when: false
+              ignore_unreachable: true
+
+            - name: Verify the instance is deleted
+              ansible.builtin.assert:
+                that: "'No server with a name or ID' in (server_gone_out.stdout | default('')) ~ (server_gone_out.stderr | default(''))"
+                fail_msg: >-
+                  Instance {{ instance_plan.server_name }} ({{ instance_plan.server_id }}) is not deleted
+                  ({{ ('status ' ~ (server_gone_out.stdout | extract_json).status | default('?')) if server_gone_out.rc | default(1) == 0
+                      else ((server_gone_out.stderr | default('') | trim) or (server_gone_out.msg | default('')) | truncate(300)) }});
+                  volume {{ volume_id }} was not deleted. Check the instance in OpenStack.
+                quiet: true
+
+            - name: "OpenStack: wait for volume {{ volume_id }} (deleted with the instance, or detached from it)"
+              ansible.builtin.raw: "{{ director_prefix }} {{ ('source ' ~ overcloudrc ~ ' && openstack volume show ' ~ (volume_id | quote) ~ ' -f json') | quote }}"
+              delegate_to: mgmt
+              register: after_instance_out
+              changed_when: false
+              until: >-
+                'No volume with a name or ID' in (after_instance_out.stdout | default('')) ~ (after_instance_out.stderr | default(''))
+                or (after_instance_out.rc | default(1) == 0
+                    and (after_instance_out.stdout | extract_json).status | default('') in ['available', 'error', 'error_deleting'])
+              retries: 72
+              delay: 5
+              failed_when: false
+              ignore_unreachable: true
+
+            - name: Check the volume again after the instance was deleted
+              ansible.builtin.include_tasks: tasks/delete_check.yml
+
+            - name: Record the deleted instance
+              ansible.builtin.set_fact:
+                instance_deleted: "{{ instance_plan }}"
+                deleted_with_instance: "{{ volume_gone | bool }}"
+
+        - name: Detach the volume first
+          when: not (check_only | default(false) | bool) and not volume_gone | bool and detach | default(false) | bool
+          block:
+            - name: Verify the volume can be detached
+              ansible.builtin.assert:
+                that:
+                  - delete_eval.can_detach
+                  - delete_eval.attachments | map(attribute='server_id') | sort == detach_servers | default([]) | map('lower') | sort
+                fail_msg: >-
+                  Nothing was detached or deleted: {{ delete_eval.summary if not delete_eval.can_detach else
+                  'the volume is now attached to ' ~ (delete_eval.attachments | map(attribute='server_id') | join(', '))
+                  ~ ', not to the instance(s) shown when it was approved; check it again' }}
+                quiet: true
+
+            - name: Remember what is detached
+              ansible.builtin.set_fact:
+                detach_plan: "{{ delete_eval.attachments }}"
+
+            - name: "OpenStack: detach the volume"
+              ansible.builtin.include_tasks: tasks/openstack_cmd.yml
+              vars:
+                os_label: "detach volume {{ volume_id }} from instance {{ att.server_name or att.server_id }} ({{ att.device }})"
+                os_command: "openstack server remove volume {{ att.server_id | quote }} {{ volume_id | quote }}"
+              loop: "{{ detach_plan }}"
+              loop_control:
+                loop_var: att
+
+            - name: "OpenStack: wait for the volume to be detached"
+              ansible.builtin.raw: "{{ director_prefix }} {{ ('source ' ~ overcloudrc ~ ' && openstack volume show ' ~ (volume_id | quote) ~ ' -f json') | quote }}"
+              delegate_to: mgmt
+              register: detach_out
+              changed_when: false
+              until: >-
+                detach_out.rc | default(1) == 0
+                and (detach_out.stdout | extract_json).status | default('') in ['available', 'error', 'error_detaching']
+              retries: "{{ (((cfg.openstack | default({})).attach_wait_seconds | default(300) | int) / 5) | round(0, 'ceil') | int }}"
+              delay: 5
+              failed_when: false
+              ignore_unreachable: true
+
+            - name: Check the volume again after the detach
+              ansible.builtin.include_tasks: tasks/delete_check.yml
+
+            - name: Verify the volume was detached
+              ansible.builtin.assert:
+                that: delete_eval.attachments | length == 0
+                fail_msg: "The volume was not detached, nothing was deleted: {{ delete_eval.summary }}"
+                quiet: true
+
+            - name: Record the detached instances
+              ansible.builtin.set_fact:
+                detached_from: "{{ detach_plan }}"
+
+        - name: Verify the volume can be deleted
+          ansible.builtin.assert:
+            that: delete_eval.can_delete
+            fail_msg: >-
+              {{ ('Instance ' ~ instance_deleted.server_name ~ ' was deleted, but volume ' ~ volume_id ~ ' was not: ')
+                 if instance_deleted is defined else 'Detached, but not deleted: ' if detached_from | default([]) | length > 0
+                 else 'Nothing was deleted: ' }}{{ delete_eval.summary }}
+            quiet: true
+          when: not (check_only | default(false) | bool) and not volume_gone | bool
+
+        - name: "OpenStack: delete volume {{ volume_id }}"
+          ansible.builtin.include_tasks: tasks/openstack_cmd.yml
+          vars:
+            os_label: "delete volume {{ volume_id }} ({{ old_volume.name | default('', true) or 'no name' }})"
+            os_command: "openstack volume delete {{ volume_id | quote }}"
+          when: not (check_only | default(false) | bool) and not volume_gone | bool
+
+        - name: "OpenStack: wait until volume {{ volume_id }} is gone"
+          ansible.builtin.raw: "{{ director_prefix }} {{ ('source ' ~ overcloudrc ~ ' && openstack volume show ' ~ (volume_id | quote) ~ ' -f json') | quote }}"
+          delegate_to: mgmt
+          register: gone_out
+          changed_when: false
+          # "No volume with a name or ID ... exists." (stderr, exit code 1) = deleted.
+          until: >-
+            'No volume with a name or ID' in (gone_out.stdout | default('')) ~ (gone_out.stderr | default(''))
+            or (gone_out.rc | default(1) == 0 and (gone_out.stdout | extract_json).status | default('') in ['error_deleting', 'error'])
+          retries: 60
+          delay: 5
+          failed_when: false
+          ignore_unreachable: true
+          when: not (check_only | default(false) | bool) and not volume_gone | bool
+
+        - name: Verify the volume is deleted
+          ansible.builtin.assert:
+            that: volume_gone | bool or 'No volume with a name or ID' in (gone_out.stdout | default('')) ~ (gone_out.stderr | default(''))
+            fail_msg: >-
+              Volume {{ volume_id }} is not deleted ({{ ('status ' ~ (gone_out.stdout | extract_json).status)
+              if gone_out.rc | default(1) == 0 else ((gone_out.stderr | default('') | trim) or (gone_out.msg | default('')) | truncate(300)) }}).
+              Check it in OpenStack.
+            quiet: true
+          when: not (check_only | default(false) | bool)
+
+        # Cinder (NetApp driver) deletes the LUN; this is confirmed on NetApp.
+        - name: "ONTAP: LUN of volume {{ volume_id }} after the deletion"
+          ansible.builtin.uri:
+            url: "https://{{ cfg.ontap.host }}/api/storage/luns?name=*volume-{{ item }}&fields=name,uuid,svm.name,location.volume.name,space.size,space.used,status.state,status.mapped&max_records=20"
+          loop: "{{ [volume_id, lun_ref_id | default('', true), old_volume | volume_name_id] | select | unique | list }}"
+          register: lun_after
+          failed_when: false
+          # deleted by Nova with the instance: Cinder removes the LUN a little later, so it is looked up again for a minute
+          until: not (deleted_with_instance | default(false) | bool) or lun_after.status | default(0) != 200
+                 or (lun_after.json.records | default([]) | length) == 0
+          retries: "{{ 12 if deleted_with_instance | default(false) | bool else 0 }}"
+          delay: 5
+          when: not (check_only | default(false) | bool) and (not volume_gone | bool or deleted_with_instance | default(false) | bool)
+
+        - name: Deletion result
+          vars:
+            after: >-
+              {{ (lun_after.results | lun_lookup_result('', cfg.ontap.ignore_flexvol_regex | default('', true)))
+                 if not volume_gone | bool or deleted_with_instance | default(false) | bool else {'read': true, 'luns': []} }}
+            gone_instance: >-
+              {{ ('instance ' ~ instance_deleted.server_name ~ ' (' ~ instance_deleted.server_id ~ ') deleted')
+                 if instance_deleted is defined else '' }}
+            detached: >-
+              {{ detached_from | default([]) | map(attribute='server_name') | zip(detached_from | default([]) | map(attribute='device'))
+                 | map('join', ' as ') | join(', ') }}
+            lun_note: >-
+              {{ 'LUN removed from NetApp' if after.read and after.luns | length == 0
+                 else ('LUN ' ~ (after.luns | map(attribute='name') | join(', ')) ~ ' is still in NetApp: check it in ONTAP') if after.read
+                 else 'NetApp could not be checked after the deletion: ' ~ after.error }}
+          ansible.builtin.set_fact:
+            job_result:
+              ok: true
+              mode: delete
+              deleted: true
+              summary: >-
+                {{ ('Instance ' ~ instance_deleted.server_name ~ ' was deleted; Nova deleted volume ' ~ volume_id
+                    ~ ' with it (delete on termination); ' ~ lun_note ~ '.') if deleted_with_instance | default(false) | bool
+                   else ('Volume ' ~ volume_id ~ ' was already deleted in OpenStack and NetApp.') if volume_gone | bool
+                   else ((('Instance ' ~ instance_deleted.server_name ~ ' was deleted, then volume ' ~ volume_id ~ ' was')
+                          if instance_deleted is defined else ('Volume ' ~ volume_id ~ ((' was detached from ' ~ detached ~ ' and')
+                          if detached else ' was'))) ~ ' deleted; ' ~ lun_note ~ '.') }}
+              note: >-
+                {{ (gone_instance ~ '; volume deleted with it (delete on termination); ' ~ lun_note) if deleted_with_instance | default(false) | bool
+                   else 'already deleted in OpenStack and NetApp (outside this portal)' if volume_gone | bool
+                   else ((gone_instance ~ '; ') if gone_instance else '') ~ (('detached from ' ~ detached ~ '; ') if detached else '') ~ lun_note }}
+              lun_left: >-
+                {{ (after.luns | default([]) | map(attribute='name') | list)
+                   if not volume_gone | bool or deleted_with_instance | default(false) | bool else [] }}
+              instance_deleted: "{{ instance_deleted | default({}) }}"
+          when: not (check_only | default(false) | bool)
+
+      rescue:
+        - name: Build failure result
+          ansible.builtin.set_fact:
+            job_result:
+              ok: false
+              mode: "{{ 'check' if check_only | default(false) | bool else 'delete' }}"
+              step: "{{ ansible_failed_task.name | default('') }}"
+              error: "{{ ansible_failed_result.msg | default('no message') }}"
+
+      always:
+        - name: Save result
+          ansible.builtin.import_tasks: tasks/write_result.yml
+
+    - name: End with failed status
+      ansible.builtin.fail:
+        msg: "{{ job_result.error }}"
+      when: not job_result.ok

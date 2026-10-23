@@ -1,0 +1,106 @@
+# Operation Automation: one read-only check from a Knowledge Base work instruction. The same playbook runs every check:
+# wi_analysis decides what to read in each phase (filter wi_reads) and rates what was read (filter wi_analyze).
+# Nothing is changed anywhere: OpenStack commands are limited to list/show (refused otherwise), REST calls are GET
+# with read-only accounts, host commands are fixed read commands.
+#
+# Vars (from the portal): site, check_id, check_params, wi_ctx, rest_access, host_target (host checks), result_file,
+# raw_file (everything read, kept 7 days for the download Raw output).
+# Secrets in the environment only: WI_ONTAP_USER/_PASSWORD, WI_VCENTER_USER/_PASSWORD, WI_NSXT_USER/_PASSWORD,
+# WI_VCD_USER/_PASSWORD, WI_BMC_USER/_PASSWORD (the BMC of a Redfish check).
+- name: "Operation Automation {{ check_id | default('') }}"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    wi_data: {}
+  tasks:
+    - name: troubleshooting check
+      block:
+        - name: Validate input
+          ansible.builtin.assert:
+            that:
+              - sites is defined and site | default('') in sites
+              - check_id | default('') is match('^[a-z0-9-]{1,64}$')
+            fail_msg: "Invalid input: site must be one of {{ (sites | default({})).keys() | list }}, and check_id a troubleshooting check."
+            quiet: true
+
+        - name: Plan of the check
+          ansible.builtin.set_fact:
+            cfg: "{{ sites[site] }}"
+            wi_plan: "{{ check_id | wi_plan }}"
+
+        - name: OpenStack connection (management host -> director)
+          ansible.builtin.include_tasks: tasks/openstack_setup.yml
+          when: "'openstack' in wi_plan.sources or 'undercloud' in wi_plan.sources or 'overcloud' in wi_plan.sources or 'collect' in wi_plan.sources"
+
+        - name: Host connection
+          ansible.builtin.include_tasks: tasks/host_setup.yml
+          when: "'host' in wi_plan.sources or 'device' in wi_plan.sources"
+
+        - name: Read
+          ansible.builtin.include_tasks: tasks/phase.yml
+          loop: "{{ range(1, (wi_plan.phases | int) + 1) | list }}"
+          loop_control:
+            loop_var: phase
+
+        - name: Rate what was read
+          ansible.builtin.set_fact:
+            job_result: "{{ check_id | wi_analyze(wi_data, check_params | default({}), wi_ctx | default({})) }}"
+
+      rescue:
+        - name: Build failure result
+          ansible.builtin.set_fact:
+            job_result:
+              ok: false
+              check: "{{ check_id | default('') }}"
+              status: error
+              step: "{{ ansible_failed_task.name | default('') }}"
+              error: "{{ ansible_failed_result.msg | default('no message') }}"
+
+      always:
+        - name: Close the vCenter session
+          ansible.builtin.uri:
+            url: "{{ rest_access.vcenter.base }}/api/session"
+            method: DELETE
+            headers:
+              vmware-api-session-id: "{{ vcenter_session }}"
+            validate_certs: "{{ rest_access.vcenter.validate_certs | default(false) | bool }}"
+            status_code: [200, 204, 401]
+            timeout: 15
+          failed_when: false
+          when: vcenter_session | default('') | length > 0
+
+        - name: Close the vCloud Director session
+          ansible.builtin.uri:
+            url: "{{ rest_access.vcd.base }}/cloudapi/1.0.0/sessions/current"
+            method: DELETE
+            headers:
+              Authorization: "Bearer {{ vcd_token }}"
+              Accept: "application/json;version={{ rest_access.vcd.api_version | default('37.0') }}"
+            validate_certs: "{{ rest_access.vcd.validate_certs | default(false) | bool }}"
+            status_code: [200, 204, 401]
+            timeout: 15
+          failed_when: false
+          when: vcd_token | default('') | length > 0
+
+        - name: Remove the temporary SSH key files
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop: "{{ [wi_keyfile.path | default(''), wi_jumpkey.path | default('')] | select | list }}"
+
+        - name: Keep what was read (raw output of the run, masked by the portal)
+          ansible.builtin.copy:
+            content: "{{ wi_data | to_json }}"
+            dest: "{{ raw_file }}"
+            mode: "0600"
+          no_log: true
+          failed_when: false
+          when: raw_file | default('') | length > 0
+
+        - name: Save result
+          ansible.builtin.import_tasks: tasks/write_result.yml
+
+    - name: End with failed status
+      ansible.builtin.fail:
+        msg: "{{ job_result.error }}"
+      when: not (job_result.ok | default(false) | bool)

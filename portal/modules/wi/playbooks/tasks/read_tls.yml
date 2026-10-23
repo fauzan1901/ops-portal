@@ -1,0 +1,12 @@
+# The TLS certificate of each configured address (vCenter, NSX-T, vCloud Director, ONTAP, Horizon, BMCs), read from the
+# portal server: a handshake without sign-in (files/tls_cert.py). Addresses come from the site configuration (validated).
+- name: "TLS certificates: {{ wi_reads.tls.values() | join(', ') }}"
+  ansible.builtin.command:
+    argv: "{{ [ansible_playbook_python, playbook_dir ~ '/files/tls_cert.py'] + (wi_reads.tls.values() | list) }}"
+  register: tls_out
+  changed_when: false
+  failed_when: false
+
+- name: "Record: {{ wi_reads.tls.keys() | join(', ') }}"
+  ansible.builtin.set_fact:
+    wi_data: "{{ wi_data | combine(tls_out.stdout | default('') | wi_tls_results(wi_reads.tls)) }}"

@@ -1,0 +1,99 @@
+# The instance the volume is attached to (READ ONLY): flow volume show -> server show -> port, flavor, network.
+# Used for display in the Web UI (Volume and Review steps) and as the basis of a new instance that is exactly the same.
+# All commands here may fail: without instance info the restore still works (only the transfer to the project).
+# Input: os_volume (openstack volume show). Result:
+#   instance          summary of the instance ({} if the volume is not attached or the instance cannot be read)
+#   volume_role_info  {role: boot | extended | detached, device, server_id}
+#   instance_networks {network ID: network show}
+#   target_networks   networks a new instance can use in the target project (network_options; only for a boot volume
+#                     when target_project is known): networks owned by that project (VPC) with their subnets, and shared
+#                     networks
+#   instance_error    reason if the instance is attached but cannot be read
+- name: Instance of the volume
+  ansible.builtin.set_fact:
+    attached_server_id: "{{ (os_volume | volume_attachment)[0] }}"
+    instance: {}
+    instance_networks: {}
+    target_networks: {read: false, networks: []}
+    instance_error: ""
+    volume_role_info: "{{ os_volume | volume_role }}"
+
+- name: Read the instance
+  when: attached_server_id | length > 0
+  block:
+    - name: Instance, its ports and volumes
+      ansible.builtin.include_tasks: openstack_batch.yml
+      vars:
+        osb_label: "instance {{ attached_server_id }}: server, ports, volumes"
+        osb_parallel: true   # only reads
+        osb_commands:
+          - {key: server, cmd: "openstack server show {{ attached_server_id | quote }} -f json", optional: true}
+          - {key: ports, cmd: "openstack port list --server {{ attached_server_id | quote }} --long -f json", optional: true}
+          # Device names of all volumes of the instance (not available in the old OSC: skipped).
+          - {key: volumes, cmd: "openstack server volume list {{ attached_server_id | quote }} -f json", optional: true}
+
+    - name: Save instance, ports and volumes
+      ansible.builtin.set_fact:
+        os_server: "{{ osb.results.server | batch_json({}) }}"
+        os_ports: "{{ osb.results.ports | batch_json([]) }}"
+        os_server_volumes: "{{ osb.results.volumes | batch_json([]) }}"
+        instance_error: >-
+          {{ '' if osb.results.server.ok else ('instance ' ~ attached_server_id ~ ' could not be read: '
+             ~ (osb.results.server.out | trim | truncate(300))) }}
+
+    - name: Flavor, port details and security groups of the instance
+      ansible.builtin.include_tasks: openstack_batch.yml
+      vars:
+        osb_label: "instance {{ attached_server_id }}: flavor, ports, security groups"
+        osb_parallel: true   # only reads
+        osb_commands: >-
+          {{ ([{'key': 'flavor', 'cmd': 'openstack flavor show ' ~ (os_server | flavor_ref | quote) ~ ' -f json', 'optional': true}]
+              if os_server | flavor_ref else [])
+             + (os_ports | port_ids | show_commands('port', 'port:'))
+             + ([{'key': 'groups', 'optional': true,
+                  'cmd': 'openstack security group list --project ' ~ ((os_server.project_id | default(os_server.tenant_id | default(''))) | quote) ~ ' -f json'}]
+                if (os_server.project_id | default(os_server.tenant_id | default(''))) else []) }}
+      when: os_server | length > 0
+
+    - name: Save flavor and port details
+      ansible.builtin.set_fact:
+        os_flavor: "{{ (osb.results.flavor | default({})) | batch_json({}) }}"
+        os_port_details: "{{ osb | batch_objects('port:') }}"
+        os_instance_groups: "{{ (osb.results.groups | default({})) | batch_json([]) }}"
+      when: os_server | length > 0
+
+    # Boot volume: also the networks a new instance can use in the target project (the VPC of that project and shared
+    # networks), so that in Review every network interface can be pointed to a network of the target project.
+    - name: Network commands
+      ansible.builtin.set_fact:
+        read_target_networks: "{{ target_project is defined and volume_role_info.role == 'boot' }}"
+        network_commands: >-
+          {{ (os_port_details.values() | map(attribute='network_id') | select | list | show_commands('network', 'net:'))
+             + ((target_project | target_network_commands) if (target_project is defined and volume_role_info.role == 'boot') else []) }}
+      when: os_server | length > 0
+
+    - name: Networks of the instance and of the target project
+      ansible.builtin.include_tasks: openstack_batch.yml
+      vars:
+        osb_label: "instance {{ attached_server_id }}: networks{{ ', networks of the target project' if read_target_networks | bool else '' }}"
+        osb_parallel: true   # only reads
+        osb_commands: "{{ network_commands }}"
+      when: os_server | length > 0 and network_commands | length > 0
+
+    - name: Save the networks of the instance and of the target project
+      ansible.builtin.set_fact:
+        instance_networks: "{{ osb | batch_objects('net:') }}"
+        target_networks: "{{ (osb | network_options(target_project)) if read_target_networks | bool else {'read': false, 'networks': []} }}"
+      when: os_server | length > 0 and network_commands | length > 0
+
+    - name: Summarize the instance
+      ansible.builtin.set_fact:
+        instance: >-
+          {{ os_server | instance_summary(os_ports, os_port_details, os_flavor, instance_networks, os_volume,
+                                          os_server_volumes, os_instance_groups) }}
+      when: os_server | length > 0
+
+    - name: Role of the volume in the instance
+      ansible.builtin.set_fact:
+        volume_role_info: "{{ os_volume | volume_role(instance) }}"
+      when: os_server | length > 0

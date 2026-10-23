@@ -1,0 +1,67 @@
+# After the restore: attach the new volume to an instance in the target project (Instance ID from the operator), then
+# wait for in-use. The instance is checked again: it must be in the target project and its status must allow taking a
+# volume.
+- name: "OpenStack: instance {{ attach_server_id }}"
+  ansible.builtin.include_tasks: openstack_cmd.yml
+  vars:
+    os_label: "instance {{ attach_server_id }}"
+    os_command: "openstack server show {{ attach_server_id | quote }} -f json"
+
+- name: Save the instance to attach to
+  ansible.builtin.set_fact:
+    attach_server: "{{ os_out.stdout | extract_json }}"
+    attach_server_name: "{{ (os_out.stdout | extract_json).name | default(attach_server_id) }}"
+
+- name: Verify the instance can take the volume
+  ansible.builtin.assert:
+    that:
+      - (attach_server.project_id | default(attach_server.tenant_id | default(''))) == target_project
+      - attach_server.status | default('') | upper in ['ACTIVE', 'SHUTOFF', 'PAUSED', 'SUSPENDED', 'SHELVED', 'SHELVED_OFFLOADED']
+    fail_msg: >-
+      {{ 'Instance ' ~ attach_server_name ~ ' is not in project ' ~ (target_project_info.name | default(target_project))
+         if (attach_server.project_id | default(attach_server.tenant_id | default(''))) != target_project
+         else 'Instance ' ~ attach_server_name ~ ' is ' ~ attach_server.status | default('?') ~ '; a volume cannot be attached now' }}.
+      The new volume {{ new_volume_id }} is in the project, not attached.
+    quiet: true
+
+- name: "OpenStack: attach the volume to instance {{ attach_server_name }}"
+  ansible.builtin.include_tasks: openstack_cmd.yml
+  vars:
+    os_label: "attach volume {{ new_volume_id }} to instance {{ attach_server_id }}"
+    os_command: "{{ project_env }} openstack server add volume {{ attach_server_id | quote }} {{ new_volume_id | quote }}"
+
+- name: "OpenStack: wait for the volume to be attached"
+  ansible.builtin.raw: "{{ director_prefix }} {{ ('source ' ~ overcloudrc ~ ' && openstack volume show ' ~ (new_volume_id | quote) ~ ' -f json') | quote }}"
+  delegate_to: mgmt
+  register: attach_out
+  changed_when: false
+  until: >-
+    attach_out.rc | default(1) == 0
+    and (attach_out.stdout | extract_json).status in ['in-use', 'available', 'error', 'error_attaching']
+  retries: "{{ (((cfg.openstack | default({})).attach_wait_seconds | default(300) | int) / 5) | round(0, 'ceil') | int }}"
+  delay: 5
+  ignore_errors: true
+  ignore_unreachable: true
+
+- name: Verify the volume is attached
+  vars:
+    attached: "{{ (attach_out.stdout | extract_json) if attach_out.rc | default(1) == 0 else {} }}"
+  ansible.builtin.assert:
+    that:
+      - attached.status | default('') == 'in-use'
+      - (attached | volume_attachment)[0] == attach_server_id
+    fail_msg: >-
+      Volume {{ new_volume_id }} was not attached to instance {{ attach_server_name }}
+      ({{ ('status ' ~ attached.status) if attached else (attach_out.stderr | default(attach_out.msg | default('')) | trim) }}).
+      The volume is in the project; attach it manually.
+    quiet: true
+
+- name: Record the attached volume
+  ansible.builtin.set_fact:
+    post_result:
+      action: attach
+      ok: true
+      server_id: "{{ attach_server_id }}"
+      server_name: "{{ attach_server_name }}"
+      device: "{{ ((attach_out.stdout | extract_json) | volume_attachment)[1] }}"
+      original: "{{ attach_server_id == attached_server_id }}"

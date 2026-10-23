@@ -1,0 +1,15 @@
+# Network devices (no shell): one SSH exec per display/show command.
+- name: "{{ host_target.name }} (read-only): {{ item.value }}"
+  ansible.builtin.raw: "{{ (host_prefix ~ ' ' ~ (item.value | quote)) if host_prefix else item.value }}"
+  delegate_to: wi_target
+  loop: "{{ wi_reads.device | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: device_out
+  changed_when: false
+  failed_when: false
+  ignore_unreachable: true
+
+- name: "Record: {{ wi_reads.device.keys() | join(', ') }}"
+  ansible.builtin.set_fact:
+    wi_data: "{{ wi_data | combine(device_out.results | wi_command_results) }}"

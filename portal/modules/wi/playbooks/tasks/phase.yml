@@ -1,0 +1,51 @@
+# One phase of a check: what to read now can depend on what earlier phases found.
+- name: "Phase {{ phase }}: what to read"
+  ansible.builtin.set_fact:
+    wi_reads: "{{ check_id | wi_reads(phase, wi_data, check_params | default({}), wi_ctx | default({})) }}"
+
+- name: "Phase {{ phase }}: OpenStack"
+  ansible.builtin.include_tasks: read_openstack.yml
+  when: wi_reads.openstack | length > 0
+
+- name: "Phase {{ phase }}: undercloud (ironic)"
+  ansible.builtin.include_tasks: read_undercloud.yml
+  when: wi_reads.undercloud | length > 0
+
+- name: "Phase {{ phase }}: overcloud nodes (through the director)"
+  ansible.builtin.include_tasks: read_overcloud.yml
+  when: wi_reads.overcloud | length > 0
+
+- name: "Phase {{ phase }}: log collection (overcloud nodes)"
+  ansible.builtin.include_tasks: collect_files.yml
+  when: wi_reads.collect | length > 0
+
+- name: "Phase {{ phase }}: BMC (Redfish)"
+  ansible.builtin.include_tasks: read_redfish.yml
+  when: wi_reads.redfish | length > 0
+
+- name: "Phase {{ phase }}: REST APIs"
+  ansible.builtin.include_tasks: read_rest.yml
+  loop: [ontap, vcenter, nsxt, vcd]
+  loop_control:
+    loop_var: rest_source
+  when: wi_reads[rest_source] | length > 0
+
+- name: "Phase {{ phase }}: vCenter inventory"
+  ansible.builtin.include_tasks: read_vsphere.yml
+  when: wi_reads.vsphere | length > 0
+
+- name: "Phase {{ phase }}: host"
+  ansible.builtin.include_tasks: read_host.yml
+  when: wi_reads.host | length > 0
+
+- name: "Phase {{ phase }}: network device"
+  ansible.builtin.include_tasks: read_device.yml
+  when: wi_reads.device | length > 0
+
+- name: "Phase {{ phase }}: TLS certificates"
+  ansible.builtin.include_tasks: read_tls.yml
+  when: wi_reads.tls | length > 0
+
+- name: "Phase {{ phase }}: TCP tests"
+  ansible.builtin.include_tasks: probe_tcp.yml
+  when: wi_reads.tcp | length > 0

@@ -1,0 +1,81 @@
+# Sign-in for Ops Portal.
+#   - Administrators: local portal accounts, created on the server (they work before AD/Duo is configured):
+#       sudo /opt/ops-portal/deploy/local-admin.sh add <name>
+#   - Active Directory accounts (operators), one of:
+#       * Duo Authentication Proxy (ldap: with duo_auth_proxy: true): users type their AD account name and password on
+#         the portal; the proxy checks the password in AD and sends the Duo Push. No e-mail address, no LDAPS on the
+#         domain controllers.
+#       * Duo Single Sign-On (sso:): Duo SSO checks the AD password and MFA; users sign in with an e-mail address from a
+#         domain verified in Duo (public DNS TXT record), so this server needs no connection to AD.
+#       * The portal checks the AD password itself (ldap:, needs LDAPS on the domain controllers) with Duo MFA (duo:).
+# Installed at /etc/ops-portal/auth.yml (owner root, group opsportal, mode 640). Changes apply without a restart.
+# Check the setup:
+#   sudo -u opsportal /opt/ops-portal/.venv/bin/python /opt/ops-portal/portal_auth.py check --config /etc/ops-portal/auth.yml
+
+sso:
+  # Duo Admin Panel -> Applications -> Application Catalog -> "Generic OIDC Relying Party" (SSO) -> Add:
+  #   - General tab: grant type Authorization Code; Sign-In Redirect URL = redirect_uri below.
+  #   - Scopes tab: openid, profile, email, plus a custom scope "username" with the claim preferred_username = <Username>.
+  #   - User access: the Duo groups that may use it (the portal's own user list still decides who gets in).
+  #   - Metadata tab: copy Client ID, Client Secret and Issuer here.
+  enabled: false
+  issuer: ""                    # https://sso-xxxxxxxx.sso.duosecurity.com/oidc/DIxxxxxxxxxxxxxxxxxx
+  client_id: ""
+  client_secret: ""
+  # Must be HTTPS with this portal's DNS name, exactly as entered in Duo.
+  redirect_uri: "https://<portal DNS name>:8083/auth/sso/callback"
+  scopes: "openid profile email username"
+  # Claim with the AD account name (sAMAccountName); the portal's user list uses these names.
+  username_claim: "preferred_username"
+  # Web proxy used only for Duo SSO, for example Squid on pfSense (then this server needs no internet DNS).
+  proxy: "http://172.26.0.242:3128"
+  label: "Sign in with Duo SSO"
+
+ldap:
+  # Only when the portal itself checks AD passwords (the password form then also takes AD accounts). Leave url empty
+  # with Duo SSO. Needs LDAPS on the domain controllers; use the host name that is in the DC certificate, for example:
+  #   url: [ldaps://dcbvmadns03.example.internal:636]
+  url: []
+  # How the typed account name is sent to AD: UPN ("{username}@example.internal") or "LCID\\{username}".
+  user_format: "{username}@example.internal"
+  # CA certificate (PEM) that signed the domain controller certificates. Empty = the server's system CAs.
+  ca_file: /etc/ops-portal/ldap-ca.pem
+  verify_tls: true
+  # Only for ldap:// URLs: upgrade the connection with StartTLS (unencrypted binds are refused).
+  start_tls: false
+  # Optional: read the display name and e-mail after sign-in.
+  base_dn: "DC=intranet,DC=acmecorpcloud,DC=id"
+  timeout_seconds: 10
+  # Name in the server certificate when url uses another address, for example the Windows host 172.26.0.100 seen from
+  # WSL (there the host's own name points back to WSL). Empty = the host name in url.
+  tls_name: ""
+  # Duo Authentication Proxy (LDAP proxy, [ldap_server_auto]) instead of a domain controller: url is the proxy's LDAPS
+  # port (ssl_port) with the host name in its certificate, ca_file the CA of that certificate, for example
+  #   url: [ldaps://<proxy host name>:10636]   (proxy on this bastion: ldaps://172.26.0.100:10636 + tls_name)
+  # The proxy checks the AD password and sends the Duo Push before it answers, so the bind waits for the push
+  # (push_timeout_seconds, 30-170; Duo itself waits about 60 seconds). A successful sign-in counts as Duo MFA.
+  duo_auth_proxy: false
+  push_timeout_seconds: 90
+
+duo:
+  # Duo MFA for AD passwords checked by the portal (ldap:) and for local accounts with a Duo username. Not needed with
+  # Duo SSO. Duo Admin Panel -> Applications -> Protect an Application -> "Web SDK": Client ID, Client secret, API hostname.
+  enabled: false
+  client_id: ""
+  client_secret: ""
+  api_host: ""                  # api-xxxxxxxx.duosecurity.com
+  # Must be HTTPS with this portal's DNS name (Duo refuses http:// and IP addresses).
+  redirect_uri: "https://<portal DNS name>:8083/auth/duo/callback"
+  proxy: "http://172.26.0.242:3128"
+  # Duo username for an AD account (as synced to Duo).
+  username_format: "{username}"
+  # closed = no sign-in while Duo is unreachable (recommended); open = password only, and it is logged.
+  fail_mode: closed
+
+# Optional: AD accounts that are always administrators. Usually empty: the local administrators add the AD users
+# (operators or administrators) on the Users page.
+admins: []
+
+session:
+  idle_minutes: 30
+  max_hours: 8

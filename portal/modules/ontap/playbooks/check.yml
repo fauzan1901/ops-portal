@@ -1,0 +1,44 @@
+# Check access to one site WITHOUT changing anything: ONTAP is reachable over HTTPS, SSH to the management host,
+# then to the director, source overcloudrc, and the openstack/cinder CLIs are available.
+#
+#   sudo /opt/ontap_restore/deploy/check-access.sh DCA
+- name: Check site access
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Validate site
+      ansible.builtin.assert:
+        that: sites is defined and site | default('') in sites
+        fail_msg: "Site '{{ site | default('') }}' is not in sites.yml. Choices: {{ (sites | default({})).keys() | list }}"
+        quiet: true
+
+    - name: Site configuration
+      ansible.builtin.import_tasks: tasks/site.yml
+
+    - name: "ONTAP {{ cfg.ontap.host }} is reachable (HTTPS)"
+      ansible.builtin.uri:
+        url: "https://{{ cfg.ontap.host }}/api/cluster"
+        validate_certs: "{{ cfg.ontap.validate_certs | default(false) | bool }}"
+        use_proxy: false
+        timeout: 15
+        status_code: [200, 401]
+
+    - name: overcloudrc on the director
+      ansible.builtin.include_tasks: tasks/openstack_cmd.yml
+      vars:
+        os_label: "management {{ cfg.mgmt.host }} -> director {{ cfg.director.host }} -> source overcloudrc"
+        os_command: openstack token issue -f value -c project_id
+
+    - name: Save admin project
+      ansible.builtin.set_fact:
+        admin_project: "{{ os_out.stdout | trim }}"
+
+    - name: cinder CLI on the director
+      ansible.builtin.include_tasks: tasks/openstack_cmd.yml
+      vars:
+        os_label: cinder --version
+        os_command: cinder --version
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: "Site {{ site }} access OK: ONTAP is reachable, overcloudrc works (admin project {{ admin_project }}), cinder {{ os_out.stdout | trim }}."

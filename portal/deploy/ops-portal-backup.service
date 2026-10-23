@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily backup of the Ops Portal database
+
+[Service]
+Type=oneshot
+User=opsportal
+Group=opsportal
+EnvironmentFile=/etc/ops-portal/ops-portal.env
+ExecStart=/opt/ops-portal/deploy/backup-portal.sh
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ops-portal

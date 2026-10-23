@@ -1,0 +1,750 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="ui-version" content="{{ ui_version }}">
+<title>ACI Web UI</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='3' fill='%230066cc'/%3E%3Cpath d='M16 7v7M9 21v-3h14v3M16 14v4' stroke='white' stroke-width='2.5' fill='none' stroke-linecap='round'/%3E%3Ccircle cx='16' cy='7' r='2.5' fill='white'/%3E%3Ccircle cx='9' cy='23' r='2.5' fill='white'/%3E%3Ccircle cx='23' cy='23' r='2.5' fill='white'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="{{ url_for('aci.static', filename='app.css', v=ui_version) }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='switcher.css') }}">
+</head>
+<body>
+<!-- Inline icons: no internet/CDN needed. -->
+<svg xmlns="http://www.w3.org/2000/svg" class="sprite" aria-hidden="true">
+  <symbol id="i-network" viewBox="0 0 24 24"><circle cx="12" cy="5" r="2.2"/><circle cx="5" cy="19" r="2.2"/><circle cx="19" cy="19" r="2.2"/><path d="M12 7.2V12M5 16.8V14h14v2.8M12 12v2"/></symbol>
+  <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 3v5M15 3v5M6.5 8h11v3a5.5 5.5 0 0 1-11 0V8zM12 16.5V21"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 3.5l9 4.5-9 4.5-9-4.5 9-4.5z"/><path d="M3 12.5l9 4.5 9-4.5"/><path d="M3 16.5l9 4.5 9-4.5"/></symbol>
+  <symbol id="i-table" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M3.5 9.5h17M3.5 14.5h17M9.5 9.5v10"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9.5 7V4.5h5V7M6.5 7l1 13h9l1-13M10 11v5M14 11v5"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5v-3a1 1 0 0 0-1-1h-9a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h3"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7 10.5l5 5 5-5M5 20h14"/></symbol>
+  <symbol id="i-logout" viewBox="0 0 24 24"><path d="M9.5 4.5h-3a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h3M14.5 8l4 4-4 4M18.5 12h-9"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/><path d="M4 4l16 16"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3.8L2.8 19.5h18.4L12 3.8z"/><path d="M12 10v4.2M12 17v.01"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5.5M12 7.8v.01"/></symbol>
+  <symbol id="i-server" viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="6.5" rx="1.5"/><rect x="3.5" y="13.5" width="17" height="6.5" rx="1.5"/><path d="M7 7.25h.01M7 16.75h.01"/></symbol>
+  <symbol id="i-range" viewBox="0 0 24 24"><path d="M4 12h16M4 7.5v9M20 7.5v9M8.5 12v-2M12 12v-2M15.5 12v-2"/></symbol>
+  <symbol id="i-text" viewBox="0 0 24 24"><path d="M5 6h14M5 10h14M5 14h9M5 18h6"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5"/></symbol>
+  <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="M10 7l5 5-5 5"/></symbol>
+  <symbol id="i-sort" viewBox="0 0 24 24"><path d="M8 9.5l4-4 4 4M8 14.5l4 4 4-4"/></symbol>
+  <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M7 18.5h10a4 4 0 0 0 .6-7.96A6 6 0 0 0 6.1 9.6 4.5 4.5 0 0 0 7 18.5z"/></symbol>
+  <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><rect x="9.5" y="9.5" width="5" height="5" rx="1"/><path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3"/></symbol>
+  <symbol id="i-bars" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></symbol>
+  <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 19.5a6.5 6.5 0 0 1 13 0"/><path d="M15.5 4.8a3.5 3.5 0 0 1 0 6.4M18 14.2a6.5 6.5 0 0 1 3.5 5.3"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4.5"/><path d="M11.2 11.8L20 3M16.5 6.5l2.5 2.5M14 9l2 2"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3M19.5 4.5v4h-4"/></symbol>
+  <symbol id="i-bulb" viewBox="0 0 24 24"><path d="M9.5 17.5h5M10.5 20.5h3M12 3.5a6 6 0 0 0-3.6 10.8c.7.5 1.1 1.3 1.1 2.1v1.1h5v-1.1c0-.8.4-1.6 1.1-2.1A6 6 0 0 0 12 3.5z"/></symbol>
+  <symbol id="i-template" viewBox="0 0 24 24"><rect x="4.5" y="3.5" width="15" height="17" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.5 2.6 3.7 5.4 3.7 8.5s-1.2 5.9-3.7 8.5c-2.5-2.6-3.7-5.4-3.7-8.5S9.5 6.1 12 3.5z"/></symbol>
+  <symbol id="i-undo" viewBox="0 0 24 24"><path d="M9 7.5L4.5 12 9 16.5"/><path d="M4.5 12h10a5 5 0 0 1 0 10h-3"/></symbol>
+</svg>
+
+<!-- ======================= APP ======================= -->
+<div class="pf-page" id="appView" hidden>
+  <header class="pf-masthead" id="appbar">
+    <button type="button" class="pf-masthead__toggle" id="navToggle" aria-label="Toggle navigation" aria-expanded="true"><svg class="icon" aria-hidden="true"><use href="#i-bars"></use></svg></button>
+    <div class="pf-brand"><span class="pf-brand__logo"><svg class="icon" aria-hidden="true"><use href="#i-network"></use></svg></span><span><b>ACI</b> Web UI</span></div>
+    <div class="pf-masthead__content">
+      <div class="site-switch" id="siteSwitch" role="radiogroup" aria-label="Target site"></div>
+      <div id="portalLauncher" data-current="aci"></div>
+      <div class="pf-masthead__user user-menu" id="userMenu">
+        <button type="button" class="user-menu__toggle" id="userMenuToggle" aria-haspopup="menu" aria-expanded="false" aria-controls="userMenuList">
+          <span class="avatar" id="userAvatar" aria-hidden="true"></span>
+          <span class="user-menu__text"><span class="user-name" id="userName"></span><span class="user-role" id="userRole"></span></span>
+          <svg class="icon user-menu__caret" aria-hidden="true"><use href="#i-chevron"></use></svg>
+        </button>
+        <div class="user-menu__panel" id="userMenuList" role="menu" aria-label="User menu" hidden>
+          <div class="user-menu__head"><b id="userMenuName"></b><span class="muted" id="userMenuMeta"></span><span class="muted" id="userMenuClient"></span></div>
+          <button type="button" class="user-menu__item" id="logoutBtn" role="menuitem"><svg class="icon" aria-hidden="true"><use href="#i-logout"></use></svg>Sign out</button>
+        </div>
+      </div>
+    </div>
+    <div class="progress" aria-hidden="true"></div>
+  </header>
+
+  <aside class="pf-sidebar" id="sidebar">
+    <nav class="pf-nav" id="tabs" aria-label="Main navigation">
+      <div class="pf-nav__section">Fabric</div>
+      <ul>
+        <li><a class="pf-nav__link" href="#static" data-tab="static"><svg class="icon" aria-hidden="true"><use href="#i-plug"></use></svg>Static Port</a></li>
+        <li><a class="pf-nav__link" href="#templates" data-tab="templates"><svg class="icon" aria-hidden="true"><use href="#i-template"></use></svg>Templates</a></li>
+        <li><a class="pf-nav__link" href="#provision" data-tab="provision"><svg class="icon" aria-hidden="true"><use href="#i-layers"></use></svg>Provisioning</a></li>
+        <li><a class="pf-nav__link" href="#report" data-tab="report"><svg class="icon" aria-hidden="true"><use href="#i-table"></use></svg>Report</a></li>
+        <li><a class="pf-nav__link" href="#ips" data-tab="ips"><svg class="icon" aria-hidden="true"><use href="#i-globe"></use></svg>IP Usage</a></li>
+      </ul>
+      <div class="pf-nav__section">Audit</div>
+      <ul>
+        <li><a class="pf-nav__link" href="#audit" data-tab="audit"><svg class="icon" aria-hidden="true"><use href="#i-clock"></use></svg>History</a></li>
+      </ul>
+      <div class="pf-nav__section" data-admin-only hidden>Administration</div>
+      <ul data-admin-only hidden>
+        <li><a class="pf-nav__link" href="/#/users"><svg class="icon" aria-hidden="true"><use href="#i-users"></use></svg>Users</a></li>
+        <li><a class="pf-nav__link" href="/#/credentials"><svg class="icon" aria-hidden="true"><use href="#i-key"></use></svg>Credentials</a></li>
+      </ul>
+      <div class="pf-nav__sites" id="navSites"></div>
+    </nav>
+  </aside>
+
+  <main class="pf-page__main">
+  <!-- ---------- Static Port ---------- -->
+  <section id="tab-static" class="tabpanel" aria-labelledby="h-static" data-site-page>
+    <div class="pf-page__section pf-m-light">
+      <div class="page-head">
+        <div>
+          <h1 id="h-static">Static port binding</h1>
+          <p>Bind physical, port-channel, FEX, or vPC static paths to an EPG on site <b class="site-name-current"></b>.</p>
+        </div>
+      </div>
+    </div>
+    <div class="pf-page__section site-blocked"></div>
+    <div class="pf-page__section">
+      <section class="card">
+        <div class="card-head">
+          <h2><span class="step">1</span>Target EPG</h2>
+          <button type="button" class="btn btn-ghost btn-sm" id="spExistingBtn" disabled><svg class="icon" aria-hidden="true"><use href="#i-eye"></use></svg>Existing bindings</button>
+        </div>
+        <div class="grid-3">
+          <div class="field"><label for="spTenant">Tenant</label><select id="spTenant"></select></div>
+          <div class="field"><label for="spApp">Application profile</label><select id="spApp"></select></div>
+          <div class="field"><label for="spEpg">EPG</label><select id="spEpg"></select></div>
+        </div>
+        <div class="subpanel" id="spExisting" hidden></div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2><span class="step">2</span>Product</h2>
+          <div class="defaults">
+            <span class="muted" id="productInfo"></span>
+            <button type="button" class="btn btn-ghost btn-sm" id="spTemplatesBtn"><svg class="icon" aria-hidden="true"><use href="#i-template"></use></svg><span id="spTemplatesLabel">View templates</span></button>
+          </div>
+        </div>
+        <div class="product-picker" id="productPicker" role="radiogroup" aria-label="Product"></div>
+        <div class="product-body" id="productBody" hidden>
+          <div class="field">
+            <label for="productVlan">VLAN for all paths</label>
+            <input class="input input-vlan-lg" id="productVlan" inputmode="numeric" placeholder="1-4094" autocomplete="off">
+            <p class="hint" id="productVlanHint"></p>
+            <span class="suggest-anchor"><button type="button" class="btn btn-link-inline btn-suggest" data-suggest="productVlan" aria-expanded="false" aria-controls="vlanSuggest"><svg class="icon" aria-hidden="true"><use href="#i-bulb"></use></svg>Suggest free VLAN</button></span>
+          </div>
+          <div class="field">
+            <span class="field-label">Paths from the <b class="site-name-current"></b> template</span>
+            <div class="template-groups" id="productGroups"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2><span class="step">3</span>Bindings <span class="muted" id="bindingSource"></span></h2>
+          <div class="defaults">
+            <span class="muted">Defaults for new rows</span>
+            <select class="input input-sm" id="spDefMode" aria-label="Default mode for new rows"></select>
+            <select class="input input-sm" id="spDefImm" aria-label="Default immediacy for new rows"></select>
+          </div>
+        </div>
+
+        <div class="subtabs" role="tablist" id="bindingKind" aria-label="Binding type">
+          <button type="button" role="tab" data-kind="physical" aria-selected="true">Physical / Port-Channel <span class="count" id="physicalCount">0</span></button>
+          <button type="button" role="tab" data-kind="paths" aria-selected="false">vPC / Path TDN <span class="count" id="pathsCount">0</span></button>
+        </div>
+
+        <div class="toolbar">
+          <span class="toolbar-label">Add</span>
+          <button type="button" class="btn btn-secondary btn-sm" data-tool="search" aria-expanded="false" aria-controls="tool-search"><svg class="icon" aria-hidden="true"><use href="#i-search"></use></svg>Search APIC</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-tool="range" data-only="physical" aria-expanded="false" aria-controls="tool-range"><svg class="icon" aria-hidden="true"><use href="#i-range"></use></svg>Interface range</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-tool="bulk" aria-expanded="false" aria-controls="tool-bulk"><svg class="icon" aria-hidden="true"><use href="#i-text"></use></svg>Bulk text</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="addRowBtn"><svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>Blank row</button>
+        </div>
+
+        <div class="tool-panel" id="tool-search" hidden>
+          <div class="tool-row">
+            <div class="field grow">
+              <label for="searchQ" id="searchLabel">Search interface / port-channel / FEX</label>
+              <div class="input-affix"><svg class="icon affix-icon" aria-hidden="true"><use href="#i-search"></use></svg><input class="input" id="searchQ"></div>
+            </div>
+            <button type="button" class="btn btn-primary" id="searchBtn">Search</button>
+          </div>
+          <div class="search-head">
+            <label class="check"><input type="checkbox" id="searchAll"> Select all</label>
+            <span class="muted" id="searchInfo"></span>
+          </div>
+          <div class="checklist" id="searchResults"></div>
+          <div class="tool-row">
+            <div class="field"><label for="searchVlan">VLAN</label><input class="input input-vlan" id="searchVlan" inputmode="numeric" placeholder="1-4094"></div>
+            <span class="suggest-anchor"><button type="button" class="btn btn-ghost btn-suggest" data-suggest="searchVlan" aria-expanded="false" aria-controls="vlanSuggest"><svg class="icon" aria-hidden="true"><use href="#i-bulb"></use></svg>Suggest free VLAN</button></span>
+            <button type="button" class="btn btn-primary" id="searchAdd" disabled><svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg><span id="searchAddLabel">Add</span></button>
+          </div>
+          <p class="hint" id="searchVlanHint" aria-live="polite"></p>
+        </div>
+
+        <div class="tool-panel" id="tool-range" hidden>
+          <div class="tool-row">
+            <div class="field"><label for="rgPod">Pod</label><input class="input input-xs" id="rgPod" value="1" inputmode="numeric"></div>
+            <div class="field"><label for="rgNode">Node</label><input class="input input-xs" id="rgNode" inputmode="numeric" placeholder="106"></div>
+            <div class="field"><label for="rgFrom">From interface</label><input class="input" id="rgFrom" placeholder="eth1/17"></div>
+            <div class="field"><label for="rgTo">To interface</label><input class="input" id="rgTo" placeholder="eth1/35"></div>
+            <div class="field"><label for="rgVlan">VLAN</label><input class="input input-vlan" id="rgVlan" inputmode="numeric" placeholder="1-4094"></div>
+            <span class="suggest-anchor"><button type="button" class="btn btn-ghost btn-suggest" data-suggest="rgVlan" aria-expanded="false" aria-controls="vlanSuggest"><svg class="icon" aria-hidden="true"><use href="#i-bulb"></use></svg>Suggest free VLAN</button></span>
+            <button type="button" class="btn btn-primary" id="rgAdd" disabled><svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>Add</button>
+          </div>
+          <p class="hint" id="rgPreview" aria-live="polite"></p>
+        </div>
+
+        <div class="tool-panel" id="tool-bulk" hidden>
+          <div class="field">
+            <label for="bulkText">One binding per line</label>
+            <textarea class="input mono" id="bulkText" rows="6" spellcheck="false"></textarea>
+            <p class="hint" id="bulkHint"></p>
+          </div>
+          <div id="bulkWarnings"></div>
+          <div class="tool-row">
+            <button type="button" class="btn btn-primary" id="bulkAdd">Add to table</button>
+            <button type="button" class="btn btn-ghost" id="bulkCopy"><svg class="icon" aria-hidden="true"><use href="#i-copy"></use></svg>Copy table as text</button>
+          </div>
+        </div>
+
+        <div id="spVlanNotice" aria-live="polite"></div>
+        <div class="table-wrap">
+          <table class="table table-edit" id="physicalTable">
+            <thead><tr><th class="row-num">#</th><th class="col-xs">Pod</th><th class="col-sm">Node</th><th>Interface / PC</th><th class="col-sm">VLAN</th><th class="col-md">Mode</th><th class="col-md">Immediacy</th><th class="col-act"><span class="sr-only">Actions</span></th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <table class="table table-edit" id="pathsTable" hidden>
+            <thead><tr><th class="row-num">#</th><th>Path TDN</th><th class="col-sm">VLAN</th><th class="col-md">Mode</th><th class="col-md">Immediacy</th><th class="col-act"><span class="sr-only">Actions</span></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="card-foot">
+          <span class="muted" id="bindingHint">Fields in red need fixing; hover over a field to see why.</span>
+          <button type="button" class="btn btn-ghost btn-sm text-danger" id="clearRows"><svg class="icon" aria-hidden="true"><use href="#i-trash"></use></svg>Remove all rows</button>
+        </div>
+      </section>
+    </div>
+    <div class="actionbar">
+      <div class="actionbar-context">
+        <span class="site-tag"><span class="site-dot"></span><span class="site-name-current"></span></span>
+        <span class="context" id="spContext"></span>
+        <span class="context-count" id="spCount"></span>
+      </div>
+      <div class="actionbar-buttons">
+        <button type="button" class="btn btn-primary btn-lg" id="spReviewBtn" disabled>Review &amp; apply</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ---------- Product templates ---------- -->
+  <section id="tab-templates" class="tabpanel" aria-labelledby="h-templates" data-site-page hidden>
+    <div class="pf-page__section pf-m-light">
+      <div class="page-head">
+        <div>
+          <h1 id="h-templates">Product templates</h1>
+          <p>The paths a product fills in on Static Port for site <b class="site-name-current"></b>. Changing a template never changes anything on APIC.</p>
+        </div>
+        <div class="page-actions" data-tp-edit>
+          <button type="button" class="btn btn-secondary" id="tpNewProduct"><svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>New product</button>
+        </div>
+      </div>
+    </div>
+    <div class="pf-page__section site-blocked"></div>
+    <div class="pf-page__section">
+      <div id="tpNotice"></div>
+      <section class="card">
+        <div class="card-head">
+          <h2><span class="step">1</span>Product</h2>
+          <div class="defaults">
+            <span class="muted" id="tpProductInfo"></span>
+            <button type="button" class="btn btn-ghost btn-sm" id="tpSettingsBtn" hidden><svg class="icon" aria-hidden="true"><use href="#i-edit"></use></svg>Product settings</button>
+          </div>
+        </div>
+        <div class="product-picker" id="tpPicker" role="radiogroup" aria-label="Product"></div>
+      </section>
+
+      <section class="card" id="tpEditor" hidden>
+        <div class="card-head">
+          <h2><span class="step">2</span>Groups</h2>
+          <span class="muted">Groups selected by default are ticked when the product is picked; the others are optional.</span>
+        </div>
+        <div class="table-wrap">
+          <table class="table table-edit" id="tpGroupsTable">
+            <thead><tr><th class="row-num">#</th><th>Group name</th><th class="col-md">On Static Port</th><th class="col-sm">Paths</th><th class="col-act"><span class="sr-only">Actions</span></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="card-foot" data-tp-edit>
+          <button type="button" class="btn btn-secondary btn-sm" id="tpAddGroup"><svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>Add group</button>
+        </div>
+      </section>
+
+      <section class="card" id="tpPathsCard" hidden>
+        <div class="card-head">
+          <h2><span class="step">3</span>Paths</h2>
+          <div class="defaults" data-tp-edit>
+            <span class="muted">Group for new rows</span>
+            <select class="input input-sm" id="tpDefGroup" aria-label="Group for new rows"></select>
+          </div>
+        </div>
+
+        <div class="subtabs" role="tablist" id="tpKind" aria-label="Path type">
+          <button type="button" role="tab" data-kind="physical" aria-selected="true">Physical / Port-Channel <span class="count" id="tpPhysicalCount">0</span></button>
+          <button type="button" role="tab" data-kind="paths" aria-selected="false">vPC / Path TDN <span class="count" id="tpPathsCount">0</span></button>
+        </div>
+
+        <div class="toolbar" data-tp-edit>
+          <span class="toolbar-label">Add</span>
+          <button type="button" class="btn btn-secondary btn-sm" data-tp-tool="search" aria-expanded="false" aria-controls="tp-tool-search"><svg class="icon" aria-hidden="true"><use href="#i-search"></use></svg>Search APIC</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-tp-tool="range" data-tp-only="physical" aria-expanded="false" aria-controls="tp-tool-range"><svg class="icon" aria-hidden="true"><use href="#i-range"></use></svg>Interface range</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-tp-tool="bulk" aria-expanded="false" aria-controls="tp-tool-bulk"><svg class="icon" aria-hidden="true"><use href="#i-text"></use></svg>Bulk text</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="tpAddRow"><svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>Blank row</button>
+        </div>
+
+        <div class="tool-panel" id="tp-tool-search" hidden>
+          <div class="tool-row">
+            <div class="field grow">
+              <label for="tpSearchQ" id="tpSearchLabel">Search interface / port-channel / FEX</label>
+              <div class="input-affix"><svg class="icon affix-icon" aria-hidden="true"><use href="#i-search"></use></svg><input class="input" id="tpSearchQ"></div>
+            </div>
+            <button type="button" class="btn btn-primary" id="tpSearchBtn">Search</button>
+          </div>
+          <div class="search-head">
+            <label class="check"><input type="checkbox" id="tpSearchAll"> Select all</label>
+            <span class="muted" id="tpSearchInfo"></span>
+          </div>
+          <div class="checklist" id="tpSearchResults"></div>
+          <div class="tool-row">
+            <button type="button" class="btn btn-primary" id="tpSearchAdd" disabled><svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg><span id="tpSearchAddLabel">Add</span></button>
+          </div>
+        </div>
+
+        <div class="tool-panel" id="tp-tool-range" hidden>
+          <div class="tool-row">
+            <div class="field"><label for="tpRgPod">Pod</label><input class="input input-xs" id="tpRgPod" value="1" inputmode="numeric"></div>
+            <div class="field"><label for="tpRgNode">Node</label><input class="input input-xs" id="tpRgNode" inputmode="numeric" placeholder="118"></div>
+            <div class="field"><label for="tpRgFrom">From interface</label><input class="input" id="tpRgFrom" placeholder="eth1/17"></div>
+            <div class="field"><label for="tpRgTo">To interface</label><input class="input" id="tpRgTo" placeholder="eth1/24"></div>
+            <button type="button" class="btn btn-primary" id="tpRgAdd" disabled><svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>Add</button>
+          </div>
+          <p class="hint" id="tpRgPreview" aria-live="polite"></p>
+        </div>
+
+        <div class="tool-panel" id="tp-tool-bulk" hidden>
+          <div class="field">
+            <label for="tpBulkText">One path per line</label>
+            <textarea class="input mono" id="tpBulkText" rows="6" spellcheck="false"></textarea>
+            <p class="hint" id="tpBulkHint"></p>
+          </div>
+          <div id="tpBulkWarnings"></div>
+          <div class="tool-row">
+            <button type="button" class="btn btn-primary" id="tpBulkAdd">Add to table</button>
+            <button type="button" class="btn btn-ghost" id="tpBulkCopy"><svg class="icon" aria-hidden="true"><use href="#i-copy"></use></svg>Copy table as text</button>
+          </div>
+        </div>
+
+        <div id="tpApicNotice" aria-live="polite"></div>
+        <div class="table-wrap">
+          <table class="table table-edit" id="tpPhysicalTable">
+            <thead><tr><th class="row-num">#</th><th class="col-group">Group</th><th class="col-xs">Pod</th><th class="col-sm">Node</th><th>Interface / PC</th><th class="col-sm">APIC</th><th class="col-act"><span class="sr-only">Actions</span></th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <table class="table table-edit" id="tpPathsTable" hidden>
+            <thead><tr><th class="row-num">#</th><th class="col-group">Group</th><th>Path TDN</th><th class="col-sm">APIC</th><th class="col-act"><span class="sr-only">Actions</span></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="card-foot">
+          <span class="muted">Fields in red need fixing; hover over a field to see why. Paths added to a template must exist in the <b class="site-name-current"></b> fabric.</span>
+          <button type="button" class="btn btn-ghost btn-sm text-danger" id="tpClearRows" data-tp-edit><svg class="icon" aria-hidden="true"><use href="#i-trash"></use></svg>Remove all rows</button>
+        </div>
+      </section>
+    </div>
+    <div class="actionbar">
+      <div class="actionbar-context">
+        <span class="site-tag"><span class="site-dot"></span><span class="site-name-current"></span></span>
+        <span class="context" id="tpContext"></span>
+        <span class="context-count" id="tpCount"></span>
+      </div>
+      <div class="actionbar-buttons" data-tp-edit>
+        <button type="button" class="btn btn-ghost" id="tpResetBtn" hidden>Reset to default…</button>
+        <button type="button" class="btn btn-ghost" id="tpDiscardBtn" disabled>Discard changes</button>
+        <button type="button" class="btn btn-primary btn-lg" id="tpReviewBtn" disabled>Review &amp; save</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ---------- Provisioning ---------- -->
+  <section id="tab-provision" class="tabpanel" aria-labelledby="h-provision" data-site-page hidden>
+    <div class="pf-page__section pf-m-light">
+      <div class="page-head">
+        <div>
+          <h1 id="h-provision">Provisioning</h1>
+          <p>Create or reuse a tenant, VRF, bridge domain, application profile, EPG, and domains on site <b class="site-name-current"></b> in a single transaction.</p>
+        </div>
+      </div>
+    </div>
+    <div class="pf-page__section site-blocked"></div>
+    <div class="pf-page__section">
+      <div class="alert alert-warning"><svg class="icon" aria-hidden="true"><use href="#i-alert"></use></svg><div><b>This changes live ACI policy.</b> All changes are shown on the Review screen before they are sent to APIC.</div></div>
+      <section class="card">
+        <div class="card-head">
+          <h2><span class="step">1</span>Tenant</h2>
+          <div class="segmented" role="radiogroup" aria-label="Tenant mode">
+            <label><input type="radio" name="pvTenantMode" value="existing" checked><span>Use existing</span></label>
+            <label><input type="radio" name="pvTenantMode" value="new"><span>Create new</span></label>
+          </div>
+        </div>
+        <div class="grid-3">
+          <div class="field" data-when="pvTenantMode=existing"><label for="pvTenant">Tenant</label><select id="pvTenant"></select></div>
+          <div class="field" data-when="pvTenantMode=new"><label for="pvTenantNew">New tenant name</label><input class="input" id="pvTenantNew" maxlength="64" placeholder="e.g. CUST-ACME" autocomplete="off"></div>
+          <div class="field" data-when="pvTenantMode=new"><label for="pvTenantDescr">Description <span class="optional">optional</span></label><input class="input" id="pvTenantDescr" maxlength="128" autocomplete="off"></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2><span class="step">2</span>VRF</h2>
+          <div class="segmented" role="radiogroup" aria-label="VRF mode">
+            <label><input type="radio" name="pvVrfMode" value="existing" checked><span>Use existing</span></label>
+            <label><input type="radio" name="pvVrfMode" value="new"><span>Create new</span></label>
+            <label><input type="radio" name="pvVrfMode" value="none"><span>No VRF</span></label>
+          </div>
+        </div>
+        <div class="grid-3">
+          <div class="field" data-when="pvVrfMode=existing"><label for="pvVrf">VRF</label><select id="pvVrf"></select></div>
+          <div class="field" data-when="pvVrfMode=new"><label for="pvVrfNew">New VRF name</label><input class="input" id="pvVrfNew" maxlength="64" autocomplete="off"></div>
+          <div class="field" data-when="pvVrfMode=new"><label for="pvVrfDescr">Description <span class="optional">optional</span></label><input class="input" id="pvVrfDescr" maxlength="128" autocomplete="off"></div>
+          <p class="hint span-all" data-when="pvVrfMode=none">The VRF is only used by a new bridge domain. Without a VRF, a new BD raises a fault until a VRF is set.</p>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2><span class="step">3</span>Bridge domain</h2>
+          <div class="segmented" role="radiogroup" aria-label="Bridge domain mode">
+            <label><input type="radio" name="pvBdMode" value="new" checked><span>Create new</span></label>
+            <label><input type="radio" name="pvBdMode" value="existing"><span>Use existing</span></label>
+            <label><input type="radio" name="pvBdMode" value="none"><span>No BD</span></label>
+          </div>
+        </div>
+        <div class="grid-3">
+          <div class="field" data-when="pvBdMode=existing"><label for="pvBd">Bridge domain</label><select id="pvBd"></select></div>
+          <div class="field" data-when="pvBdMode=new"><label for="pvBdNew">New BD name</label><input class="input" id="pvBdNew" maxlength="64" placeholder="e.g. acme-flex-186-bd" autocomplete="off"></div>
+          <div class="field" data-when="pvBdMode=new"><label for="pvBdDescr">Description <span class="optional">optional</span></label><input class="input" id="pvBdDescr" maxlength="128" autocomplete="off"></div>
+          <div class="field" data-when="pvBdMode=new">
+            <span class="field-label" id="pvUnkLabel">L2 Unknown Unicast</span>
+            <div class="segmented" role="radiogroup" aria-labelledby="pvUnkLabel">
+              <label><input type="radio" name="pvUnk" value="proxy" checked><span>Hardware Proxy</span></label>
+              <label><input type="radio" name="pvUnk" value="flood"><span>Flood</span></label>
+            </div>
+          </div>
+          <div class="field" data-when="pvBdMode=new">
+            <span class="field-label">ARP flooding</span>
+            <label class="switch"><input type="checkbox" id="pvArp"><span class="switch-track" aria-hidden="true"></span><span>Enable ARP flooding</span></label>
+          </div>
+        </div>
+        <div class="grid-2" data-when="pvBdMode=new">
+          <div class="field">
+            <span class="field-label">Subnet / gateway</span>
+            <div class="subnets" id="pvSubnets"></div>
+            <div><button type="button" class="btn btn-secondary btn-sm" id="pvSubnetAdd"><svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>Add subnet</button></div>
+          </div>
+          <div class="field">
+            <span class="field-label">Associated L3Out</span>
+            <div class="checklist" id="pvL3outs"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2><span class="step">4</span>Application profile &amp; EPG</h2>
+          <div class="segmented" role="radiogroup" aria-label="Application profile mode">
+            <label><input type="radio" name="pvAppMode" value="existing" checked><span>Use existing</span></label>
+            <label><input type="radio" name="pvAppMode" value="new"><span>Create new</span></label>
+          </div>
+        </div>
+        <div class="grid-3">
+          <div class="field" data-when="pvAppMode=existing"><label for="pvApp">Application profile</label><select id="pvApp"></select></div>
+          <div class="field" data-when="pvAppMode=new"><label for="pvAppNew">New application profile name</label><input class="input" id="pvAppNew" maxlength="64" autocomplete="off"></div>
+          <div class="field" data-when="pvAppMode=new"><label for="pvAppDescr">Application profile description <span class="optional">optional</span></label><input class="input" id="pvAppDescr" maxlength="128" autocomplete="off"></div>
+        </div>
+        <div class="grid-3">
+          <div class="field"><label for="pvEpg">EPG name</label><input class="input" id="pvEpg" maxlength="64" placeholder="e.g. acme-flex-186-epg" autocomplete="off"></div>
+          <div class="field"><label for="pvEpgDescr">EPG description <span class="optional">optional</span></label><input class="input" id="pvEpgDescr" maxlength="128" autocomplete="off"></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><h2><span class="step">5</span>Domains (VM &amp; bare metal)</h2></div>
+        <div class="grid-2">
+          <div class="field">
+            <span class="field-label">Physical / VMM domains</span>
+            <div class="checklist checklist-tall" id="pvDomains"></div>
+          </div>
+          <div class="stack">
+            <div class="field">
+              <span class="field-label" id="pvDeployLabel">Deployment immediacy</span>
+              <div class="segmented" role="radiogroup" aria-labelledby="pvDeployLabel">
+                <label><input type="radio" name="pvDeploy" value="immediate" checked><span>Immediate</span></label>
+                <label><input type="radio" name="pvDeploy" value="lazy"><span>On Demand</span></label>
+              </div>
+            </div>
+            <div class="field">
+              <span class="field-label" id="pvResolveLabel">Resolution immediacy</span>
+              <div class="segmented" role="radiogroup" aria-labelledby="pvResolveLabel">
+                <label><input type="radio" name="pvResolve" value="immediate" checked><span>Immediate</span></label>
+                <label><input type="radio" name="pvResolve" value="lazy"><span>On Demand</span></label>
+                <label><input type="radio" name="pvResolve" value="pre-provision"><span>Pre-provision</span></label>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+    <div class="actionbar">
+      <div class="actionbar-context">
+        <span class="site-tag"><span class="site-dot"></span><span class="site-name-current"></span></span>
+        <span class="context" id="pvContext"></span>
+      </div>
+      <div class="actionbar-buttons">
+        <button type="button" class="btn btn-ghost" id="pvResetBtn">Clear form</button>
+        <button type="button" class="btn btn-primary btn-lg" id="pvReviewBtn" disabled>Review &amp; apply</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ---------- Report ---------- -->
+  <section id="tab-report" class="tabpanel" aria-labelledby="h-report" data-site-page hidden>
+    <div class="pf-page__section pf-m-light">
+      <div class="page-head">
+        <div>
+          <h1 id="h-report">Static port report</h1>
+          <p>All static bindings on site <b class="site-name-current"></b>. Leave a filter empty to include everything.</p>
+        </div>
+        <div class="page-actions">
+          <button type="button" class="btn btn-secondary" data-export="xlsx"><svg class="icon" aria-hidden="true"><use href="#i-download"></use></svg>Export Excel</button>
+          <button type="button" class="btn btn-secondary" data-export="csv"><svg class="icon" aria-hidden="true"><use href="#i-download"></use></svg>Export CSV</button>
+        </div>
+      </div>
+    </div>
+    <div class="pf-page__section site-blocked"></div>
+    <div class="pf-page__section">
+      <section class="card">
+        <div class="report-filters">
+          <div class="field"><label for="rpTenant">Tenant</label><select id="rpTenant"></select></div>
+          <div class="field"><label for="rpApp">Application profile</label><select id="rpApp"></select></div>
+          <div class="field"><label for="rpEpg">EPG</label><select id="rpEpg"></select></div>
+          <button type="button" class="btn btn-primary" id="rpShowBtn"><svg class="icon" aria-hidden="true"><use href="#i-search"></use></svg>Show</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="kpis" id="rpKpis" role="group" aria-label="Filter by binding type"></div>
+        <div class="report-tools">
+          <div class="input-affix grow"><svg class="icon affix-icon" aria-hidden="true"><use href="#i-search"></use></svg><input class="input" id="rpSearch" placeholder="Search tenant, EPG, VLAN, interface…" aria-label="Search report results"></div>
+          <select class="input input-auto" id="rpSource" aria-label="Filter by source (portal or outside the portal)"></select>
+          <span class="muted" id="rpShown" aria-live="polite"></span>
+        </div>
+        <div class="table-wrap table-scroll">
+          <table class="table table-data" id="rpTable">
+            <thead><tr>
+              <th aria-sort="none"><button type="button" class="th-sort" data-sort="Tenant">Tenant</button></th>
+              <th aria-sort="none"><button type="button" class="th-sort" data-sort="Application Profile">App profile</button></th>
+              <th aria-sort="none"><button type="button" class="th-sort" data-sort="EPG">EPG</button></th>
+              <th aria-sort="none"><button type="button" class="th-sort" data-sort="VLAN">VLAN</button></th>
+              <th aria-sort="none"><button type="button" class="th-sort" data-sort="Binding Type">Type</button></th>
+              <th aria-sort="none"><button type="button" class="th-sort" data-sort="Node(s)">Node</button></th>
+              <th aria-sort="none"><button type="button" class="th-sort" data-sort="Interface / Policy Group">Interface / PG</button></th>
+              <th aria-sort="none"><button type="button" class="th-sort" data-sort="Mode">Mode</button></th>
+              <th aria-sort="none"><button type="button" class="th-sort" data-sort="Deployment Immediacy">Immediacy</button></th>
+              <th aria-sort="none"><button type="button" class="th-sort" data-sort="Source">Source</button></th>
+              <th aria-sort="none"><button type="button" class="th-sort" data-sort="Last Changed (APIC)">Last changed (APIC)</button></th>
+              <th aria-sort="none"><button type="button" class="th-sort" data-sort="Path TDN">Path TDN</button></th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </section>
+
+  <!-- ---------- IP usage ---------- -->
+  <section id="tab-ips" class="tabpanel" aria-labelledby="h-ips" data-site-page hidden>
+    <div class="pf-page__section pf-m-light">
+      <div class="page-head">
+        <div>
+          <h1 id="h-ips">IP address usage</h1>
+          <p>Endpoint IPs learned on the EPGs of site <b class="site-name-current"></b> (Client Endpoints on APIC) and the free addresses of their subnets. Read-only.</p>
+        </div>
+        <div class="page-actions">
+          <button type="button" class="btn btn-secondary" id="ipExportBtn"><svg class="icon" aria-hidden="true"><use href="#i-download"></use></svg>Export CSV</button>
+        </div>
+      </div>
+    </div>
+    <div class="pf-page__section site-blocked"></div>
+    <div class="pf-page__section">
+      <section class="card">
+        <div class="report-filters">
+          <div class="field"><label for="ipTenant">Tenant</label><select id="ipTenant"></select></div>
+          <div class="field"><label for="ipApp">Application profile</label><select id="ipApp"></select></div>
+          <div class="field"><label for="ipEpg">EPG</label><select id="ipEpg"></select></div>
+          <button type="button" class="btn btn-primary" id="ipShowBtn"><svg class="icon" aria-hidden="true"><use href="#i-search"></use></svg>Show</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="kpis" id="ipKpis"></div>
+        <div class="report-tools">
+          <div class="input-affix grow"><svg class="icon affix-icon" aria-hidden="true"><use href="#i-search"></use></svg><input class="input" id="ipSearch" placeholder="Search EPG, subnet, IP, MAC…" aria-label="Search IP usage"></div>
+          <select class="input input-auto" id="ipScope" aria-label="Filter by address scope"><option value="public">Public addresses</option><option value="">All addresses</option></select>
+          <label class="check"><input type="checkbox" id="ipLearnedOnly" checked> Only subnets with learned IPs</label>
+          <span class="muted" id="ipShown" aria-live="polite"></span>
+        </div>
+        <div class="table-wrap table-scroll">
+          <table class="table table-data table-click" id="ipTable">
+            <thead><tr><th>Tenant / App profile</th><th>EPG</th><th>Subnet / Gateway</th><th>Learned</th><th>Free</th><th>Suggested free IPs</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="card-foot">
+          <span class="muted" id="ipFoot">Click a row (or press Enter) to see its learned IPs and every free address. Click a suggested IP to copy it.</span>
+        </div>
+      </section>
+    </div>
+  </section>
+
+  <!-- ---------- Change history (audit) ---------- -->
+  <section id="tab-audit" class="tabpanel" aria-labelledby="h-audit" hidden>
+    <div class="pf-page__section pf-m-light">
+      <div class="page-head">
+        <div>
+          <h1 id="h-audit">Change history</h1>
+          <p>Every change made through this Web UI, by all users on all sites. Each change is recorded before it is sent to APIC; product template changes never reach APIC.</p>
+        </div>
+        <div class="page-actions">
+          <button type="button" class="btn btn-secondary" id="auExportBtn"><svg class="icon" aria-hidden="true"><use href="#i-download"></use></svg>Export CSV</button>
+        </div>
+      </div>
+    </div>
+    <div class="pf-page__section">
+      <section class="card">
+        <div class="audit-filters">
+          <div class="field"><label for="auUser">User</label><select id="auUser"></select></div>
+          <div class="field"><label for="auSite">Site</label><select class="input" id="auSite"></select></div>
+          <div class="field"><label for="auAction">Action</label><select class="input" id="auAction"><option value="">All actions</option><option value="static-port">Static Port</option><option value="provisioning">Provisioning</option><option value="template">Product template</option></select></div>
+          <div class="field"><label for="auStatus">Status</label><select class="input" id="auStatus"><option value="">All statuses</option><option value="success">Successful</option><option value="failed">Failed</option><option value="unknown">Unknown</option><option value="pending">Incomplete</option></select></div>
+          <div class="field"><label for="auSince">From date</label><input class="input" type="date" id="auSince"></div>
+          <div class="field"><label for="auUntil">To date</label><input class="input" type="date" id="auUntil"></div>
+        </div>
+        <div class="report-tools">
+          <div class="input-affix grow"><svg class="icon affix-icon" aria-hidden="true"><use href="#i-search"></use></svg><input class="input" id="auQ" maxlength="100" placeholder="Search EPG, tenant, product, user…" aria-label="Search history"></div>
+          <span class="muted" id="auShown" aria-live="polite"></span>
+        </div>
+        <div class="table-wrap table-scroll">
+          <table class="table table-data table-click" id="auTable">
+            <thead><tr><th>Time</th><th>Status</th><th>User</th><th>Site</th><th>Action</th><th>Product</th><th>Target</th><th>Summary</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="card-foot">
+          <span class="muted">Click a row (or press Enter) to see the paths or steps that were sent or changed, or to undo a static-port change.</span>
+          <button type="button" class="btn btn-secondary btn-sm" id="auMoreBtn" hidden>Load more</button>
+        </div>
+      </section>
+    </div>
+  </section>
+
+  <!-- ---------- No access (signed in, but this account may not use ACI) ---------- -->
+  <section id="tab-noaccess" class="tabpanel" aria-labelledby="h-noaccess" hidden>
+    <div class="pf-page__section">
+      <div class="empty"><svg class="icon" aria-hidden="true"><use href="#i-key"></use></svg><div><b id="h-noaccess">No access to ACI</b>
+        <p>Your account cannot use ACI. Ask an administrator to give it on the Users page.</p>
+        <p><a href="/">Go to the portal home</a></p></div></div>
+    </div>
+  </section>
+  </main>
+</div>
+
+<dialog class="modal" id="reviewDialog" aria-labelledby="reviewTitle">
+  <div class="modal-head">
+    <h2 id="reviewTitle">Review</h2>
+    <button type="button" class="btn-icon" id="reviewClose" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+  </div>
+  <div class="modal-body" id="reviewBody"></div>
+  <div class="modal-foot">
+    <button type="button" class="btn btn-primary" id="reviewConfirm"><span id="reviewConfirmLabel">Apply</span></button>
+    <button type="button" class="btn btn-ghost" id="reviewCancel">Cancel</button>
+  </div>
+</dialog>
+
+<dialog class="modal" id="auditDialog" aria-labelledby="auditTitle">
+  <div class="modal-head">
+    <h2 id="auditTitle">Change details</h2>
+    <button type="button" class="btn-icon" id="auditClose" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+  </div>
+  <div class="modal-body" id="auditBody"></div>
+</dialog>
+
+<dialog class="modal" id="ipDialog" aria-labelledby="ipDialogTitle">
+  <div class="modal-head">
+    <h2 id="ipDialogTitle">IP usage</h2>
+    <button type="button" class="btn-icon" id="ipDialogClose" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+  </div>
+  <div class="modal-body" id="ipDialogBody"></div>
+</dialog>
+
+<dialog class="modal modal-sm" id="confirmDialog" aria-labelledby="confirmTitle">
+  <div class="modal-head">
+    <h2 id="confirmTitle">Confirm</h2>
+  </div>
+  <div class="modal-body" id="confirmBody"></div>
+  <div class="modal-foot">
+    <button type="button" class="btn btn-primary" id="confirmOk">OK</button>
+    <button type="button" class="btn btn-ghost" id="confirmCancel">Cancel</button>
+  </div>
+</dialog>
+
+<dialog class="modal modal-sm" id="productDialog" aria-labelledby="productDialogTitle">
+  <form class="modal-form" id="productForm" novalidate>
+    <div class="modal-head">
+      <h2 id="productDialogTitle">New product</h2>
+      <button type="button" class="btn-icon" data-close aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="alert alert-danger" id="productFormError" role="alert" hidden></div>
+      <div class="field">
+        <label for="pdLabel">Product name <span class="required" aria-hidden="true">*</span></label>
+        <input class="input" id="pdLabel" maxlength="40" autocomplete="off" placeholder="e.g. Acme GPU">
+      </div>
+      <div class="field">
+        <label for="pdPlatform">Platform <span class="optional">optional</span></label>
+        <input class="input" id="pdPlatform" maxlength="40" autocomplete="off" placeholder="e.g. Bare metal">
+      </div>
+      <div class="grid-2">
+        <div class="field"><label for="pdMode">Mode</label><select class="input" id="pdMode"></select></div>
+        <div class="field"><label for="pdImm">Immediacy</label><select class="input" id="pdImm"></select></div>
+      </div>
+      <p class="hint" id="pdHint">The product is added to every site with an empty template; add its paths per site.</p>
+    </div>
+    <div class="modal-foot">
+      <button type="submit" class="btn btn-primary" id="pdSave">Add product</button>
+      <button type="button" class="btn btn-ghost" data-close>Cancel</button>
+      <button type="button" class="btn btn-ghost text-danger toolbar-end" id="pdDelete" hidden><svg class="icon" aria-hidden="true"><use href="#i-trash"></use></svg>Delete product…</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<script src="{{ url_for('static', filename='switcher.js') }}"></script>
+<script src="{{ url_for('aci.static', filename='app.js', v=ui_version) }}"></script>
+</body>
+</html>

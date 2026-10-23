@@ -1,0 +1,20 @@
+# One REST call to ONTAP. Input: call_path, call_method (default GET), call_body, call_timeout.
+# Result in ontap_resp; fails with a clear ONTAP error message if the status is not 2xx.
+- name: "ONTAP {{ call_method | default('GET') }} {{ call_path | regex_replace('[?].*$', '') }}"
+  ansible.builtin.uri:
+    url: "https://{{ cfg.ontap.host }}{{ call_path }}"
+    method: "{{ call_method | default('GET') }}"
+    body: "{{ call_body | default(omit) }}"
+    body_format: "{{ 'json' if call_body is defined else omit }}"
+    timeout: "{{ call_timeout | default(60) }}"
+  register: ontap_resp
+  failed_when: false
+
+- name: Check ONTAP response
+  ansible.builtin.assert:
+    that: ontap_resp.status | default(-1) in [200, 201, 202]
+    fail_msg: >-
+      ONTAP {{ call_method | default('GET') }} {{ call_path | regex_replace('[?].*$', '') }} failed
+      (HTTP {{ ontap_resp.status | default('-') }}):
+      {{ ((ontap_resp.json | default({})).error | default({})).message | default(ontap_resp.msg | default('no message')) }}
+    quiet: true

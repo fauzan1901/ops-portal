@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Run #{{ item.id }} · {{ item.check_title }} · {{ item.site }}</title>
+<style>
+  /* Printable report of one run (Print -> Save as PDF): always light, A4, the portal's PatternFly look in print. */
+  @page { size: A4; margin: 14mm 12mm 16mm; }
+  :root { --text: #151515; --muted: #4f5255; --border: #d2d2d2; --head: #f0f0f0; --blue: #0066cc; --red: #c9190b;
+          --red-bg: #faeae8; --gold: #795600; --gold-bg: #fdf7e7; --green: #3e8635; --green-bg: #f3faf2; --grey-bg: #f0f0f0; }
+  * { box-sizing: border-box; }
+  html, body { background: #fff; color: var(--text); }
+  body { margin: 0; font: 12px/1.45 "Red Hat Text", "RedHatText", "Overpass", "Helvetica Neue", Arial, sans-serif; }
+  .rp { max-width: 190mm; margin: 0 auto; padding: 16px; }
+  .rp-bar { display: flex; justify-content: space-between; align-items: center; border-bottom: 3px solid var(--blue);
+            padding-bottom: 8px; margin-bottom: 12px; }
+  .rp-brand { font-size: 13px; } .rp-brand b { font-weight: 700; }
+  .rp-run { color: var(--muted); }
+  h1 { font-size: 20px; margin: 4px 0 8px; font-weight: 500; }
+  h2 { font-size: 15px; margin: 18px 0 8px; padding-bottom: 4px; border-bottom: 1px solid var(--border); font-weight: 600; }
+  h3 { font-size: 13px; margin: 0 0 4px; font-weight: 600; }
+  .rp-meta { display: grid; grid-template-columns: 120px 1fr; gap: 3px 12px; margin: 0 0 10px; }
+  .rp-meta dt { color: var(--muted); } .rp-meta dd { margin: 0; word-break: break-word; }
+  .rp-summary { padding: 8px 10px; background: var(--grey-bg); border-left: 3px solid var(--muted); margin: 8px 0 0; }
+  .label { display: inline-block; padding: 1px 8px; border-radius: 30em; font-size: 11px; font-weight: 600; white-space: nowrap; }
+  .st-fail, .st-error { color: var(--red); background: var(--red-bg); } .st-warn { color: var(--gold); background: var(--gold-bg); }
+  .st-ok { color: var(--green); background: var(--green-bg); } .st-skip, .st-info, .st-unknown { color: var(--muted); background: var(--grey-bg); }
+  .rp-step, .rp-rec { break-inside: avoid-page; margin: 0 0 12px; }
+  .rp-step h3 .label, .rp-rec h3 .num { margin-right: 6px; }
+  .rp-detail, .rp-body { color: var(--muted); margin: 0 0 6px; }
+  table { width: 100%; border-collapse: collapse; margin: 4px 0 6px; font-size: 11px; }
+  th, td { border: 1px solid var(--border); padding: 3px 6px; text-align: left; vertical-align: top; word-break: break-word; }
+  th { background: var(--head); font-weight: 600; }
+  thead { display: table-header-group; } tr { break-inside: avoid; }
+  .more { color: var(--muted); font-size: 11px; }
+  .num { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--border); font-size: 11px; }
+  .where { font-size: 11px; color: var(--blue); margin: 4px 0; }
+  pre { margin: 4px 0; padding: 6px 8px; background: #f5f5f5; border: 1px solid var(--border); font: 10.5px/1.4 "Red Hat Mono", Menlo, Consolas, monospace;
+        white-space: pre-wrap; word-break: break-all; }
+  .warn-box { font-size: 11px; padding: 5px 8px; border-left: 3px solid #f0ab00; background: var(--gold-bg); color: var(--gold); margin: 4px 0; }
+  .refs { font-size: 11px; margin: 4px 0 0; } .refs a { color: var(--blue); } .refs .url { color: var(--muted); word-break: break-all; }
+  .rp-foot { margin-top: 20px; padding-top: 6px; border-top: 1px solid var(--border); color: var(--muted); font-size: 10.5px; }
+  .rp-actions { position: sticky; top: 0; background: #fff; padding: 8px 0; margin-bottom: 8px; display: flex; gap: 8px; }
+  .btn { font: inherit; padding: 6px 14px; border-radius: 3px; border: 1px solid var(--blue); background: var(--blue); color: #fff; cursor: pointer; }
+  .btn.secondary { background: #fff; color: var(--blue); }
+  @media print { .no-print { display: none !important; } .rp { padding: 0; max-width: none; } a { color: var(--text); text-decoration: none; } }
+</style>
+</head>
+<body>
+<main class="rp">
+  <div class="rp-actions no-print">
+    <button type="button" class="btn" id="printBtn">Print / Save as PDF</button>
+    <a class="btn secondary" href="/wi/#/runs/{{ item.id }}">Back to the run</a>
+  </div>
+  <div class="rp-bar">
+    <span class="rp-brand"><b>Operation</b> Automation · Ops Portal</span>
+    <span class="rp-run">Run #{{ item.id }}</span>
+  </div>
+  <h1>{{ item.check_title }}</h1>
+  <dl class="rp-meta">
+    <dt>Status</dt><dd><span class="label st-{{ item.status }}">{{ words.get(item.status, item.status) }}</span></dd>
+    <dt>Site</dt><dd>{{ item.site }}</dd>
+    {% if item.host %}<dt>Host</dt><dd>{{ item.host }}</dd>{% endif %}
+    <dt>Parameters</dt><dd>{% for k, v in (item.params or {}).items() %}{{ k }} = {{ v }}{% if not loop.last %}; {% endif %}{% else %}-{% endfor %}</dd>
+    <dt>Started</dt><dd>{{ item.ts }}</dd>
+    <dt>Finished</dt><dd>{{ item.finished or '-' }}</dd>
+    <dt>Launched by</dt><dd>{{ item.username }}</dd>
+    {% if wi %}<dt>Work instruction</dt><dd>{% for w in wi %}{{ w.title }}{% if not loop.last %}; {% endif %}{% endfor %}</dd>{% endif %}
+  </dl>
+  {% if res.summary or item.error %}<p class="rp-summary">{{ res.summary or item.error }}</p>{% endif %}
+
+  {% if res.steps %}
+  <h2>Result per step</h2>
+  {% for s in res.steps %}
+  <div class="rp-step">
+    <h3><span class="label st-{{ s.status }}">{{ words.get(s.status, s.status) }}</span>{{ s.title }}</h3>
+    {% if s.detail %}<p class="rp-detail">{{ s.detail }}</p>{% endif %}
+    {% if s.table and s.table.rows %}
+    <table>
+      <thead><tr>{% for c in s.table.columns %}<th>{{ c }}</th>{% endfor %}</tr></thead>
+      <tbody>{% for row in s.table.rows %}<tr>{% for v in row %}<td>{{ v }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+    </table>
+    {% if s.table.more %}<p class="more">{{ s.table.more }} more row(s) not shown.</p>{% endif %}
+    {% endif %}
+  </div>
+  {% endfor %}
+  {% endif %}
+
+  {% if res.recommendations %}
+  <h2>How to fix it</h2>
+  {% for r in res.recommendations %}
+  {% set parts = r.text.split('. ', 1) %}
+  <div class="rp-rec">
+    <h3><span class="num">{{ loop.index }}</span>{{ parts[0] }}{% if parts|length > 1 %}.{% endif %}</h3>
+    {% if parts|length > 1 %}<p class="rp-body">{{ parts[1] }}</p>{% endif %}
+    {% if r['items'] and r['items'].rows %}
+    <table>
+      <thead><tr>{% for c in r['items'].columns %}<th>{{ c }}</th>{% endfor %}</tr></thead>
+      <tbody>{% for row in r['items'].rows %}<tr>{% for v in row %}<td>{{ v }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+    </table>
+    {% endif %}
+    {% if r.where %}<p class="where">Run on: {{ r.where }}</p>{% endif %}
+    {% if r.commands %}<pre>{{ r.commands | join('\n') }}</pre>{% endif %}
+    {% if r.warning %}<div class="warn-box">{{ r.warning }}</div>{% endif %}
+    {% if r.references %}
+    <div class="refs">Vendor reference:
+      {% for f in r.references %}<div><a href="{{ f.url }}">{{ f.vendor }} — {{ f.title }}</a> <span class="url">{{ f.url }}</span></div>{% endfor %}
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+  {% endif %}
+
+  <p class="rp-foot">Printed by {{ printed_by }} on {{ printed }} from Operation Automation (Ops Portal). Read-only check: the values
+    above are what the portal read at the time of the run.</p>
+</main>
+<script>
+  document.getElementById('printBtn').addEventListener('click', () => window.print());
+  {% if auto_print %}window.addEventListener('load', () => setTimeout(() => window.print(), 300));{% endif %}
+</script>
+</body>
+</html>

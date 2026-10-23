@@ -1,0 +1,55 @@
+# State of the old volume in OpenStack and its LUN in NetApp (READ ONLY), for the Approvals menu and checked again right
+# before the volume is deleted. Input: volume_id, expect_project, lun_ref_id / lun_path (from the restore, optional).
+# Result: old_volume, volume_gone, delete_eval (filter deletion_checks: checks, can_delete, can_detach, gone, orphan).
+- name: Volume and its snapshots
+  ansible.builtin.include_tasks: openstack_batch.yml
+  vars:
+    osb_label: "volume {{ volume_id }} and its snapshots"
+    osb_commands:
+      - {key: volume, cmd: "openstack volume show {{ volume_id | quote }} -f json", optional: true}
+      - {key: snapshots, cmd: "openstack volume snapshot list --all-projects --volume {{ volume_id | quote }} -f json", optional: true}
+
+- name: Save the volume
+  ansible.builtin.set_fact:
+    old_volume: "{{ osb.results.volume | batch_json({}) }}"
+    volume_gone: "{{ not osb.results.volume.ok and 'No volume with a name or ID' in osb.results.volume.out }}"
+    volume_error: >-
+      {{ '' if osb.results.volume.ok or 'No volume with a name or ID' in osb.results.volume.out
+         else (osb.results.volume.out | trim | truncate(300)) or 'no answer' }}
+    old_snapshots: "{{ osb.results.snapshots | batch_json([]) }}"
+    snapshots_read: "{{ osb.results.snapshots.ok }}"
+    old_servers: {}
+
+# Compute API 2.3: volumes_attached with delete_on_termination and the root device name (boot disk of the instance).
+- name: Instances the volume is attached to
+  ansible.builtin.include_tasks: openstack_batch.yml
+  vars:
+    osb_label: "instances of volume {{ volume_id }}"
+    osb_commands: "{{ old_volume | attachment_server_ids | show_commands('--os-compute-api-version 2.3 server', 'srv:') }}"
+  when: old_volume | attachment_server_ids | length > 0
+
+- name: Save the instances
+  ansible.builtin.set_fact:
+    old_servers: "{{ osb | batch_objects('srv:') }}"
+  when: old_volume | attachment_server_ids | length > 0
+
+# NetApp: LUN volume-<ID>, volume-<name_id at restore time> and volume-<name_id now>; copies in a clone/reclaimed FlexVol
+# are ignored. The question is whether the LUN still exists (it may already be deleted through OpenStack by the team that
+# did the restore).
+- name: "ONTAP: LUN of volume {{ volume_id }}"
+  ansible.builtin.uri:
+    url: "https://{{ cfg.ontap.host }}/api/storage/luns?name=*volume-{{ item }}&fields=name,uuid,svm.name,location.volume.name,space.size,space.used,status.state,status.mapped&max_records=20"
+  loop: "{{ [volume_id, lun_ref_id | default('', true), old_volume | volume_name_id] | select | unique | list }}"
+  register: lun_lookup
+  failed_when: false
+
+- name: Evaluate the volume and its LUN
+  vars:
+    pool: >-
+      {{ (old_volume['os-vol-host-attr:host'] | default('')).split('#') | last
+         if old_volume['os-vol-host-attr:host'] | default('') else (lun_path | default('', true)).split('/')[2] | default('') }}
+  ansible.builtin.set_fact:
+    delete_eval: >-
+      {{ old_volume | deletion_checks(expect_project, volume_gone | bool, volume_error, old_snapshots, snapshots_read | bool,
+                                      old_volume | deletion_attachments(old_servers, keep_volume_id | default(''), expect_project),
+                                      lun_lookup.results | lun_lookup_result(pool, cfg.ontap.ignore_flexvol_regex | default('', true))) }}

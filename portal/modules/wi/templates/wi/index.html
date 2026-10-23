@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="ui-version" content="{{ ui_version }}">
+<title>Operation Automation</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='3' fill='%230066cc'/%3E%3Crect x='9' y='7' width='14' height='18' rx='1.5' stroke='white' stroke-width='2' fill='none'/%3E%3Cpath d='M12 13l2 2 3-3M12 19l2 2 3-3' stroke='white' stroke-width='2' fill='none'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/portal.css">
+<link rel="stylesheet" href="/static/switcher.css">
+<link rel="stylesheet" href="{{ url_for('wi.static', filename='wi.css', v=ui_version) }}">
+</head>
+<body>
+{% include "_sprite.html" %}
+
+<div class="pf-page" id="appView" hidden>
+  <header class="pf-masthead">
+    <button type="button" class="pf-masthead__toggle" id="navToggle" aria-label="Toggle navigation" aria-expanded="true"><svg class="pf-icon" aria-hidden="true"><use href="#i-bars"></use></svg></button>
+    <div class="pf-masthead__brand"><span class="pf-masthead__logo"><svg class="pf-icon" aria-hidden="true"><use href="#i-checklist"></use></svg></span><span><b>Operation</b> Automation</span></div>
+    <div class="pf-masthead__content">
+      <div class="pf-toggle-group pf-m-dark" id="siteSwitch" role="radiogroup" aria-label="Site"></div>
+      <div id="portalLauncher" data-current="wi"></div>
+      <div class="pf-masthead__user" id="userMenuWrap">
+        <button type="button" class="pf-user-toggle" id="userToggle" aria-haspopup="menu" aria-expanded="false" aria-controls="userMenu">
+          <span class="pf-avatar" id="userAvatar" aria-hidden="true"></span>
+          <span class="pf-user-toggle__name" id="userName"></span>
+          <span class="pf-label pf-m-compact" id="userRole"></span>
+          <svg class="pf-icon" aria-hidden="true"><use href="#i-caret-down"></use></svg>
+        </button>
+        <div class="pf-menu" id="userMenu" role="menu" aria-labelledby="userToggle" hidden>
+          <div class="pf-menu__header">
+            <b id="userMenuName"></b>
+            <span class="mono pf-text-secondary" id="userMenuLogin"></span>
+            <span class="pf-text-secondary pf-text-sm" id="userMenuMfa"></span>
+            <span class="pf-text-secondary pf-text-sm" id="userMenuClient"></span>
+          </div>
+          <button type="button" class="pf-menu__item" role="menuitem" id="logoutBtn"><svg class="pf-icon" aria-hidden="true"><use href="#i-sign-out"></use></svg>Sign out</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <aside class="pf-sidebar" id="sidebar">
+    <nav class="pf-nav" aria-label="Navigation">
+      <div class="pf-nav__section">Checks</div>
+      <ul>
+        <li><a class="pf-nav__link" href="#/checks" data-route="checks"><svg class="pf-icon" aria-hidden="true"><use href="#i-home"></use></svg>All products</a></li>
+      </ul>
+      <div class="pf-nav__section">Products</div>
+      <ul class="pf-nav__list" id="navProducts"></ul>
+      <div class="pf-nav__section">History</div>
+      <ul>
+        <li><a class="pf-nav__link" href="#/runs" data-route="runs"><svg class="pf-icon" aria-hidden="true"><use href="#i-list"></use></svg>Runs</a></li>
+      </ul>
+      <div class="pf-nav__section admin-only" hidden>Administration</div>
+      <ul class="admin-only" hidden>
+        <li><a class="pf-nav__link" href="#/hosts" data-route="hosts"><svg class="pf-icon" aria-hidden="true"><use href="#i-server"></use></svg>Hosts &amp; SSH</a></li>
+        <li><a class="pf-nav__link" href="#/bmc" data-route="bmc"><svg class="pf-icon" aria-hidden="true"><use href="#i-cubes"></use></svg>BMC</a></li>
+        <li><a class="pf-nav__link" href="/#/users"><svg class="pf-icon" aria-hidden="true"><use href="#i-users"></use></svg>Users</a></li>
+        <li><a class="pf-nav__link" href="/#/credentials"><svg class="pf-icon" aria-hidden="true"><use href="#i-key"></use></svg>Credentials</a></li>
+      </ul>
+      <div class="pf-nav__sites" id="navSites"></div>
+    </nav>
+  </aside>
+
+  <main class="pf-page__main">
+    <!-- ---------- Fixes running now (on every page: a fix keeps running on the portal server when its page is closed) ---------- -->
+    <section class="pf-page__section wi-running" id="wiRunning" hidden aria-live="polite"></section>
+    <!-- ---------- No access ---------- -->
+    <div id="page-noaccess" data-page="noaccess" hidden>
+      <section class="pf-page__section">
+        <div class="pf-card"><div class="pf-empty-state"><svg class="pf-icon" aria-hidden="true"><use href="#i-lock"></use></svg>
+          <h2 class="pf-title">No access to Operation Automation</h2>
+          <span>Your account cannot use this module. Ask an administrator to give it on the Users page.</span>
+          <a class="pf-btn pf-m-primary" href="/#/home">Back to the portal</a></div></div>
+      </section>
+    </div>
+
+    <!-- ---------- All products (overview) ---------- -->
+    <div id="page-checks" data-page="checks" hidden>
+      <section class="pf-page__section pf-m-light">
+        <h1 class="pf-title">Checks by product</h1>
+        <p>Choose a product to see its problems and work instructions, on site <b class="site-name-current"></b>. Every check reads with read-only accounts and changes nothing. The fix is shown as commands with the values found; on hosts of Hosts &amp; SSH that allow it, and on ONTAP, an allowed operator can run it from the result.</p>
+        <div class="ov-search">
+          <input class="pf-form-control pf-m-search" id="ovQ" maxlength="100" placeholder="Search every product: an alert name, a problem or a WI title" aria-label="Search every product">
+        </div>
+      </section>
+      <section class="pf-page__section">
+        <div class="pf-card" id="ovResults" hidden>
+          <div class="pf-card__header"><h2 class="pf-card__title">Search results</h2><span class="pf-card__actions" id="ovShown"></span></div>
+          <div class="pf-table-wrap">
+            <table class="pf-table" aria-label="Search results">
+              <thead><tr><th>Check</th><th>Work instruction</th><th>Reads</th><th>Status</th><th><span class="sr-only">Actions</span></th></tr></thead>
+              <tbody id="ovList"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="pf-l-gallery" id="ovProducts"></div>
+      </section>
+    </div>
+
+    <!-- ---------- One product: its problems and work instructions ---------- -->
+    <div id="page-product" data-page="product" hidden>
+      <section class="pf-page__section pf-m-light">
+        <nav class="pf-breadcrumb" aria-label="Breadcrumb"><a href="#/checks">All products</a><svg class="pf-icon" aria-hidden="true"><use href="#i-angle-right"></use></svg><span id="pdCrumb"></span></nav>
+        <div class="pf-title-row"><span class="pf-card__icon" id="pdIcon"></span><h1 class="pf-title" id="pdTitle"></h1></div>
+        <p id="pdSummary"></p>
+      </section>
+      <section class="pf-page__section">
+        <div class="pf-card">
+          <div class="pf-toolbar">
+            <input class="pf-form-control pf-m-search" id="ckQ" maxlength="100" placeholder="Search a problem, an alert name or a WI title" aria-label="Search checks of this product">
+            <div class="pf-toggle-group pf-m-compact" id="ckStatus" role="radiogroup" aria-label="Status">
+              <label><input type="radio" name="ckStatus" value="" checked><span>All</span></label>
+              <label><input type="radio" name="ckStatus" value="ready"><span>Ready</span></label>
+              <label><input type="radio" name="ckStatus" value="planned"><span>Planned</span></label>
+              <label><input type="radio" name="ckStatus" value="manual"><span>Manual / module</span></label>
+            </div>
+            <span class="pf-toolbar__spacer" id="ckShown"></span>
+          </div>
+          <div class="pf-table-wrap">
+            <table class="pf-table" aria-label="Checks of this product">
+              <thead><tr><th>Problem</th><th>Work instruction</th><th>Reads</th><th>Status</th><th><span class="sr-only">Actions</span></th></tr></thead>
+              <tbody id="ckList"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ---------- Launch a check ---------- -->
+    <div id="page-launch" data-page="launch" hidden>
+      <section class="pf-page__section pf-m-light">
+        <nav class="pf-breadcrumb" aria-label="Breadcrumb"><a href="#/checks">All products</a><svg class="pf-icon" aria-hidden="true"><use href="#i-angle-right"></use></svg><a id="lnProduct" href="#/checks"></a><svg class="pf-icon" aria-hidden="true"><use href="#i-angle-right"></use></svg><span id="lnCrumb"></span></nav>
+        <div class="pf-title-row"><h1 class="pf-title" id="lnTitle"></h1><span id="lnStatus"></span></div>
+        <p id="lnSummary"></p>
+      </section>
+      <section class="pf-page__section">
+        <div id="lnNotice"></div>
+        <div class="pf-grid">
+          <div class="pf-card">
+            <div class="pf-card__header"><h2 class="pf-card__title">Run on site <span class="site-name-current"></span></h2></div>
+            <form class="pf-card__body" id="lnForm" novalidate autocomplete="off">
+              <div class="site-banner" id="lnSite"></div>
+              <div id="lnParams"></div>
+              <div class="wi-actions">
+                <button type="submit" class="pf-btn pf-m-primary" id="lnRun"><svg class="pf-icon" aria-hidden="true"><use href="#i-play"></use></svg>Run check</button>
+                <a class="pf-btn pf-m-link" href="#/checks" id="lnCancel">Cancel</a>
+                <span class="pf-helper-text" id="lnHint">Read-only: nothing is changed.</span>
+              </div>
+            </form>
+          </div>
+          <div class="pf-card">
+            <div class="pf-card__header"><h2 class="pf-card__title">What is checked</h2></div>
+            <div class="pf-card__body" id="lnAbout"></div>
+          </div>
+        </div>
+        <div class="pf-card" id="lnTopoCard" hidden>
+          <div class="pf-card__header"><h2 class="pf-card__title">Where it reads</h2><span class="pf-card__actions">From the portal to the system that is checked, on site <span class="site-name-current"></span>.</span></div>
+          <div class="pf-card__body" id="lnTopo"></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ---------- Runs ---------- -->
+    <div id="page-runs" data-page="runs" hidden>
+      <section class="pf-page__section pf-m-light">
+        <h1 class="pf-title">Runs</h1>
+        <p>Every check by every user and site, recorded before it runs, with its result and the full Ansible output.</p>
+      </section>
+      <section class="pf-page__section">
+        <div class="pf-card">
+          <div class="pf-toolbar">
+            <input class="pf-form-control pf-m-search" id="rnQ" maxlength="100" placeholder="Search check, host, parameter, summary" aria-label="Search runs">
+            <select class="pf-form-control" id="rnUser" aria-label="User"><option value="">All users</option></select>
+            <select class="pf-form-control" id="rnSite" aria-label="Site"><option value="">All sites</option></select>
+            <select class="pf-form-control" id="rnStatus" aria-label="Status">
+              <option value="">All results</option><option value="fail">Problem found</option><option value="warn">Warning</option>
+              <option value="ok">OK</option><option value="error">Could not run</option><option value="running">Running</option>
+              <option value="fix-running">Fix running</option>
+            </select>
+            <span class="pf-toolbar__spacer" id="rnShown"></span>
+            <button type="button" class="pf-btn pf-m-secondary pf-m-small" id="rnExportBtn">Export CSV</button>
+          </div>
+          <div class="pf-table-wrap">
+            <table class="pf-table" aria-label="Runs">
+              <thead><tr><th>ID</th><th>Check</th><th>Result</th><th>Fix</th><th>Site</th><th>Target</th><th>User</th><th>Started</th><th>Duration</th></tr></thead>
+              <tbody id="rnList"></tbody>
+            </table>
+          </div>
+          <div class="pf-toolbar" id="rnMore" hidden><button type="button" class="pf-btn pf-m-link" id="rnMoreBtn">Load more</button></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ---------- One run ---------- -->
+    <div id="page-run" data-page="run" hidden>
+      <section class="pf-page__section pf-m-light">
+        <nav class="pf-breadcrumb" aria-label="Breadcrumb"><a href="#/runs">Runs</a><svg class="pf-icon" aria-hidden="true"><use href="#i-angle-right"></use></svg><a id="runProduct" href="#/checks" hidden></a><svg class="pf-icon" aria-hidden="true" id="runProductSep" hidden><use href="#i-angle-right"></use></svg><span id="runCrumb"></span></nav>
+        <div class="pf-title-row"><h1 class="pf-title" id="runTitle"></h1><span id="runStatus"></span>
+          <span class="wi-title-actions">
+            <button type="button" class="pf-btn pf-m-secondary pf-m-small" id="runAgainBtn" hidden><svg class="pf-icon" aria-hidden="true"><use href="#i-refresh"></use></svg>Run again</button>
+            <button type="button" class="pf-btn pf-m-secondary pf-m-small" id="runNoteBtn" hidden><svg class="pf-icon" aria-hidden="true"><use href="#i-copy"></use></svg>Copy ticket note</button>
+            <button type="button" class="pf-btn pf-m-secondary pf-m-small" id="runCsvBtn" hidden>Export CSV</button>
+            <button type="button" class="pf-btn pf-m-secondary pf-m-small" id="runPdfBtn" hidden>Export PDF</button>
+            <button type="button" class="pf-btn pf-m-secondary pf-m-small" id="runRawBtn" hidden title="Every command the check ran and its full output, the Ansible log and the full output of the fixes (secrets masked)"><svg class="pf-icon" aria-hidden="true"><use href="#i-download"></use></svg>Raw output (.zip)</button>
+            <a class="pf-btn pf-m-primary pf-m-small" id="runBundleBtn" hidden download><svg class="pf-icon" aria-hidden="true"><use href="#i-download"></use></svg><span>Download log bundle</span></a>
+          </span>
+        </div>
+      </section>
+      <section class="pf-page__section">
+        <div id="runOutcome"></div>
+        <div class="pf-card" id="runTopoCard" hidden>
+          <div class="pf-card__header"><h2 class="pf-card__title">Where it was checked</h2><span class="pf-card__actions">Hover a system for the steps read there.</span></div>
+          <div class="pf-card__body" id="runTopo"></div>
+        </div>
+        <div class="pf-card" id="runRecsCard" hidden>
+          <div class="pf-card__header"><h2 class="pf-card__title">How to fix it</h2><span class="pf-card__actions pf-text-secondary">Commands for this run, with the values found.</span></div>
+          <div class="pf-card__body"><div id="runElsewhere"></div><div id="runRecs"></div></div>
+        </div>
+        <div class="pf-card" id="runScreensCard" hidden>
+          <div class="pf-card__header"><h2 class="pf-card__title">Where to look</h2><span class="pf-card__actions pf-text-secondary">The screens with the values of this run; the numbers mark what the check found.</span></div>
+          <div class="pf-card__body" id="runScreens"></div>
+        </div>
+        <div class="pf-grid">
+          <div class="pf-card">
+            <div class="pf-card__header"><h2 class="pf-card__title">Result per step</h2><span class="pf-card__actions" id="runElapsed"></span></div>
+            <div class="pf-card__body"><ol class="wi-steps" id="runSteps"></ol></div>
+          </div>
+          <div>
+            <div class="pf-card">
+              <div class="pf-card__header"><h2 class="pf-card__title">Details</h2></div>
+              <div class="pf-card__body" id="runDetail"></div>
+            </div>
+          </div>
+        </div>
+        <div class="pf-card">
+          <div class="pf-card__header"><h2 class="pf-card__title">Output</h2><span class="pf-card__actions" id="runLines"></span></div>
+          <div class="pf-card__body"><div class="pf-log" id="runLog" role="log" aria-label="Ansible output"></div></div>
+        </div>
+      </section>
+    </div>
+    <!-- ---------- Hosts & SSH (administrators) ---------- -->
+    <div id="page-hosts" data-page="hosts" hidden>
+      <section class="pf-page__section pf-m-light">
+        <h1 class="pf-title">Hosts &amp; SSH</h1>
+        <p>The VMs and devices the checks read over SSH, per site and product group, and the SSH credentials they use. A credential
+          that may run fixes lets the button <b>Run this fix</b> run the commands of a check result on its hosts; the others only read.
+          Hosts of sites.yml stay read-only. Keys and passwords are stored encrypted and never shown again (a key is shown by
+          its fingerprint, as <code>ssh-keygen -l</code> prints it). A VM without an address the portal server reaches is added
+          <b>behind</b> a host it does reach (jump host): use <b>Add hosts behind</b> on that host.</p>
+      </section>
+      <section class="pf-page__section">
+        <div id="hsNotice"></div>
+        <div class="pf-card">
+          <div class="pf-card__header"><h2 class="pf-card__title">SSH credentials</h2>
+            <span class="pf-card__actions"><button type="button" class="pf-btn pf-m-primary pf-m-small" id="hsCredAdd"><svg class="pf-icon" aria-hidden="true"><use href="#i-plus"></use></svg>Add credential</button></span></div>
+          <div class="pf-table-wrap">
+            <table class="pf-table" aria-label="SSH credentials">
+              <thead><tr><th>Name</th><th>User</th><th>Sign-in</th><th>Root</th><th>Fixes</th><th>Hosts</th><th>Changed</th><th><span class="sr-only">Actions</span></th></tr></thead>
+              <tbody id="hsCreds"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="pf-card">
+          <div class="pf-toolbar">
+            <h2 class="pf-card__title">Hosts</h2>
+            <select class="pf-form-control" id="hsSite" aria-label="Site"><option value="">All sites</option></select>
+            <select class="pf-form-control" id="hsGroup" aria-label="Product group"><option value="">All groups</option></select>
+            <input class="pf-form-control pf-m-search" id="hsQ" maxlength="100" placeholder="Search name or address" aria-label="Search hosts">
+            <span class="pf-toolbar__spacer" id="hsShown"></span>
+            <button type="button" class="pf-btn pf-m-secondary pf-m-small" id="hsBulk">Add many</button>
+            <button type="button" class="pf-btn pf-m-primary pf-m-small" id="hsHostAdd"><svg class="pf-icon" aria-hidden="true"><use href="#i-plus"></use></svg>Add host</button>
+          </div>
+          <div class="pf-table-wrap">
+            <table class="pf-table" aria-label="Hosts">
+              <thead><tr><th>Site</th><th>Group</th><th>Name</th><th>Address</th><th>Credential</th><th>Fixes</th><th>Note</th><th><span class="sr-only">Actions</span></th></tr></thead>
+              <tbody id="hsHosts"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </div>
+    <!-- ---------- BMC (administrators) ---------- -->
+    <div id="page-bmc" data-page="bmc" hidden>
+      <section class="pf-page__section pf-m-light">
+        <h1 class="pf-title">BMC</h1>
+        <p>The BMC of each server (Lenovo XClarity Controller, Inspur) and the BMC web accounts. The checks read a BMC with the
+          Redfish API over HTTPS on its management IP — the address of its web page — with the same account as the web login
+          (no SSH), and only read (GET): health, power supplies, fans, temperatures, memory, disks and the event log. An
+          account with the read-only role is enough. Passwords are stored encrypted and never shown again; one credential
+          can serve many BMCs.</p>
+      </section>
+      <section class="pf-page__section">
+        <div class="pf-card">
+          <div class="pf-card__header"><h2 class="pf-card__title">BMC accounts</h2>
+            <span class="pf-card__actions"><button type="button" class="pf-btn pf-m-primary pf-m-small" id="bmCredAdd"><svg class="pf-icon" aria-hidden="true"><use href="#i-plus"></use></svg>Add account</button></span></div>
+          <div class="pf-table-wrap">
+            <table class="pf-table" aria-label="BMC accounts">
+              <thead><tr><th>Name</th><th>User</th><th>BMCs</th><th>Changed</th><th><span class="sr-only">Actions</span></th></tr></thead>
+              <tbody id="bmCreds"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="pf-card">
+          <div class="pf-toolbar">
+            <h2 class="pf-card__title">BMCs</h2>
+            <select class="pf-form-control" id="bmSite" aria-label="Site"><option value="">All sites</option></select>
+            <input class="pf-form-control pf-m-search" id="bmQ" maxlength="100" placeholder="Search name or IP" aria-label="Search BMCs">
+            <span class="pf-toolbar__spacer" id="bmShown"></span>
+            <button type="button" class="pf-btn pf-m-secondary pf-m-small" id="bmBulk">Add many</button>
+            <button type="button" class="pf-btn pf-m-primary pf-m-small" id="bmAdd"><svg class="pf-icon" aria-hidden="true"><use href="#i-plus"></use></svg>Add BMC</button>
+          </div>
+          <div class="pf-table-wrap">
+            <table class="pf-table" aria-label="BMCs">
+              <thead><tr><th>Site</th><th>Server</th><th>Management IP</th><th>Vendor</th><th>Account</th><th>Note</th><th><span class="sr-only">Actions</span></th></tr></thead>
+              <tbody id="bmList"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<div class="pf-alert-group" id="toasts" aria-live="polite"></div>
+<script src="/static/switcher.js"></script>
+<script src="{{ url_for('wi.static', filename='consoles/icons.js', v=ui_version) }}"></script>
+<script src="{{ url_for('wi.static', filename='wi.js', v=ui_version) }}"></script>
+<dialog class="pf-modal pf-m-small" id="confirmDialog" aria-labelledby="confirmTitle" aria-describedby="confirmBody">
+  <form method="dialog">
+    <header class="pf-modal__header">
+      <h1 class="pf-title" id="confirmTitle"></h1>
+    </header>
+    <div class="pf-modal__body"><p id="confirmBody"></p></div>
+    <footer class="pf-modal__footer">
+      <button type="submit" class="pf-btn pf-m-danger" value="ok" id="confirmOk">Remove</button>
+      <button type="submit" class="pf-btn pf-m-link" value="cancel" id="confirmCancel">Cancel</button>
+    </footer>
+  </form>
+</dialog>
+
+<!-- ---------- Run a fix ---------- -->
+<dialog class="pf-modal pf-m-large" id="fixDialog" aria-labelledby="fixTitle">
+  <form id="fixForm" novalidate autocomplete="off">
+    <header class="pf-modal__header">
+      <h1 class="pf-title" id="fixTitle">Run this fix</h1>
+      <button type="button" class="pf-btn pf-m-plain" data-close aria-label="Close"><svg class="pf-icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+    </header>
+    <div class="pf-modal__body">
+      <div id="fixRisk"></div>
+      <p id="fixText"></p>
+      <div id="fixWhere"></div>
+      <h2 class="fix-h">Commands that will run, in this order</h2>
+      <pre class="pf-code-block" id="fixCommands"></pre>
+      <p class="pf-text-secondary pf-text-sm"><span id="fixStopNote">They stop at the first command that fails. </span>The check runs again afterwards. Everything is recorded (Runs, Activity).</p>
+      <p class="pf-text-secondary pf-text-sm" id="fixCheckNote" hidden>Lines starting with <code>require</code> or <code>wait</code> check the state on OpenStack right before the change: when it is no longer as found, the fix stops and nothing is changed.</p>
+      <div class="pf-form-group" id="fixConfirmGroup" hidden>
+        <label class="pf-form-label" for="fixConfirm">Type <b class="mono" id="fixConfirmName"></b> to confirm <span class="pf-required" aria-hidden="true">*</span></label>
+        <input class="pf-form-control mono" id="fixConfirm" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="128" data-lpignore="true" data-1p-ignore data-bwignore>
+      </div>
+      <div class="pf-alert pf-m-danger" id="fixError" role="alert" hidden></div>
+    </div>
+    <footer class="pf-modal__footer">
+      <button type="submit" class="pf-btn pf-m-primary" id="fixRun"><svg class="pf-icon" aria-hidden="true"><use href="#i-play"></use></svg>Run fix</button>
+      <button type="button" class="pf-btn pf-m-link" data-close>Cancel</button>
+    </footer>
+  </form>
+</dialog>
+
+<!-- ---------- SSH credential ---------- -->
+<dialog class="pf-modal" id="sshDialog" aria-labelledby="sshTitle">
+  <form id="sshForm" novalidate autocomplete="off">
+    <header class="pf-modal__header">
+      <h1 class="pf-title" id="sshTitle">Add SSH credential</h1>
+      <button type="button" class="pf-btn pf-m-plain" data-close aria-label="Close"><svg class="pf-icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+    </header>
+    <div class="pf-modal__body">
+      <div class="pf-alert pf-m-danger pf-mb-md" id="sshError" role="alert" hidden></div>
+      <div class="pf-form-group"><label class="pf-form-label" for="sshName">Name <span class="pf-required" aria-hidden="true">*</span></label>
+        <input class="pf-form-control" id="sshName" maxlength="63" placeholder="e.g. cdn-ops-root" spellcheck="false"></div>
+      <div class="pf-form-group"><label class="pf-form-label" for="sshUser">Username <span class="pf-required" aria-hidden="true">*</span></label>
+        <input class="pf-form-control" id="sshUser" maxlength="64" autocomplete="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore data-bwignore></div>
+      <div class="pf-form-group"><span class="pf-form-label">Sign-in</span>
+        <div class="pf-toggle-group pf-m-compact" id="sshAuth" role="radiogroup" aria-label="Sign-in">
+          <label><input type="radio" name="sshAuth" value="key" checked><span>Private key</span></label>
+          <label><input type="radio" name="sshAuth" value="password"><span>Password</span></label>
+        </div></div>
+      <div class="pf-form-group" id="sshKeyGroup"><label class="pf-form-label" for="sshKey">Private key <span class="pf-required" id="sshKeyReq" aria-hidden="true">*</span></label>
+        <textarea class="pf-form-control mono" id="sshKey" rows="6" spellcheck="false" autocomplete="off" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;…&#10;-----END OPENSSH PRIVATE KEY-----" aria-describedby="sshKeyHelp"></textarea>
+        <span class="pf-helper-text" id="sshKeyHelp">Without a passphrase. Stored encrypted, never shown again.</span></div>
+      <div class="pf-form-group" id="sshPassGroup" hidden><label class="pf-form-label" for="sshPass">Password <span class="pf-required" id="sshPassReq" aria-hidden="true">*</span></label>
+        <input class="pf-form-control" id="sshPass" type="password" maxlength="512" autocomplete="new-password" aria-describedby="sshPassHelp">
+        <span class="pf-helper-text" id="sshPassHelp">Stored encrypted, never shown again.</span></div>
+      <div class="pf-form-group"><label class="pf-form-label" for="sshPrivilege">Root</label>
+        <select class="pf-form-control" id="sshPrivilege"></select></div>
+      <label class="pf-check"><input type="checkbox" id="sshFixes"><span><b>May run fixes</b><span class="pf-helper-text">Operators with the permission to run fixes can then run the commands of a check result on the hosts of this credential.</span></span></label>
+    </div>
+    <footer class="pf-modal__footer">
+      <button type="submit" class="pf-btn pf-m-primary" id="sshSave">Save</button>
+      <button type="button" class="pf-btn pf-m-link" data-close>Cancel</button>
+    </footer>
+  </form>
+</dialog>
+
+<!-- ---------- BMC account ---------- -->
+<dialog class="pf-modal" id="bmCredDialog" aria-labelledby="bmCredTitle">
+  <form id="bmCredForm" novalidate autocomplete="off">
+    <header class="pf-modal__header">
+      <h1 class="pf-title" id="bmCredTitle">Add BMC account</h1>
+      <button type="button" class="pf-btn pf-m-plain" data-close aria-label="Close"><svg class="pf-icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+    </header>
+    <div class="pf-modal__body">
+      <div class="pf-alert pf-m-danger pf-mb-md" id="bmCredError" role="alert" hidden></div>
+      <div class="pf-form-group"><label class="pf-form-label" for="bmCredName">Name <span class="pf-required" aria-hidden="true">*</span></label>
+        <input class="pf-form-control" id="bmCredName" maxlength="63" placeholder="e.g. xcc-readonly-dca" spellcheck="false"></div>
+      <div class="pf-form-group"><label class="pf-form-label" for="bmCredUser">Username <span class="pf-required" aria-hidden="true">*</span></label>
+        <input class="pf-form-control" id="bmCredUser" maxlength="64" autocomplete="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore data-bwignore></div>
+      <div class="pf-form-group"><label class="pf-form-label" for="bmCredPass">Password <span class="pf-required" id="bmCredPassReq" aria-hidden="true">*</span></label>
+        <input class="pf-form-control" id="bmCredPass" type="password" maxlength="512" autocomplete="new-password" aria-describedby="bmCredPassHelp">
+        <span class="pf-helper-text" id="bmCredPassHelp">The BMC web login. Stored encrypted, never shown again.</span></div>
+    </div>
+    <footer class="pf-modal__footer">
+      <button type="submit" class="pf-btn pf-m-primary" id="bmCredSave">Save</button>
+      <button type="button" class="pf-btn pf-m-link" data-close>Cancel</button>
+    </footer>
+  </form>
+</dialog>
+
+<!-- ---------- BMC ---------- -->
+<dialog class="pf-modal" id="bmDialog" aria-labelledby="bmTitle">
+  <form id="bmForm" novalidate autocomplete="off">
+    <header class="pf-modal__header">
+      <h1 class="pf-title" id="bmTitle">Add BMC</h1>
+      <button type="button" class="pf-btn pf-m-plain" data-close aria-label="Close"><svg class="pf-icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+    </header>
+    <div class="pf-modal__body">
+      <div class="pf-alert pf-m-danger pf-mb-md" id="bmError" role="alert" hidden></div>
+      <div class="hs-row">
+        <div class="pf-form-group"><label class="pf-form-label" for="bmSiteSel">Site</label><select class="pf-form-control" id="bmSiteSel"></select></div>
+        <div class="pf-form-group"><label class="pf-form-label" for="bmVendor">Vendor</label><select class="pf-form-control" id="bmVendor"></select></div>
+      </div>
+      <div id="bmSingle">
+        <div class="pf-form-group"><label class="pf-form-label" for="bmName">Server name <span class="pf-required" aria-hidden="true">*</span></label>
+          <input class="pf-form-control" id="bmName" maxlength="63" placeholder="e.g. dca-compute-07" spellcheck="false"></div>
+        <div class="hs-row">
+          <div class="pf-form-group"><label class="pf-form-label" for="bmAddress">Management IP <span class="pf-required" aria-hidden="true">*</span></label>
+            <input class="pf-form-control mono" id="bmAddress" maxlength="253" placeholder="e.g. 10.247.30.17" spellcheck="false" aria-describedby="bmAddressHelp">
+            <span class="pf-helper-text" id="bmAddressHelp">The address of the BMC web page (the URL can be pasted).</span></div>
+          <div class="pf-form-group"><label class="pf-form-label" for="bmPort">HTTPS port</label>
+            <input class="pf-form-control" id="bmPort" inputmode="numeric" maxlength="5" value="443"></div>
+        </div>
+        <div class="pf-form-group"><label class="pf-form-label" for="bmNote">Note</label>
+          <input class="pf-form-control" id="bmNote" maxlength="200" placeholder="optional, e.g. rack / serial number"></div>
+      </div>
+      <div class="pf-form-group" id="bmMany" hidden><label class="pf-form-label" for="bmLines">BMCs, one per line <span class="pf-required" aria-hidden="true">*</span></label>
+        <textarea class="pf-form-control mono" id="bmLines" rows="8" spellcheck="false" placeholder="dca-compute-07 10.247.30.17&#10;dca-compute-08 10.247.30.18"></textarea>
+        <span class="pf-helper-text">server name, management IP. All are added, or none when a line is wrong.</span></div>
+      <div class="pf-form-group"><label class="pf-form-label" for="bmCred">BMC account</label><select class="pf-form-control" id="bmCred"></select></div>
+    </div>
+    <footer class="pf-modal__footer">
+      <button type="submit" class="pf-btn pf-m-primary" id="bmSave">Save</button>
+      <button type="button" class="pf-btn pf-m-link" data-close>Cancel</button>
+    </footer>
+  </form>
+</dialog>
+
+<!-- ---------- Host ---------- -->
+<dialog class="pf-modal" id="hostDialog" aria-labelledby="hostTitle">
+  <form id="hostForm" novalidate autocomplete="off">
+    <header class="pf-modal__header">
+      <h1 class="pf-title" id="hostTitle">Add host</h1>
+      <button type="button" class="pf-btn pf-m-plain" data-close aria-label="Close"><svg class="pf-icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+    </header>
+    <div class="pf-modal__body">
+      <div class="pf-alert pf-m-danger pf-mb-md" id="hostError" role="alert" hidden></div>
+      <div class="hs-row">
+        <div class="pf-form-group"><label class="pf-form-label" for="hostSite">Site</label><select class="pf-form-control" id="hostSite"></select></div>
+        <div class="pf-form-group"><label class="pf-form-label" for="hostGroup">Product group</label><select class="pf-form-control" id="hostGroup"></select></div>
+      </div>
+      <div id="hostSingle">
+        <div class="pf-form-group"><label class="pf-form-label" for="hostName">Name <span class="pf-required" aria-hidden="true">*</span></label>
+          <input class="pf-form-control" id="hostName" maxlength="63" placeholder="e.g. dca-cdn-lb-03" spellcheck="false"></div>
+        <div class="hs-row">
+          <div class="pf-form-group"><label class="pf-form-label" for="hostAddress">Address <span class="pf-required" aria-hidden="true">*</span></label>
+            <input class="pf-form-control mono" id="hostAddress" maxlength="253" placeholder="IP or host name" spellcheck="false"></div>
+          <div class="pf-form-group"><label class="pf-form-label" for="hostPort">SSH port</label>
+            <input class="pf-form-control" id="hostPort" inputmode="numeric" maxlength="5" value="22"></div>
+        </div>
+        <div class="pf-form-group"><label class="pf-form-label" for="hostNote">Note</label>
+          <input class="pf-form-control" id="hostNote" maxlength="200" placeholder="optional"></div>
+      </div>
+      <div class="pf-form-group" id="hostMany" hidden><label class="pf-form-label" for="hostLines">Hosts, one per line <span class="pf-required" aria-hidden="true">*</span></label>
+        <textarea class="pf-form-control mono" id="hostLines" rows="8" spellcheck="false" placeholder="dca-cdn-lb-03 172.31.10.69&#10;dca-cdn-lb-04 172.31.10.70 2222"></textarea>
+        <span class="pf-helper-text">name address [SSH port], e.g. <span class="mono">vyos-edge-02 10.246.0.12 2222</span>; without a port, 22. All are added, or none when a line is wrong.</span></div>
+      <div class="pf-form-group"><label class="pf-form-label" for="hostCred">SSH credential</label><select class="pf-form-control" id="hostCred"></select></div>
+      <div class="pf-form-group"><label class="pf-form-label" for="hostJump">Connect through</label>
+        <select class="pf-form-control" id="hostJump" aria-describedby="hostJumpHelp"></select>
+        <span class="pf-helper-text" id="hostJumpHelp">For hosts the portal cannot reach directly (no reachable IP): the portal logs in to the jump host with its own credential, and from there opens SSH to this host with the credential above.</span></div>
+    </div>
+    <footer class="pf-modal__footer">
+      <button type="submit" class="pf-btn pf-m-primary" id="hostSave">Save</button>
+      <button type="button" class="pf-btn pf-m-link" data-close>Cancel</button>
+    </footer>
+  </form>
+</dialog>
+</body>
+</html>

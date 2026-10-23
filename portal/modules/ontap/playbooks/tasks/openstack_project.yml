@@ -1,0 +1,134 @@
+# OpenStack in the target project, in ONE temporary role window:
+#   1. transfer the new volume from the admin project to the target project (if the target project is not the admin
+#      project)
+#   2. action after the restore (post_action): attach to an instance (attach_server_id) or a new instance from the boot
+#      volume
+# The transfer ID and auth key are read automatically from the output; the auth key is never shown in the log.
+# If admin has no role in the target project yet, the role transfer_role is added temporarily and always removed again.
+# Transfer failed = restore failed (the volume stays in the admin project, the transfer request is cancelled).
+# Action after the restore failed = the restore still succeeds; the result is recorded in post_result and shown as a
+# warning.
+- name: Initialize project actions
+  ansible.builtin.set_fact:
+    role_added: false
+    role_removed: false
+    transfer_id: ""
+    transfer_accepted: false
+    post_result: {}
+    # Token scoped to the target project for commands in that project (accept transfer, port, instance, attach).
+    project_env: "export OS_PROJECT_ID={{ target_project | quote }} && unset OS_PROJECT_NAME OS_TENANT_NAME OS_TENANT_ID &&"
+    wanted_action: "{{ post_action | default('', true) if post_action | default('', true) in ['attach', 'instance'] else '' }}"
+
+- name: Actions in the target project
+  block:
+    - name: Add a temporary role for admin in the target project
+      ansible.builtin.include_tasks: openstack_cmd.yml
+      vars:
+        os_label: "add temporary role {{ transfer_role }} for admin in project {{ target_project }}"
+        os_command: "openstack role add --user {{ admin_user_id | quote }} --project {{ target_project | quote }} {{ transfer_role | quote }}"
+      when: needs_transfer | bool and admin_roles | length == 0
+
+    - name: Record the temporary role
+      ansible.builtin.set_fact:
+        role_added: true
+      when: needs_transfer | bool and admin_roles | length == 0
+
+    - name: Transfer the volume to the target project
+      when: needs_transfer | bool
+      block:
+        - name: Create a transfer request
+          ansible.builtin.include_tasks: openstack_cmd.yml
+          vars:
+            os_label: "create transfer request for volume {{ new_volume_id }}"
+            os_command: "openstack volume transfer request create {{ new_volume_id | quote }} -f json"
+            os_secret: true
+
+        - name: Read transfer ID and auth key
+          ansible.builtin.set_fact:
+            transfer_id: "{{ (os_out.stdout | extract_json).id }}"
+            transfer_key: "{{ (os_out.stdout | extract_json).auth_key }}"
+          no_log: true
+
+        - name: Accept the transfer in the target project
+          ansible.builtin.include_tasks: openstack_cmd.yml
+          vars:
+            os_label: "accept transfer {{ transfer_id }} in project {{ target_project }}"
+            os_command: >-
+              {{ project_env }} openstack volume transfer request accept --auth-key {{ transfer_key | quote }} {{ transfer_id | quote }} -f json
+            os_secret: true
+
+        - name: Record the accepted transfer
+          ansible.builtin.set_fact:
+            transfer_accepted: true
+
+      rescue:
+        - name: Save the transfer failure reason
+          ansible.builtin.set_fact:
+            transfer_error: "{{ ansible_failed_result.msg | default('no message') }}"
+
+        - name: Cancel the pending transfer request
+          ansible.builtin.include_tasks:
+            file: openstack_cmd.yml
+            apply:
+              ignore_errors: true
+          vars:
+            os_label: "cancel transfer request {{ transfer_id }}"
+            os_command: "openstack volume transfer request delete {{ transfer_id | quote }}"
+          when: transfer_id | length > 0 and not transfer_accepted
+
+        - name: Transfer failed
+          ansible.builtin.fail:
+            msg: >-
+              Moving to project {{ target_project }} failed: {{ transfer_error | trim | regex_replace('[.]+$', '') }}.
+              Volume {{ new_volume_id }} stays in the admin project{{ ' and the transfer request was canceled' if transfer_id | length > 0 else '' }}.
+
+    - name: Verify the volume is in the target project
+      ansible.builtin.include_tasks: openstack_cmd.yml
+      vars:
+        os_label: "verify project of volume {{ new_volume_id }}"
+        os_command: "openstack volume show {{ new_volume_id | quote }} -f json"
+      when: needs_transfer | bool
+
+    - name: Verify the volume moved to the target project
+      ansible.builtin.assert:
+        that: (os_out.stdout | extract_json)['os-vol-tenant-attr:tenant_id'] == target_project
+        fail_msg: "The transfer was accepted, but volume {{ new_volume_id }} is not recorded in project {{ target_project }}. Check it manually."
+        quiet: true
+      when: needs_transfer | bool
+
+    - name: After the restore
+      when: wanted_action | length > 0
+      block:
+        - name: Attach the new volume to the instance
+          ansible.builtin.include_tasks: openstack_attach.yml
+          when: wanted_action == 'attach'
+
+        - name: Create the new instance
+          ansible.builtin.include_tasks: openstack_instance.yml
+          when: wanted_action == 'instance'
+
+      rescue:
+        - name: Record the failed action after the restore
+          ansible.builtin.set_fact:
+            post_result:
+              action: "{{ wanted_action }}"
+              ok: false
+              error: "{{ ansible_failed_result.msg | default('no message') | trim }}"
+              server_id: "{{ new_server_id | default(attach_server_id | default('', true) if wanted_action == 'attach' else '') }}"
+              server_name: "{{ new_instance_name_final | default(attach_server_name | default('')) }}"
+
+  always:
+    - name: Remove the temporary role
+      ansible.builtin.include_tasks:
+        file: openstack_cmd.yml
+        apply:
+          ignore_errors: true
+      vars:
+        os_label: "remove temporary role {{ transfer_role }} from admin in project {{ target_project }}"
+        os_command: "openstack role remove --user {{ admin_user_id | quote }} --project {{ target_project | quote }} {{ transfer_role | quote }}"
+      when: role_added | bool
+
+    - name: Record the removed role
+      ansible.builtin.set_fact:
+        role_removed: "{{ os_out.rc | default(1) == 0 }}"
+      when: role_added | bool

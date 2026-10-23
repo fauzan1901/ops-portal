@@ -1,0 +1,242 @@
+"""Vendor documentation of the problems the checks find: shown under a recommendation ("Vendor reference") so the engineer
+reads what the primary vendor says about it (Red Hat for OpenStack and Pacemaker, Broadcom for vSphere and NSX, Lenovo
+and Inspur for their servers).
+
+Every link here was opened and its title checked on 2026-10-11 (Red Hat chunked HTML pages with their anchors, Broadcom
+knowledge base articles through their legacy VMware KB number, Lenovo Docs pages of the models listed in LENOVO_MODELS);
+a link that could not be verified is not added. A recommendation names the keys: Result.recommend(..., refs=[...]).
+"""
+import re
+
+URL = re.compile(r"^https://[A-Za-z0-9.-]+\.[a-z]{2,}(/[A-Za-z0-9_\-./%?=&#:+~,;@!]*)?$")
+MAX_REFS = 6
+RH = "https://docs.redhat.com/en/documentation/red_hat_openstack_platform"
+RHEL8_HA = ("https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/8/html/"
+            "configuring_and_managing_high_availability_clusters")
+BKB = "https://knowledge.broadcom.com/external/article"
+TECHDOCS_VS8 = "https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/8-0"
+
+
+def _rh(title, path):
+    return {"vendor": "Red Hat", "title": title, "url": f"{RH}/{path}"}
+
+
+def _bc(title, url):
+    return {"vendor": "Broadcom", "title": title, "url": url}
+
+
+REFS = {
+    # ---------------- Red Hat OpenStack Platform 16.2 / 17.1 ----------------
+    "rhosp-compute-down": [
+        _rh("RHOSP 16.2: Troubleshooting Compute node failures",
+            "16.2/html/director_installation_and_usage/assembly_troubleshooting-director-errors#sect-Compute_Service_Failures"),
+        _rh("RHOSP 17.1: Troubleshooting Compute node failures",
+            "17.1/html/installing_and_managing_red_hat_openstack_platform_with_director/assembly_troubleshooting-director-errors"
+            "#proc_troubleshooting-compute-node-failures_troubleshooting-director-errors")],
+    "rhosp-containers": [
+        _rh("RHOSP 16.2: Managing containerized services",
+            "16.2/html/director_installation_and_usage/assembly_performing-basic-overcloud-administration-tasks"
+            "#proc_managing-containerized-services_performing-basic-overcloud-administration-tasks"),
+        _rh("RHOSP 17.1: Managing containerized services",
+            "17.1/html/installing_and_managing_red_hat_openstack_platform_with_director/assembly_performing-basic-overcloud-"
+            "administration-tasks#proc_managing-containerized-services_performing-basic-overcloud-administration-tasks")],
+    "rhosp-evacuate": [
+        _rh("RHOSP 16.2: Evacuating an instance",
+            "16.2/html/configuring_the_compute_service_for_instance_creation/assembly_managing-instances_managing-instances"
+            "#con_evacuating-an-instance_migrating-instances"),
+        _rh("RHOSP 17.1: Evacuating an instance",
+            "17.1/html/configuring_the_compute_service_for_instance_creation/assembly_migrating-virtual-machine-instances-"
+            "between-compute-nodes_migrating-instances#con_evacuating-an-instance_migrating-instances")],
+    "rhosp-pcs-resource": [
+        _rh("RHOSP 16.2: Investigating Pacemaker resource problems",
+            "16.2/html/high_availability_deployment_and_usage/assembly_troubleshooting-ha-resources_rhosp"
+            "#proc_investigating-pacemaker-resources_ha-troubleshooting"),
+        _rh("RHOSP 17.1: Investigating Pacemaker resource problems",
+            "17.1/html/managing_high_availability_services/assembly_troubleshooting-ha-resources_ext-lb-example"
+            "#proc_investigating-pacemaker-resources_ha-troubleshooting")],
+    "rhosp-cinder-ha": [
+        _rh("RHOSP 16.2: High availability of the Block Storage volume service",
+            "16.2/html/storage_guide/assembly-configuring-the-block-storage-service_osp-storage-guide"
+            "#con-active-active-block-storage-for-high-availability_configuring-cinder"),
+        _rh("RHOSP 17.1: High availability of the Block Storage volume service",
+            "17.1/html/configuring_persistent_storage/assembly_configuring-the-block-storage-service_osp-storage-guide"
+            "#con-active-active-block-storage-for-high-availability_configuring-cinder")],
+    "rhosp-ovn": [
+        _rh("RHOSP 16.2: Troubleshooting networks (ML2/OVN)", "16.2/html/networking_guide/neutron-troubleshoot_rhosp-network"),
+        _rh("RHOSP 17.1: Monitoring and troubleshooting networks",
+            "17.1/html/configuring_red_hat_openstack_platform_networking/neutron-troubleshoot_rhosp-network"),
+        _rh("RHOSP 16.2: The ovn-controller service on Compute nodes",
+            "16.2/html/networking_guide/assembly_work-with-ovn_rhosp-network#ovn-controller-on-compute-nodes_work-ovn"),
+        _rh("RHOSP 17.1: The ovn-controller service on Compute nodes",
+            "17.1/html/configuring_red_hat_openstack_platform_networking/assembly_work-with-ovn_rhosp-network"
+            "#ovn-controller-on-compute-nodes_work-ovn")],
+    "rhosp-ovn-metadata": [
+        _rh("RHOSP 16.2: OVN metadata agent on Compute nodes",
+            "16.2/html/networking_guide/assembly_work-with-ovn_rhosp-network#ovn-metadata-agent-on-compute-nodes_work-ovn"),
+        _rh("RHOSP 17.1: OVN metadata agent on Compute nodes",
+            "17.1/html/configuring_red_hat_openstack_platform_networking/assembly_work-with-ovn_rhosp-network"
+            "#ovn-metadata-agent-on-compute-nodes_work-ovn")],
+    "rhosp-floating-ip": [
+        _rh("RHOSP 16.2: Managing floating IP addresses", "16.2/html/networking_guide/manage-float-ip_rhosp-network"),
+        _rh("RHOSP 17.1: Managing floating IP addresses",
+            "17.1/html/configuring_red_hat_openstack_platform_networking/manage-float-ip_rhosp-network"),
+        _rh("RHOSP 16.2 CLI: ip availability list", "16.2/html/command_line_interface_reference/ip#ip_availability_list")],
+    "rhosp-ironic-power": [
+        _rh("RHOSP 16.2: Configuring automatic power fault recovery",
+            "16.2/html/bare_metal_provisioning/administering-bare-metal-nodes#configuring-automatic-power-fault-recovery_administering-bare-metal"),
+        _rh("RHOSP 17.1: Configuring automatic power fault recovery",
+            "17.1/html/configuring_the_bare_metal_provisioning_service/administering-bare-metal-nodes"
+            "#configuring-automatic-power-fault-recovery_administering-bare-metal")],
+    "rhosp-ironic-troubleshoot": [
+        _rh("RHOSP 16.2: Troubleshooting the Bare Metal Provisioning service",
+            "16.2/html/bare_metal_provisioning/troubleshooting-the-bare-metal-provisioning-service"),
+        _rh("RHOSP 17.1: Troubleshooting the Bare Metal Provisioning service",
+            "17.1/html/configuring_the_bare_metal_provisioning_service/troubleshooting-the-bare-metal-provisioning-service")],
+    "rhosp-fencing": [
+        _rh("RHOSP 16.2: Fencing Controller nodes with STONITH",
+            "16.2/html/high_availability_deployment_and_usage/assembly_fencing-controller-nodes_rhosp"),
+        _rh("RHOSP 17.1: Fencing Controller nodes with STONITH",
+            "17.1/html/managing_high_availability_services/assembly_fencing-controller-nodes_rhosp"),
+        {"vendor": "Red Hat", "title": "RHEL 8: Testing a fence device",
+         "url": f"{RHEL8_HA}/assembly_configuring-fencing-configuring-and-managing-high-availability-clusters#proc_testing-fence-devices-configuring-fencing"},
+        {"vendor": "Red Hat", "title": "Support policies for RHEL High Availability: fencing / STONITH",
+         "url": "https://access.redhat.com/articles/2881341"}],
+    "rhosp-galera": [
+        _rh("RHOSP 16.2: Managing database replication with Galera",
+            "16.2/html/high_availability_deployment_and_usage/assembly_managing-db-replication-with-galera_rhosp"),
+        _rh("RHOSP 17.1: Managing database replication with Galera",
+            "17.1/html/managing_high_availability_services/assembly_managing-db-replication-with-galera_ext-lb-example")],
+    "rhosp-bundles": [
+        _rh("RHOSP 16.2: Checking bundle status in a high availability cluster",
+            "16.2/html/high_availability_deployment_and_usage/assembly_managing-ha-services-with-pacemaker_rhosp"
+            "#proc_checking-bundle-status_pacemaker"),
+        _rh("RHOSP 17.1: Checking bundle status in a high availability cluster",
+            "17.1/html/managing_high_availability_services/assembly_managing-ha-services-with-pacemaker_rhosp"
+            "#proc_checking-bundle-status_pacemaker")],
+    "rhosp-fence-daemons": [
+        _rh("RHOSP 16.2: Checking fencing agent and Pacemaker daemon status",
+            "16.2/html/high_availability_deployment_and_usage/assembly_managing-ha-services-with-pacemaker_rhosp"
+            "#proc_checking-fencing-daemons-status_pacemaker"),
+        _rh("RHOSP 17.1: Checking fencing agent and Pacemaker daemon status",
+            "17.1/html/managing_high_availability_services/assembly_managing-ha-services-with-pacemaker_rhosp"
+            "#proc_checking-fencing-daemons-status_pacemaker")],
+    "rhel-pcs-cleanup": [
+        {"vendor": "Red Hat", "title": "RHEL 8: Clearing failure status of cluster resources",
+         "url": f"{RHEL8_HA}/assembly_managing-cluster-resources-configuring-and-managing-high-availability-clusters"
+                "#proc_cleanup-cluster-resources-managing-cluster-resources"}],
+    "rhosp-remove-compute": [
+        _rh("RHOSP 16.2: Removing a Compute node manually",
+            "16.2/html/director_installation_and_usage/assembly_scaling-overcloud-nodes#proc_removing-a-compute-node-manually_scaling-overcloud-nodes"),
+        _rh("RHOSP 17.1: Removing a Compute node manually",
+            "17.1/html/installing_and_managing_red_hat_openstack_platform_with_director/assembly_scaling-overcloud-nodes"
+            "#proc_removing-compute-node-manually_scaling-overcloud-nodes")],
+    "rhosp-cinder-manage": [
+        _rh("RHOSP 16.2: Cleaning up after Controller node replacement (cinder-manage service remove)",
+            "16.2/html/director_installation_and_usage/assembly_replacing-controller-nodes#cleaning-up-after-the-controller-node-replacement"),
+        _rh("RHOSP 17.1: Cleaning up after Controller node replacement (cinder-manage service remove)",
+            "17.1/html/installing_and_managing_red_hat_openstack_platform_with_director/assembly_replacing-controller-nodes"
+            "#proc_cleaning-up-after-controller-node-replacement_replacing-controller-nodes")],
+    # Checked 2026-10-19: migration constraints, live / cold migration, server migration abort / force complete.
+    "rhosp-migration": [
+        _rh("RHOSP 17.1: Migrating virtual machine instances between Compute nodes",
+            "17.1/html/configuring_the_compute_service_for_instance_creation/assembly_migrating-virtual-machine-instances-"
+            "between-compute-nodes_migrating-instances")],
+    # Checked 2026-10-19: sos report --batch --case-id, the archive name, attaching it to the case (RHEL 9 = RHOSP 17.1 nodes).
+    "rh-sos-report": [{"vendor": "Red Hat", "title": "RHEL 9: Generating an sos report for technical support",
+                       "url": "https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html/getting_the_most_from_"
+                              "your_support_experience/generating-an-sos-report-for-technical-support_getting-the-most-from-"
+                              "your-support-experience"}],
+    "nova-live-migration": [{"vendor": "OpenStack", "title": "Nova (Wallaby): Live-migrate instances (progress, abort, force-complete)",
+                             "url": "https://docs.openstack.org/nova/wallaby/admin/live-migration-usage.html"}],
+    "cinder-migration": [{"vendor": "OpenStack", "title": "Cinder: Migrate volumes (volumes with snapshots cannot migrate)",
+                          "url": "https://docs.openstack.org/cinder/2023.1/admin/volume-migration.html"}],
+    # ---------------- Broadcom: vSphere ----------------
+    "vmw-apd-pdl": [_bc("KB 2004684: Permanent Device Loss (PDL) and All-Paths-Down (APD) on ESXi host", f"{BKB}?legacyId=2004684")],
+    "vmw-vmfs-heartbeat": [_bc("KB 2136081: Understanding lost access to volume messages in ESXi", f"{BKB}?legacyId=2136081")],
+    "vmw-latency": [_bc("KB 2007236: Device latency with 'performance has deteriorated' messages", f"{BKB}?legacyId=2007236")],
+    "vmw-snapshots": [_bc("KB 1025279: Best practices for using VMware snapshots", f"{BKB}?legacyId=1025279")],
+    "vmw-consolidate": [_bc("KB 1002310: Consolidating / committing snapshots in ESXi", f"{BKB}?legacyId=1002310"),
+                        _bc("\"Virtual Machine Consolidation Needed\" in the vSphere Client", f"{BKB}/414589")],
+    "vmw-host-not-responding": [_bc("KB 1003409: ESXi host not responding or disconnected", f"{BKB}?legacyId=1003409")],
+    "vmw-uplink": [_bc("Network uplink redundancy lost due to vmnic down",
+                       f"{BKB}/426494/network-uplink-redundancy-lost-due-to-vm.html"),
+                   _bc("\"Network uplink redundancy lost\" alert is not cleared when the link is up",
+                       f"{BKB}/301538/network-uplink-redundancy-lost-alert-is.html")],
+    "vmw-ha": [_bc("KB 2004429: Troubleshooting vSphere High Availability (HA) issues", f"{BKB}?legacyId=2004429"),
+               _bc("vSphere 8: Troubleshooting vSphere HA host states",
+                   f"{TECHDOCS_VS8}/vcenter-and-host-management/troubleshooting-overview-host-management/troubleshooting-hosts-host-"
+                   "management/troubleshooting-vsphere-ha-host-states-host-management.html")],
+    "vmw-hardware": [_bc("vSphere 8: Monitoring host health status",
+                         f"{TECHDOCS_VS8}/vsphere-monitoring-and-performance/monitoring-host-health-status.html")],
+    "vmw-alarms": [_bc("vSphere 8: Preconfigured vSphere alarms",
+                       f"{TECHDOCS_VS8}/vsphere-monitoring-and-performance/monitoring-events-and-alarms/preconfigured-vsphere-alarms.html")],
+    # ---------------- Broadcom: NSX ----------------
+    "nsx-event-catalog": [
+        _bc("NSX Event Catalog (events, alarms and recommended actions, 3.0 to 4.2)",
+            "https://techdocs.broadcom.com/content/dam/broadcom/techdocs/us/en/dita/vmware/nsx/shared-content/PDF/NSX_Event_Catalog.pdf"),
+        _bc("NSX 4.2: Working with events and alarms",
+            "https://techdocs.broadcom.com/us/en/vmware-cis/nsx/vmware-nsx/4-2/administration-guide/system-monitoring/working-with-events-and-alarms.html")],
+    # ---------------- Lenovo (any model) and Inspur ----------------
+    "lenovo-bmc": [{"vendor": "Lenovo", "title": "XClarity Controller: viewing event logs", "url": "https://pubs.lenovo.com/xcc/event_log"},
+                   {"vendor": "Lenovo", "title": "XClarity Controller 2: viewing event logs", "url": "https://pubs.lenovo.com/xcc2/event_log"}],
+    "inspur-bmc": [{"vendor": "Inspur", "title": "Inspur Server BMC User Manual V2.7 (PDF: System Event Log, SEL)",
+                    "url": "https://en.inspur.com/eportal//fileDir/active_download/platformBookZh/6680/"
+                           "Inspur%C2%A0Server%C2%A0BMC%C2%A0User%C2%A0Manual%C2%A0V2.7.pdf"}],
+}
+REFS["nsx-cluster"] = REFS["nsx-event-catalog"]
+REFS["nsx-transport-node"] = REFS["nsx-event-catalog"]
+
+# Lenovo Docs pages per server model (verified): the problem pages per component and the list of XClarity Controller
+# events of the model (every event ID, e.g. FQXSPMA2010N, has its message and user action there).
+LENOVO_MODELS = {
+    "sr650-v2": {"memory": "memory_problems", "power": "power_problems", "cooling": "observable_problems",
+                 "other": "troubleshooting_by_symptom", "storage": "troubleshooting_by_symptom", "cpu": "troubleshooting_by_symptom",
+                 "events": "xcc_error_messages"},
+    "sr630-v2": {"memory": "memory_problems", "power": "power_problems", "cooling": "observable_problems",
+                 "other": "observable_problems"},
+    "sr650-v3": {"memory": "memory_problems_rack_tower", "power": "power_problems_rack_tower",
+                 "cooling": "observable_problems_rack_tower", "other": "observable_problems_rack_tower", "events": "xcc_error_messages"},
+}
+PAGE_TITLES = {"memory_problems": "Memory problems", "power_problems": "Power problems", "observable_problems": "Observable problems",
+               "troubleshooting_by_symptom": "Troubleshooting by symptom", "memory_problems_rack_tower": "Memory problems",
+               "power_problems_rack_tower": "Power problems", "observable_problems_rack_tower": "Observable problems"}
+
+
+def lenovo_slug(model):
+    """'ThinkSystem SR650 V2' -> 'sr650-v2' ('' when the model is not recognised)."""
+    m = re.search(r"\b(s[rdt]\d{3}[a-z]?)(?:\s*(v\d))?\b", str(model or ""), re.I)
+    if not m:
+        return ""
+    return m.group(1).lower() + (f"-{m.group(2).lower()}" if m.group(2) else "")
+
+
+def lenovo(model, component, event_ids=()):
+    """References of a Lenovo server finding: the model's page for the component and its list of XCC events (naming the
+    event IDs to look up), when the model's pages are known; always the XCC event log pages."""
+    slug = lenovo_slug(model)
+    pages = LENOVO_MODELS.get(slug) or {}
+    out = []
+    if pages.get(component):
+        page = pages[component]
+        out.append({"vendor": "Lenovo", "title": f"ThinkSystem {slug.upper().replace('-', ' ')}: {PAGE_TITLES.get(page, page)}",
+                    "url": f"https://pubs.lenovo.com/{slug}/{page}"})
+    if pages.get("events"):
+        ids = ", ".join(sorted(set(i for i in event_ids if re.fullmatch(r"FQX[A-Z0-9]{6,12}", str(i))))[:4])
+        out.append({"vendor": "Lenovo", "title": f"XClarity Controller events of the {slug.upper().replace('-', ' ')}"
+                                                 + (f" (look up {ids})" if ids else ""),
+                    "url": f"https://pubs.lenovo.com/{slug}/xcc_error_messages"})
+    return out + REFS["lenovo-bmc"]
+
+
+def resolve(refs):
+    """[{"vendor", "title", "url"}] of the keys (or ready items), without duplicates; unknown keys are skipped."""
+    out, seen = [], set()
+    for ref in refs or []:
+        items = REFS.get(ref, []) if isinstance(ref, str) else [ref] if isinstance(ref, dict) else []
+        for item in items:
+            url = str(item.get("url") or "")
+            if not URL.match(url) or url in seen or not item.get("vendor") or not item.get("title"):
+                continue
+            seen.add(url)
+            out.append({"vendor": str(item["vendor"]), "title": str(item["title"]), "url": url})
+    return out[:MAX_REFS]

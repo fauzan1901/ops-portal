@@ -1,0 +1,81 @@
+# OpenStack volume info (READ ONLY), used by the Web UI in the Volume step:
+#  - if the LUN volume-<ID> is not in ONTAP: the name_id of the volume (backend name after migrate/retype), then the Web
+#    UI looks for the LUN volume-<name_id>;
+#  - with_instance=true: flow volume show -> the instance the volume is attached to (flavor, network interfaces, other
+#    volumes) and the role of the volume (boot / extended like vdb / detached).
+#
+#   ansible-playbook volume_info.yml -e @/etc/ontap_restore/sites.yml -e site=DCA -e volume_id=<uuid> [-e with_instance=true]
+- name: OpenStack volume info
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Volume info
+      block:
+        - name: Validate input
+          ansible.builtin.assert:
+            that:
+              - sites is defined and site | default('') in sites
+              - volume_id | default('') is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+            fail_msg: "Invalid input. Requires site (one of {{ (sites | default({})).keys() | list }}) and volume_id as a UUID."
+            quiet: true
+
+        - name: Site configuration
+          ansible.builtin.import_tasks: tasks/site.yml
+
+        - name: Volume info {{ volume_id }}
+          ansible.builtin.include_tasks: tasks/openstack_cmd.yml
+          vars:
+            os_label: "volume info {{ volume_id }}"
+            os_command: "openstack volume show {{ volume_id | quote }} -f json"
+
+        - name: Save volume info
+          ansible.builtin.set_fact:
+            os_volume: "{{ os_out.stdout | extract_json }}"
+
+        - name: Instance of the volume
+          ansible.builtin.include_tasks: tasks/instance_info.yml
+          when: with_instance | default(false) | bool
+
+        - name: Build volume info result
+          vars:
+            vol: "{{ os_volume }}"
+          ansible.builtin.set_fact:
+            job_result:
+              ok: true
+              mode: volume_info
+              summary: >-
+                Volume {{ volume_id }}: name_id {{ (vol | volume_name_id) or 'none' }}{{ (', ' ~ (volume_role_info.role | default('detached'))
+                ~ ((' ' ~ volume_role_info.device) if volume_role_info.device | default('') else '')
+                ~ ((' on instance ' ~ instance.name) if instance.name | default('') else '')) if with_instance | default(false) | bool else '' }}.
+              volume:
+                id: "{{ vol.id | default(volume_id) }}"
+                name: "{{ vol.name | default('', true) }}"
+                status: "{{ vol.status | default('') }}"
+                name_id: "{{ vol | volume_name_id }}"
+                size_gb: "{{ vol.size | default('') }}"
+                type: "{{ vol.type | default('', true) }}"
+                bootable: "{{ (vol.bootable | default('false') | string | lower) == 'true' }}"
+                host: "{{ vol['os-vol-host-attr:host'] | default('') }}"
+                project_id: "{{ vol['os-vol-tenant-attr:tenant_id'] | default('') }}"
+                availability_zone: "{{ vol.availability_zone | default('') }}"
+              instance: "{{ instance | default({}) }}"
+              instance_error: "{{ instance_error | default('') }}"
+              role: "{{ volume_role_info | default({}) }}"
+
+      rescue:
+        - name: Build failure result
+          ansible.builtin.set_fact:
+            job_result:
+              ok: false
+              mode: volume_info
+              step: "{{ ansible_failed_task.name | default('') }}"
+              error: "{{ ansible_failed_result.msg | default('no message') }}"
+
+      always:
+        - name: Save result
+          ansible.builtin.import_tasks: tasks/write_result.yml
+
+    - name: End with failed status
+      ansible.builtin.fail:
+        msg: "{{ job_result.error }}"
+      when: not job_result.ok

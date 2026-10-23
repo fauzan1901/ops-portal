@@ -1,0 +1,25 @@
+# One step of the VyOS upgrade on the VyOS (vs_label, vs_script; vs_timeout seconds, default 600): its output goes into
+# vu_steps; a step that ends with an error stops the upgrade unless vs_optional.
+- name: "{{ vs_label }}"
+  ansible.builtin.raw: "{{ (host_prefix ~ ' ' ~ (vs_script | quote)) if host_prefix else vs_script }}"
+  delegate_to: wi_target
+  register: vs_out
+  changed_when: true
+  failed_when: false
+  ignore_unreachable: true
+  timeout: "{{ vs_timeout | default(600) | int }}"
+
+- name: "Record: {{ vs_label }}"
+  ansible.builtin.set_fact:
+    vu_steps: >-
+      {{ vu_steps + [{'command': vs_label, 'rc': 255 if vs_out.unreachable | default(false) else vs_out.rc | default(1),
+                      'out': vs_out | wi_vu_out | wi_vu_clip}] }}
+
+- name: "Check: {{ vs_label }}"
+  ansible.builtin.assert:
+    that: not (vs_out.unreachable | default(false)) and vs_out.rc | default(1) == 0
+    fail_msg: >-
+      {{ vs_label }} failed ({{ 'not reachable' if vs_out.unreachable | default(false) else 'exit ' ~ vs_out.rc | default('?') }}):
+      {{ vs_out | wi_vu_out | wi_vu_clip(400) }}
+    quiet: true
+  when: not (vs_optional | default(false) | bool)

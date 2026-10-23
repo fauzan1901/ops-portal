@@ -1,0 +1,145 @@
+# Restore an OpenStack volume from a NetApp ONTAP snapshot (follows the WI), ONE volume per job:
+#   1. check all prerequisites again (same as plan.yml), including the selected pool and the action after the restore
+#   2. ONTAP: volume snapshot restore-file -> <LUN>-restore, wait until online and used = used of the original LUN
+#   2b. selected pool is not the LUN pool: lun move to the FlexVol of that pool (same SVM; pool from the selected volume
+#       type), wait until done
+#   3. OpenStack: cinder manage that LUN into the selected pool with the selected volume type (default: original type),
+#      wait until available (boot volume: the image properties of the original volume are copied)
+#   4. OpenStack: transfer to the target project (if different from the admin project)
+#   5. OpenStack (optional): attach to an instance in the target project, or a new instance from the boot volume (network
+#      per network interface: the original network if the target project can use it, or the target project network
+#      chosen by the operator)
+# Active data is never overwritten.
+#
+# Example from a terminal (ONTAP password through the environment, not as an argument):
+#   ansible-playbook restore.yml -e @/etc/ontap_restore/sites.yml -e site=DCA -e volume_id=<uuid> \
+#     -e snapshot=hourly.2025-12-17_1905 -e target_pool='hostgroup@backend#POOL' [-e project_id=<id>] \
+#     [-e new_volume_name=<name>] [-e post_action=attach -e attach_server_id=<uuid>] \
+#     [-e post_action=instance -e new_instance_name=<name>] \
+#     [-e '{"new_port_networks": [{"network_id": "<network>", "subnet_id": "<subnet or empty>"}]}']   # per port, in order
+- name: Restore a volume from an ONTAP snapshot
+  hosts: localhost
+  gather_facts: false
+  vars:
+    ontap_user: "{{ lookup('ansible.builtin.env', 'ONTAP_USER') }}"
+    ontap_password: "{{ lookup('ansible.builtin.env', 'ONTAP_PASSWORD') }}"
+    restore_run: true
+  module_defaults:
+    ansible.builtin.uri:
+      url_username: "{{ ontap_user }}"
+      url_password: "{{ ontap_password }}"
+      force_basic_auth: true
+      validate_certs: "{{ cfg.ontap.validate_certs | default(false) | bool }}"
+      use_proxy: false
+      timeout: 60
+  tasks:
+    - name: Restore
+      block:
+        - name: Preparation
+          ansible.builtin.import_tasks: tasks/prepare.yml
+
+        - name: Check all prerequisites again
+          ansible.builtin.import_tasks: tasks/discover.yml
+
+        - name: Verify all prerequisites are met
+          ansible.builtin.assert:
+            that: checks | rejectattr('ok') | list | length == 0
+            fail_msg: "Restore prerequisites are not met: {{ checks | rejectattr('ok') | map(attribute='detail') | join('; ') }}"
+            quiet: true
+
+        - name: Restore in ONTAP
+          ansible.builtin.import_tasks: tasks/ontap_restore.yml
+
+        # The selected pool is not the LUN pool: the LUN is first moved to the FlexVol of that pool, then cinder manage
+        # runs there.
+        - name: lun move to the selected pool
+          ansible.builtin.include_tasks: tasks/ontap_move.yml
+          when: move_target | length > 0
+
+        - name: Import into Cinder
+          ansible.builtin.import_tasks: tasks/openstack_manage.yml
+
+        - name: Target project and action after the restore
+          ansible.builtin.import_tasks: tasks/openstack_project.yml
+
+        - name: "ONTAP: LUN name after cinder manage"
+          ansible.builtin.uri:
+            url: "https://{{ cfg.ontap.host }}/api/storage/luns?name=*volume-{{ new_volume_id }}&fields=name"
+          register: final_lun
+          failed_when: false
+
+        - name: Build restore result
+          ansible.builtin.set_fact:
+            job_result:
+              ok: true
+              mode: restore
+              site: "{{ site }}"
+              summary: >-
+                Finished: new volume {{ new_volume_id }} ({{ volume_name_new }}, type {{ manage_volume_type or '-' }},
+                pool {{ cinder_host.split('#') | last }}) from snapshot {{ snapshot }} is in project
+                {{ target_project_info.name | default(target_project) }}{% if post_result.action | default('') == 'attach' and post_result.ok %},
+                attached to instance {{ post_result.server_name }} as {{ post_result.device }}{% elif post_result.action | default('') == 'instance' and post_result.ok %},
+                new instance {{ post_result.server_name }} ({{ post_result.server_id }}) is {{ post_result.status }}{% elif post_result.action | default('') %}.
+                WARNING: {{ 'attaching to the instance' if post_result.action == 'attach' else 'creating the new instance' }} failed:
+                {{ post_result.error }}{% endif %}.
+              volume_id: "{{ volume_id }}"
+              snapshot: "{{ snapshot }}"
+              snapshot_time: "{{ chosen_snapshot.local_time }}"
+              restore_path: "{{ restore_path }}"
+              lun_path: "{{ ((final_lun.json | default({})).records | default([]) | map(attribute='name') | first) | default(restore_path, true) }}"
+              cinder_pool: "{{ cinder_host }}"
+              lun_move:
+                flexvol: "{{ move_target.flexvol | default('') }}"
+                from: "{{ moved_from | default('') }}"
+                waited: "{{ move_wait.waited | default(0) }}"
+              used_wait:
+                used: "{{ used_wait.used }}"
+                target: "{{ used_wait.target }}"
+                reason: "{{ used_wait.reason }}"
+                waited: "{{ used_wait.waited }}"
+                note: "{{ used_wait.msg }}"
+              new_volume:
+                id: "{{ new_volume_id }}"
+                name: "{{ volume_name_new }}"
+                type: "{{ manage_volume_type }}"
+              image_properties: "{{ image_props_result | default({}) }}"
+              project:
+                id: "{{ target_project }}"
+                name: "{{ target_project_info.name | default('') }}"
+              transfer:
+                done: "{{ needs_transfer | bool }}"
+                id: "{{ transfer_id | default('') }}"
+                role_added: "{{ role_added | default(false) }}"
+                role_removed: "{{ role_removed | default(false) }}"
+              after_restore: "{{ post_result | default({}) }}"
+
+      rescue:
+        - name: Build failure result
+          ansible.builtin.set_fact:
+            job_result:
+              ok: false
+              mode: restore
+              site: "{{ site | default('') }}"
+              step: "{{ ansible_failed_task.name | default('') }}"
+              error: "{{ ansible_failed_result.msg | default('no message') }}"
+              restore_path: "{{ restore_path | default('') }}"
+              cinder_pool: "{{ (chosen_pool | default({})).host | default('') }}"
+              lun_move:
+                flexvol: "{{ (move_target | default({})).flexvol | default('') }}"
+                from: "{{ moved_from | default('') }}"
+              new_volume:
+                id: "{{ new_volume_id | default('') }}"
+                name: "{{ volume_name_new | default('') }}"
+              transfer:
+                id: "{{ transfer_id | default('') }}"
+                role_added: "{{ role_added | default(false) }}"
+                role_removed: "{{ role_removed | default(false) }}"
+
+      always:
+        - name: Save result
+          ansible.builtin.import_tasks: tasks/write_result.yml
+
+    - name: End with failed status
+      ansible.builtin.fail:
+        msg: "{{ job_result.error }}"
+      when: not job_result.ok

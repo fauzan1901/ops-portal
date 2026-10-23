@@ -1,0 +1,68 @@
+# The host or device the operator chose: a member of a hosts group of the site in sites.yml, or a host of the page
+# Hosts & SSH (the portal resolved it; the browser never sends an address). sites.yml hosts use the group's SSH key and
+# read-only account; portal hosts use their own credential: a private key (written to a temporary 0600 file, removed at
+# the end) or a password, from the environment only (WI_SSH_SECRET), and sudo when the credential says so. A host behind
+# a jump host is reached through it (ProxyCommand ssh -W) with the jump host's own key (WI_SSH_JUMP_SECRET) or password
+# (SSHPASS). A public address goes through the web proxy (WI_SSH_PROXY, HTTP CONNECT) when the portal sets host_target.proxy.
+- name: Validate the host
+  ansible.builtin.assert:
+    that:
+      - host_target is defined
+      - host_target.address | default('') is match('^[A-Za-z0-9_.:-]+$')
+      - host_target.name | default('') is match('^[A-Za-z0-9_.-]+$')
+    fail_msg: "No valid host for this check (hosts group in sites.yml)."
+    quiet: true
+
+- name: "SSH key of {{ host_target.name }}: temporary file"
+  ansible.builtin.tempfile:
+    state: file
+    suffix: .key
+  register: wi_keyfile
+  when: host_target.source | default('') == 'portal' and host_target.auth | default('') == 'key' and host_target.connection | default('ssh') != 'local'
+
+- name: "SSH key of {{ host_target.name }}: write it (mode 600)"
+  ansible.builtin.copy:
+    content: "{{ lookup('ansible.builtin.env', 'WI_SSH_SECRET') }}"
+    dest: "{{ wi_keyfile.path }}"
+    mode: "0600"
+  no_log: true
+  when: wi_keyfile.path is defined
+
+- name: "Jump host {{ host_target.jump.name | default('') }}: SSH key in a temporary file"
+  ansible.builtin.tempfile:
+    state: file
+    suffix: .key
+  register: wi_jumpkey
+  when: host_target.jump is defined and host_target.jump.auth | default('') == 'key' and host_target.connection | default('ssh') != 'local'
+
+- name: "Jump host {{ host_target.jump.name | default('') }}: write the key (mode 600)"
+  ansible.builtin.copy:
+    content: "{{ lookup('ansible.builtin.env', 'WI_SSH_JUMP_SECRET') }}"
+    dest: "{{ wi_jumpkey.path }}"
+    mode: "0600"
+  no_log: true
+  when: wi_jumpkey.path is defined
+
+- name: "Register host {{ host_target.name }} ({{ host_target.address }}{{ (', through ' ~ host_target.jump.name) if host_target.jump is defined else (', through the web proxy ' ~ host_target.proxy) if host_target.proxy | default('') else '' }})"
+  ansible.builtin.add_host:
+    name: wi_target
+    ansible_host: "{{ host_target.address }}"
+    ansible_port: "{{ host_target.port | default(22) }}"
+    ansible_user: "{{ host_target.user | default(omit, true) }}"
+    ansible_ssh_private_key_file: "{{ wi_keyfile.path if wi_keyfile.path is defined else host_target.private_key | default(omit) }}"
+    ansible_password: "{{ lookup('ansible.builtin.env', 'WI_SSH_SECRET') if host_target.auth | default('') == 'password' and host_target.connection | default('ssh') != 'local' else omit }}"
+    ansible_become: "{{ host_target.become | default(false) | bool }}"
+    ansible_become_method: sudo
+    ansible_become_password: "{{ lookup('ansible.builtin.env', 'WI_SSH_SECRET') if host_target.privilege | default('') == 'sudo_password' and host_target.become | default(false) | bool else omit }}"
+    ansible_connection: "{{ host_target.connection | default('ssh') }}"
+    ansible_ssh_use_tty: false
+    ansible_ssh_common_args: >-
+      {{ host_target.ssh_args | default('-o StrictHostKeyChecking=accept-new') }}{{ (' ' ~ (host_target | wi_ssh_route(wi_jumpkey.path | default(''))))
+         if host_target.connection | default('ssh') != 'local' else '' }}
+  no_log: "{{ host_target.auth | default('') == 'password' }}"
+  changed_when: false
+
+- name: Prepare the host command
+  ansible.builtin.set_fact:
+    # Test mode only: a fake host program instead of ssh (host_target.command).
+    host_prefix: "{{ host_target.command | default('') }}"

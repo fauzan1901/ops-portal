@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="ui-version" content="{{ ui_version }}">
+<title>Ops Portal</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='3' fill='%230066cc'/%3E%3Cpath d='M8 8h6v6H8zM18 8h6v6h-6zM8 18h6v6H8zM18 18h6v6h-6z' fill='white'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="{{ url_for('static', filename='portal.css', v=ui_version) }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='switcher.css', v=ui_version) }}">
+</head>
+<body>
+{% include "_sprite.html" %}
+
+<!-- ======================= LOGIN ======================= -->
+<div class="pf-login" id="loginView" hidden>
+  <div class="pf-login__container">
+    <header class="pf-login__header">
+      <div class="pf-masthead__brand"><span class="pf-masthead__logo"><svg class="pf-icon" aria-hidden="true"><use href="#i-cloud"></use></svg></span><span><b>Acme Cloud</b> Portal</span></div>
+      <p>One sign-in for the Acme Cloud automation tools, run with Ansible.</p>
+      <ul>
+        <li><svg class="pf-icon" aria-hidden="true"><use href="#i-checklist"></use></svg>Operation Automation: checks from the Knowledge Base work instructions and platform health</li>
+        <li><svg class="pf-icon" aria-hidden="true"><use href="#i-database"></use></svg>ONTAP Restore: OpenStack volumes from NetApp snapshots</li>
+        <li><svg class="pf-icon" aria-hidden="true"><use href="#i-network"></use></svg>ACI: static port, provisioning, report</li>
+      </ul>
+    </header>
+    <main class="pf-login__main">
+      <header class="pf-login__main-header">
+        <h1 class="pf-title">Sign in</h1>
+        <p id="loginIntro">Use your Active Directory account or a local portal account.</p>
+      </header>
+      <form class="pf-login__main-body" id="loginForm" novalidate>
+        <div id="loginNotice"></div>
+        <div class="pf-alert pf-m-danger" id="loginError" role="alert" hidden></div>
+        <div class="pf-alert pf-m-info" id="loginInfo" role="status" hidden></div>
+        <div id="ssoBlock" hidden>
+          <a class="pf-btn pf-m-primary pf-m-block" id="ssoBtn" href="/auth/sso/login"><svg class="pf-icon" aria-hidden="true"><use href="#i-lock"></use></svg><span id="ssoLabel">Sign in with Duo SSO</span></a>
+          <div class="login-divider"><span id="ssoDivider">or with a local portal account</span></div>
+        </div>
+        <div class="pf-form-group">
+          <label class="pf-form-label" for="loginUser">Username <span class="pf-required" aria-hidden="true">*</span></label>
+          <input class="pf-form-control" id="loginUser" autocomplete="username" autocapitalize="off" spellcheck="false" maxlength="256" placeholder="Username, e.g. jdoe">
+        </div>
+        <div class="pf-form-group">
+          <label class="pf-form-label" for="loginPass">Password <span class="pf-required" aria-hidden="true">*</span></label>
+          <div class="pf-input-group">
+            <input class="pf-form-control" id="loginPass" type="password" autocomplete="current-password" maxlength="512">
+            <button type="button" class="pf-btn pf-m-plain" id="togglePass" aria-label="Show password" aria-pressed="false"><svg class="pf-icon" aria-hidden="true"><use href="#i-eye"></use></svg></button>
+          </div>
+        </div>
+        <button type="submit" class="pf-btn pf-m-primary pf-m-block" id="loginBtn">Sign in</button>
+      </form>
+    </main>
+  </div>
+</div>
+
+<!-- ======================= PORTAL ======================= -->
+<div class="pf-page" id="appView" hidden>
+  <header class="pf-masthead">
+    <button type="button" class="pf-masthead__toggle" id="navToggle" aria-label="Toggle navigation" aria-expanded="true"><svg class="pf-icon" aria-hidden="true"><use href="#i-bars"></use></svg></button>
+    <div class="pf-masthead__brand"><span class="pf-masthead__logo"><svg class="pf-icon" aria-hidden="true"><use href="#i-cloud"></use></svg></span><span><b>Acme Cloud</b> Portal</span></div>
+    <div class="pf-masthead__content">
+      <div id="portalLauncher" data-current="home"></div>
+      <div class="pf-masthead__user" id="userMenuWrap">
+        <button type="button" class="pf-user-toggle" id="userToggle" aria-haspopup="menu" aria-expanded="false" aria-controls="userMenu">
+          <span class="pf-avatar" id="userAvatar" aria-hidden="true"></span>
+          <span class="pf-user-toggle__name" id="userName"></span>
+          <span class="pf-label pf-m-compact" id="userRole"></span>
+          <svg class="pf-icon" aria-hidden="true"><use href="#i-caret-down"></use></svg>
+        </button>
+        <div class="pf-menu" id="userMenu" role="menu" aria-labelledby="userToggle" hidden>
+          <div class="pf-menu__header">
+            <b id="userMenuName"></b>
+            <span class="mono pf-text-secondary" id="userMenuLogin"></span>
+            <span class="pf-text-secondary pf-text-sm" id="userMenuMfa"></span>
+            <span class="pf-text-secondary pf-text-sm" id="userMenuClient"></span>
+          </div>
+          <button type="button" class="pf-menu__item" role="menuitem" id="logoutBtn"><svg class="pf-icon" aria-hidden="true"><use href="#i-sign-out"></use></svg>Sign out</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <aside class="pf-sidebar" id="sidebar">
+    <nav class="pf-nav" aria-label="Navigation">
+      <ul>
+        <li><a class="pf-nav__link" href="#/home" data-route="home"><svg class="pf-icon" aria-hidden="true"><use href="#i-home"></use></svg>Home</a></li>
+      </ul>
+      <div class="pf-nav__section">Modules</div>
+      <ul id="navModules"></ul>
+      <div class="pf-nav__section admin-only" hidden>Administration</div>
+      <ul class="admin-only" hidden>
+        <li><a class="pf-nav__link" href="#/users" data-route="users"><svg class="pf-icon" aria-hidden="true"><use href="#i-users"></use></svg>Users</a></li>
+        <li><a class="pf-nav__link" href="#/credentials" data-route="credentials"><svg class="pf-icon" aria-hidden="true"><use href="#i-key"></use></svg>Credentials</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main class="pf-page__main">
+    <!-- ---------- Home: the modules of this account ---------- -->
+    <div id="page-home" data-page="home">
+      <section class="pf-page__section pf-m-light">
+        <h1 class="pf-title" id="homeTitle">Welcome</h1>
+        <p>Choose a module. Every module uses this sign-in; switch modules any time with the <svg class="pf-icon" aria-hidden="true" style="width:14px;height:14px;fill:currentColor;stroke:none;vertical-align:-2px" viewBox="0 0 32 32"><path d="M2 2h8v8H2zM12 2h8v8h-8zM22 2h8v8h-8zM2 12h8v8H2zM12 12h8v8h-8zM22 12h8v8h-8zM2 22h8v8H2zM12 22h8v8h-8zM22 22h8v8h-8z"/></svg> button in the masthead.</p>
+      </section>
+      <section class="pf-page__section">
+        <div class="pf-l-gallery" id="moduleGallery" role="list" aria-label="Modules"></div>
+      </section>
+    </div>
+
+    <!-- ---------- Users (administrators) ---------- -->
+    <div id="page-users" data-page="users" hidden>
+      <section class="pf-page__section pf-m-light">
+        <h1 class="pf-title">Users</h1>
+        <p>AD accounts that can sign in to the portal, their role, and the modules they may use. Administrators always use every module. Local portal accounts are managed on the server with <code>deploy/local-admin.sh</code>.</p>
+      </section>
+      <section class="pf-page__section">
+        <div class="pf-card">
+          <div class="pf-toolbar">
+            <button type="button" class="pf-btn pf-m-primary" id="addUserBtn"><svg class="pf-icon" aria-hidden="true"><use href="#i-plus"></use></svg>Add user</button>
+            <span class="pf-toolbar__spacer" id="userCount"></span>
+          </div>
+          <div class="pf-table-wrap">
+            <table class="pf-table" aria-label="Users">
+              <thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Modules</th><th>Status</th><th>Last sign-in</th><th>Added by</th><th><span class="sr-only">Actions</span></th></tr></thead>
+              <tbody id="userList"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="pf-card">
+          <div class="pf-card__header"><h2 class="pf-card__title">Recent activity</h2>
+            <div class="pf-card__actions"><button type="button" class="pf-btn pf-m-secondary pf-m-small" id="evExportBtn">Export CSV</button></div></div>
+          <div class="pf-toolbar">
+            <select class="pf-form-control" id="evUser" aria-label="User"><option value="">All users</option></select>
+            <select class="pf-form-control" id="evKind" aria-label="Activity type">
+              <option value="">All activity</option>
+              <option value="wi">Operation Automation</option>
+              <option value="restore,deletion">ONTAP Restore</option>
+              <option value="static_port,provisioning">ACI changes</option>
+              <option value="login,logout">Sign-in and sign-out</option>
+              <option value="user,local,credential">Users and credentials</option>
+            </select>
+            <label class="pf-toolbar__field">From <input class="pf-form-control" type="date" id="evSince"></label>
+            <label class="pf-toolbar__field">To <input class="pf-form-control" type="date" id="evUntil"></label>
+            <span class="pf-toolbar__spacer" id="eventCount"></span>
+          </div>
+          <div class="pf-card__body pf-m-flush">
+            <div class="pf-table-wrap">
+              <table class="pf-table" aria-label="Recent activity">
+                <thead><tr><th>Time</th><th>User</th><th>Action</th><th>Target</th><th>Details</th><th>Client IP</th></tr></thead>
+                <tbody id="eventList"></tbody>
+              </table>
+            </div>
+            <div class="pf-toolbar" id="evMore" hidden><button type="button" class="pf-btn pf-m-link" id="evMoreBtn">Load more</button></div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ---------- Credentials (administrators) ---------- -->
+    <div id="page-credentials" data-page="credentials" hidden>
+      <section class="pf-page__section pf-m-light">
+        <h1 class="pf-title">Credentials</h1>
+        <p>Service accounts the modules use to reach APIC, ONTAP, vCenter, NSX-T and vCloud Director, with the address of each system where it can be changed here. Operation Automation reads ONTAP with the ONTAP Restore account and uses read-only accounts for vCenter, NSX-T and vCloud Director. Passwords are stored encrypted and are never shown again.</p>
+      </section>
+      <section class="pf-page__section">
+        <div id="credNotice"></div>
+        <div class="pf-card">
+          <div class="pf-table-wrap">
+            <table class="pf-table" aria-label="Credentials">
+              <thead><tr><th>Target</th><th>Host</th><th>Username</th><th>Last changed</th><th>Status</th><th><span class="sr-only">Actions</span></th></tr></thead>
+              <tbody id="credList"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<dialog class="pf-modal" id="addUserDialog" aria-labelledby="addUserTitle">
+  <form id="addUserForm" novalidate>
+    <header class="pf-modal__header">
+      <h1 class="pf-title" id="addUserTitle">Add user</h1>
+      <button type="button" class="pf-btn pf-m-plain" data-close aria-label="Close"><svg class="pf-icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+    </header>
+    <div class="pf-modal__body">
+      <div class="pf-alert pf-m-danger pf-mb-md" id="addUserError" role="alert" hidden></div>
+      <div class="pf-form-group">
+        <label class="pf-form-label" for="addUserName">AD username <span class="pf-required" aria-hidden="true">*</span></label>
+        <input class="pf-form-control" id="addUserName" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="256" aria-describedby="addUserHelp">
+        <span class="pf-helper-text" id="addUserHelp">The sAMAccountName, for example jdoe.</span>
+      </div>
+      <div class="pf-form-group">
+        <label class="pf-form-label" for="addUserRole">Role</label>
+        <select class="pf-form-control" id="addUserRole">
+          <option value="operator">Operator</option>
+          <option value="admin">Administrator</option>
+        </select>
+      </div>
+      <fieldset class="pf-check-list" id="addUserModules"></fieldset>
+    </div>
+    <footer class="pf-modal__footer">
+      <button type="submit" class="pf-btn pf-m-primary" id="addUserSave">Add</button>
+      <button type="button" class="pf-btn pf-m-link" data-close>Cancel</button>
+    </footer>
+  </form>
+</dialog>
+
+<dialog class="pf-modal" id="modulesDialog" aria-labelledby="modulesTitle">
+  <form id="modulesForm" novalidate>
+    <header class="pf-modal__header">
+      <h1 class="pf-title" id="modulesTitle">Module access</h1>
+      <button type="button" class="pf-btn pf-m-plain" data-close aria-label="Close"><svg class="pf-icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+    </header>
+    <div class="pf-modal__body">
+      <div class="pf-alert pf-m-danger pf-mb-md" id="modulesError" role="alert" hidden></div>
+      <fieldset class="pf-check-list" id="modulesList"></fieldset>
+    </div>
+    <footer class="pf-modal__footer">
+      <button type="submit" class="pf-btn pf-m-primary" id="modulesSave">Save</button>
+      <button type="button" class="pf-btn pf-m-link" data-close>Cancel</button>
+    </footer>
+  </form>
+</dialog>
+
+<dialog class="pf-modal" id="credDialog" aria-labelledby="credTitle">
+  <form id="credForm" novalidate>
+    <header class="pf-modal__header">
+      <h1 class="pf-title" id="credTitle">Set credentials</h1>
+      <button type="button" class="pf-btn pf-m-plain" data-close aria-label="Close"><svg class="pf-icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+    </header>
+    <div class="pf-modal__body">
+      <p class="pf-text-secondary pf-mb-md" id="credInfo"></p>
+      <div class="pf-alert pf-m-danger pf-mb-md" id="credError" role="alert" hidden></div>
+      <div class="pf-form-group" id="credAddrGroup" hidden>
+        <label class="pf-form-label" for="credAddr">Address <span class="pf-required" id="credAddrReq" aria-hidden="true">*</span></label>
+        <input class="pf-form-control" id="credAddr" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="260" placeholder="IP address or DNS name, e.g. 172.26.8.20" aria-describedby="credAddrHelp">
+        <span class="pf-helper-text" id="credAddrHelp"></span>
+      </div>
+      <div class="pf-form-group">
+        <label class="pf-form-label" for="credUser">Username <span class="pf-required" aria-hidden="true">*</span></label>
+        <input class="pf-form-control" id="credUser" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="128">
+      </div>
+      <div class="pf-form-group">
+        <label class="pf-form-label" for="credPass">Password <span class="pf-required" id="credPassReq" aria-hidden="true">*</span></label>
+        <input class="pf-form-control" id="credPass" type="password" autocomplete="new-password" maxlength="512" aria-describedby="credPassHelp">
+        <span class="pf-helper-text" id="credPassHelp">The password is stored encrypted and is never shown again.</span>
+      </div>
+    </div>
+    <footer class="pf-modal__footer">
+      <button type="submit" class="pf-btn pf-m-primary" id="credSave">Save</button>
+      <button type="button" class="pf-btn pf-m-link" data-close>Cancel</button>
+    </footer>
+  </form>
+</dialog>
+
+<dialog class="pf-modal pf-m-small" id="confirmDialog" aria-labelledby="confirmTitle" aria-describedby="confirmBody">
+  <form method="dialog">
+    <header class="pf-modal__header">
+      <h1 class="pf-title" id="confirmTitle"></h1>
+    </header>
+    <div class="pf-modal__body"><p id="confirmBody"></p></div>
+    <footer class="pf-modal__footer">
+      <button type="submit" class="pf-btn pf-m-danger" value="ok" id="confirmOk">Remove</button>
+      <button type="submit" class="pf-btn pf-m-link" value="cancel" id="confirmCancel">Cancel</button>
+    </footer>
+  </form>
+</dialog>
+
+<div class="pf-alert-group" id="toasts" aria-live="polite"></div>
+<script src="{{ url_for('static', filename='switcher.js', v=ui_version) }}"></script>
+<script src="{{ url_for('static', filename='shell.js', v=ui_version) }}"></script>
+</body>
+</html>

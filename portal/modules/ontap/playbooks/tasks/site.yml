@@ -1,0 +1,42 @@
+# Site configuration from sites.yml: validation, the command to the director, and the OpenStack management host.
+- name: Load site configuration {{ site }}
+  ansible.builtin.set_fact:
+    cfg: "{{ sites[site] }}"
+    restore_suffix: "{{ restore_suffix | default('-restore') }}"
+
+- name: Validate site configuration {{ site }}
+  ansible.builtin.assert:
+    that:
+      - (cfg.ontap | default({})).host | default('') is match('^[A-Za-z0-9_.:-]+$')
+      - (cfg.mgmt | default({})).host | default('') is match('^[A-Za-z0-9_.:-]+$')
+      - (cfg.director | default({})).host | default('') is match('^[A-Za-z0-9_.:-]+$')
+      - (cfg.director | default({})).user | default('') is match('^[A-Za-z0-9_.-]+$')
+      - (cfg.director.overcloudrc | default('~/overcloudrc')) is match('^[~A-Za-z0-9_./-]+$')
+      - (cfg.openstack | default({})).transfer_role | default('member') is match('^[A-Za-z0-9_-]+$')
+      - restore_suffix is match('^-[A-Za-z0-9_.-]{1,32}$')
+    fail_msg: >-
+      The configuration of site {{ site }} in sites.yml is incomplete or invalid.
+      Fill in ontap.host, mgmt.host, director.host, and director.user (without < >).
+    quiet: true
+
+- name: Prepare the director command
+  ansible.builtin.set_fact:
+    overcloudrc: "{{ cfg.director.overcloudrc | default('~/overcloudrc') }}"
+    transfer_role: "{{ (cfg.openstack | default({})).transfer_role | default('member') }}"
+    # Director = management host (same IP): the command runs directly on that host, without a second ssh.
+    director_prefix: >-
+      {{ cfg.director.command | default('bash -c' if cfg.director.host == cfg.mgmt.host else
+         'ssh -o BatchMode=yes -o ConnectTimeout=15 -p ' ~ (cfg.director.port | default(22)) ~ ' '
+         ~ ((cfg.director.user ~ '@' ~ cfg.director.host) | quote)) }}
+
+- name: Register the OpenStack management host
+  ansible.builtin.add_host:
+    name: mgmt
+    ansible_host: "{{ cfg.mgmt.host }}"
+    ansible_port: "{{ cfg.mgmt.port | default(22) }}"
+    ansible_user: "{{ cfg.mgmt.user | default(omit) }}"
+    ansible_ssh_private_key_file: "{{ cfg.mgmt.private_key | default(omit) }}"
+    ansible_connection: "{{ cfg.mgmt.connection | default('ssh') }}"
+    ansible_ssh_use_tty: false
+    ansible_ssh_common_args: "{{ cfg.mgmt.ssh_args | default('-o StrictHostKeyChecking=accept-new') }}"
+  changed_when: false

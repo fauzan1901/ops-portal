@@ -1,0 +1,806 @@
+# Operation Automation catalog: every work instruction of the Knowledge Base (kb.example.com, collective "Knowledge
+# Based") and what the portal checks for it. Read when the portal starts; edit, then restart the portal.
+#
+# status   ready    the check runs (read-only)
+#          planned  designed, waits for access or a client (see reason)
+#          manual   nothing to read automatically (a change, a customer device, a UI action): the WI is the guide
+#          module   done by another portal module (link)
+# needs    access the check cannot run without: openstack, undercloud (the director with stackrc), ontap (the ONTAP
+#          Restore account of the site), ro-vcenter, ro-nsxt, ro-vcd, hosts:<group> (hosts:bmc = the page BMC)
+# uses     optional access: steps that need it are skipped without it
+# params   name, label, type (int, text, uuid, uuid_or_name, project, ip, port, cidr, host, service, ip_port,
+#          select), required, default, min/max, options (select), groups (host), help, mode (instance|ip)
+# wi       Knowledge Base pages (page id from the collective, title)
+# basis    platform: a health check of the platform itself, not from a Knowledge Base page (wi is empty)
+
+# categories: one page per product in the left menu. icon = a symbol of the portal sprite (templates/_sprite.html).
+categories:
+  - {id: flex, title: "Acme Flex (OpenStack)", icon: cloud, summary: "Cinder pools, volume types, quota, stuck instances and volumes, attach, instance network and ports."}
+  - {id: netapp, title: "NetApp ONTAP", icon: database, summary: "Cluster health, LIFs on their home ports, restore of an OpenStack volume."}
+  - {id: prime, title: "Acme Prime (VMware)", icon: server, summary: "Datastores, host load and resource pools, vCloud VMs and edge gateways, NSX-T SNAT."}
+  - {id: cdn, title: "Acme CDN", icon: network, summary: "Disk and memory alerts of the CDN VMs, Grafana datasource, repository website, Varnish MSE."}
+  - {id: dns, title: "Acme DNS", icon: search, summary: "Recursor query logging that fills the disk."}
+  - {id: network, title: "Network (VyOS, NSX-T, Huawei, ACI)", icon: network, summary: "VyOS NAT and routes, VyOS upgrade, Huawei BGP prefixes, Linux firewall behind NSX-T, ACI static ports."}
+  - {id: siem, title: "SIEM log collection", icon: list, summary: "rsyslog forwarders, the collector, ESXi and Windows log sources."}
+  - {id: linux, title: "Linux VM (Acme Tolong)", icon: terminal, summary: "Services and ports inside a VM, emergency mode and login recovery."}
+  - {id: gb200, title: "GB200", icon: cubes, summary: "Compute tray NIC links and NVLink switches."}
+  - {id: box, title: "Acme Box", icon: database, summary: "File transfer issues of Acme Box."}
+  - {id: hardware, title: "Servers (BMC)", icon: server, summary: "Hardware health of the servers through their BMC (Redfish): power supplies, fans, temperatures, memory, disks, event log."}
+
+checks:
+  # ------------------------------------------------------------------ Acme Flex (OpenStack)
+  - id: cinder-pool-usage
+    category: flex
+    title: Cinder volume over 80%
+    summary: Used space of every Cinder pool (ONTAP FlexVol, else Cinder total - free; not the overcommitted allocation), the volumes and snapshots older than 2 weeks in the pools above the threshold, and where to migrate them — tick the volumes to migrate one at a time (a volume with snapshots migrates after its approved snapshots are deleted; a failed migration is cleaned up and the next pool is tried).
+    status: ready
+    needs: [openstack]
+    uses: [ontap]
+    wi: [{page: 5546, title: "Cinder Volume Over 80%"}]
+    steps: [Identify the affected Cinder pools, Volumes in the affected pools, Migration target, Evaluate snapshots]
+    params:
+      - {name: threshold, label: "Alert threshold (%)", type: int, default: 80, min: 50, max: 99, help: "The Grafana alert fires at 80%. Pools 10% below are an early warning."}
+      - {name: pool, label: "Cinder pool (optional)", type: text, pattern: "^[A-Za-z0-9_.@#-]{1,128}$", help: "Part of the pool name, e.g. DCAOPNSTACK_CINDER_10. Empty = all pools."}
+      - {name: snapshot_days, label: "Snapshots to clean up: older than (days)", type: int, default: 14, min: 1, max: 365, help: "Only snapshots older than this are offered for deletion (after the volume owner confirms)."}
+
+  - id: volume-type-legacy
+    category: flex
+    title: Volumes on an old volume type
+    summary: Volumes that still use an old type (standard, basic, premium) — snapshots, root disk resize and the Backup Scheduler fail on them.
+    status: ready
+    needs: [openstack]
+    wi:
+      - {page: 5531, title: "Volume Snapshot Error on the Backend (Horizon Portal)"}
+      - {page: 5538, title: "VM Fails to Resize Root Disk"}
+      - {page: 5540, title: "Backup Scheduler Does Not Run Snapshots"}
+    steps: [Find the project, Old volume types of this site, Volumes on an old type]
+    params:
+      - {name: project, label: "Project (ID or name, optional)", type: project, help: "Empty = every project of the site."}
+
+  - id: project-quota
+    category: flex
+    title: Project quota full
+    summary: Quota use of one project (instances, vCPU, RAM, volumes, GiB, snapshots, ports, floating IPs).
+    status: ready
+    needs: [openstack]
+    wi:
+      - {page: 5532, title: "Failed to Create a New Instance"}
+      - {page: 5538, title: "VM Fails to Resize Root Disk"}
+    steps: [Find the project, Compute quota, Block storage quota, Network quota]
+    params:
+      - {name: project, label: "Project (ID or name)", type: project, required: true}
+
+  - id: stuck-resources
+    category: flex
+    title: Instances or volumes stuck
+    summary: Instances in BUILD or ERROR, volumes stuck attaching/detaching/reserved, and volume retypes that did not finish.
+    status: ready
+    needs: [openstack]
+    wi:
+      - {page: 5541, title: "Instance Stuck in Building Status"}
+      - {page: 5544, title: "Rollback Volume Type"}
+    steps: [Instances in BUILD, Instances in ERROR, Volumes in a transitional state, Volumes in an error state, Volume migrations / retypes not finished, Old failed migrations (marker only)]
+    params:
+      - {name: older_than, label: "Stuck for at least (minutes)", type: int, default: 30, min: 5, max: 10080}
+      - {name: project, label: "Project (ID or name, optional)", type: project, help: "Instances of this project only. Empty = every project."}
+
+  - id: volume-attach
+    category: flex
+    title: Volume cannot be attached again
+    summary: Where the volume is still attached in OpenStack (although the Service Portal shows it detached), the state of that instance, and the exact detach / reset / attach commands.
+    status: ready
+    needs: [openstack]
+    wi:
+      - {page: 5535, title: "Volume Cannot Be Attached Again"}
+      - {page: 5534, title: "Storage Cannot Be Attached Again After Being Detached in the Service Portal"}
+    steps: [Volume status in Cinder, Still attached in Horizon, Instance to attach to]
+    params:
+      - {name: volume, label: "Volume ID", type: uuid, required: true}
+      - {name: instance, label: "Instance to attach to (optional)", type: uuid, help: "The instance the customer wants the volume on. Gives the exact attach command."}
+
+  - id: instance-network
+    category: flex
+    title: Instance cannot be reached
+    summary: Status and compute of an instance, its ports, floating IPs, security group rules for a port and ICMP, subnet room, and a TCP test from the portal server.
+    status: ready
+    needs: [openstack]
+    wi:
+      - {page: 5537, title: "Instance Cannot Connect (SSH, HTTPS, Ping, etc.)"}
+      - {page: 5539, title: "Floating IP Cannot Be Attached to a VPC Instance Interface"}
+      - {page: 5536, title: "Instance Cannot Connect Through the Metro Network (VPC Simple Normal)"}
+    steps: [Instance status in Acme Flex, Network interfaces and floating IPs, Security groups allow the port, Security groups allow ping, Free addresses in the subnets, TCP test from the portal server]
+    params:
+      - {name: instance, label: "Instance ID", type: uuid, required: true}
+      - {name: port, label: "Port (optional)", type: port, help: "e.g. 22 (SSH), 443 (HTTPS), 6600. Checks the security groups for it."}
+      - {name: probe_ip, label: "Test TCP to (optional)", type: ip, help: "Usually the floating IP. Needs the port."}
+
+  - id: custom-port-tcp
+    category: flex
+    title: "Alert: Custom Port TCP <SITE> <PORT> is DOWN"
+    summary: From the IP and port of the UptimeRobot alert — TCP test, which instance owns the IP, its status, and the security groups.
+    status: ready
+    needs: [openstack]
+    wi: [{page: 6924, title: "WI_custom_port_tcp_down"}]
+    steps: [Find the instance of the IP, Instance status in Acme Flex, Network interfaces and floating IPs, Security groups allow the port, TCP test from the portal server]
+    params:
+      - {name: ip, label: "IP address of the alert", type: ip, required: true}
+      - {name: port, label: "Port of the alert", type: port, required: true}
+
+  - id: openstack-services
+    category: flex
+    title: OpenStack services and agents
+    summary: "Platform health (not from a KB page): nova and cinder services down, neutron agents dead (OVN / OVS), the instances on a compute whose nova-compute is down, old records of removed nodes, and the external address pools (floating IPs) that are filling up."
+    status: ready
+    needs: [openstack]
+    basis: platform
+    wi: []
+    steps: [Compute services (nova), Block storage services (cinder), Network agents (neutron), External address pools]
+    params:
+      - {name: ip_warn, label: "Address pool warning at (%)", type: int, default: 85, min: 50, max: 99}
+      - {name: ip_fail, label: "Address pool problem at (%)", type: int, default: 95, min: 50, max: 100}
+
+  - id: ironic-nodes
+    category: flex
+    title: Bare metal nodes (BMC power state)
+    summary: "Platform health (not from a KB page): the overcloud nodes as the undercloud (ironic) reads them through their BMC — powered off while deployed, maintenance, fault 'power failure' (BMC not answering: Pacemaker cannot fence that controller either)."
+    status: ready
+    needs: [undercloud]
+    basis: platform
+    wi: []
+    steps: [Bare metal nodes (ironic, through the BMC)]
+    params: []
+
+  - id: pacemaker-health
+    category: flex
+    title: Pacemaker and fencing (controllers)
+    summary: "Platform health (not from a KB page): pcs status of the controllers (quorum, offline / unclean nodes, Galera, RabbitMQ, Redis, HAProxy, OVN DB bundles, VIPs, cinder-volume), failed actions, fencing (stonith-enabled, stonith devices, failed and past fencing), RabbitMQ partitions and alarms, time sync. Read on the controllers through the director."
+    status: ready
+    needs: [undercloud]
+    basis: platform
+    wi: []
+    steps: [Controllers reached from the director, Cluster quorum and nodes, Cluster resources, Failed resource actions, Fencing (STONITH), RabbitMQ cluster, Time sync of the controllers, Cluster daemons]
+    params: []
+
+  - id: overcloud-logs
+    category: flex
+    title: Overcloud logs (errors and known problems)
+    summary: "Platform health (not from a KB page): the warning / error lines of the last hours on the controllers (and the compute of an instance, or one node): nova, neutron / OVN, cinder, keystone, glance, RabbitMQ, Galera, HAProxy, Pacemaker / corosync and the kernel. Known problems are recognised and linked to Red Hat; for an instance, its request IDs are followed through the logs (timeline)."
+    status: ready
+    needs: [undercloud]
+    uses: [openstack]
+    basis: platform
+    wi: []
+    steps: [Overcloud nodes, Known problems in the logs, Other errors, Timeline of the instance's requests]
+    params:
+      - {name: component, label: "Logs of", type: select, options: [all, nova, neutron, cinder, keystone, glance, rabbitmq, galera, haproxy, pacemaker, kernel], default: all}
+      - {name: hours, label: "Last (hours)", type: int, default: 6, min: 1, max: 72}
+      - {name: instance, label: "Instance ID (optional)", type: uuid, help: "Follows this instance and the request IDs of its actions (openstack server event list) through nova, neutron and cinder; reads its compute too."}
+      - {name: request_id, label: "Request ID (optional)", type: text, pattern: "^req-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", help: "e.g. from an error in Horizon or the API: req-…"}
+      - {name: node, label: "Only this node (optional)", type: text, pattern: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$", help: "An overcloud node name, e.g. overcloud-novacompute-3. Empty = the controllers."}
+
+  - id: collect-logs
+    category: flex
+    title: Collect logs (overcloud nodes, full log bundle)
+    summary: "Log collection (permission collect logs; not from a KB page): every log line of a time window on the controllers, the computes or named nodes — nova, placement, libvirt / QEMU, neutron, OVN / Open vSwitch, cinder, glance, keystone, heat, Horizon, RabbitMQ, Galera, HAProxy, Pacemaker / corosync, iscsid / multipathd, the kernel and /var/log/messages, rotated files included, tracebacks kept whole — as one bundle to download (one .tar.gz per node, MANIFEST). Secrets are masked on the node before the lines leave it; nothing is left on the nodes. The bundle is kept 7 days on the portal server."
+    status: ready
+    needs: [undercloud]
+    uses: [openstack]
+    basis: platform
+    permission: wi-logs
+    bundle: true
+    timeout_minutes: 120
+    wi: []
+    steps: [Overcloud nodes, Room on the nodes, Logs collected per node, Files in the bundle]
+    params:
+      - {name: scope, label: "Nodes", type: select, options: [controllers, computes, all, named], default: controllers, help: "named = only the nodes in Node names. At most 12 nodes per run."}
+      - {name: nodes, label: "Node names (optional)", type: text, pattern: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}(,[A-Za-z0-9][A-Za-z0-9_.-]{0,62}){0,11}$", help: "Comma-separated, added to the choice above, e.g. overcloud-novacompute-3,overcloud-novacompute-7"}
+      - {name: instance, label: "Instance ID (optional)", type: uuid, help: "Adds the compute the instance runs on."}
+      - {name: preset, label: "Logs of", type: select, options: [all, compute, network, storage, controlplane, nova, placement, libvirt, neutron, ovn, cinder, glance, keystone, heat, horizon, rabbitmq, galera, haproxy, pacemaker, iscsi, kernel, system], default: all, help: "compute = nova, libvirt, neutron, OVN, iscsid, kernel, messages; network = neutron, OVN, HAProxy, kernel, messages; storage = cinder, glance, nova, iscsid, kernel, messages; controlplane = the API services, RabbitMQ, Galera, HAProxy, Pacemaker, messages."}
+      - {name: hours, label: "Time window (hours)", type: int, default: 6, min: 1, max: 72}
+      - {name: until, label: "Window ends at (optional)", type: text, pattern: "^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}$", help: "Site time, YYYY-MM-DD HH:MM (e.g. just after the incident). Empty = now."}
+      - {name: max_mb, label: "At most per node (MB, uncompressed)", type: int, default: 1024, min: 50, max: 4096, help: "When reached, the oldest rotated files are left out (listed in MANIFEST.txt)."}
+
+  - id: sos-report
+    category: flex
+    title: sos report for Red Hat support (overcloud nodes)
+    summary: "Log collection (permission collect logs; not from a KB page): Red Hat's own sos report (sos report --batch) on up to 4 overcloud nodes, one after the other, with the case number when given, the archives in one bundle to download and attach to the Red Hat case. Each node needs 5 GB free in /var/tmp (10 GB with all logs); the archive is streamed to the portal server and removed from the node. Kept 7 days."
+    status: ready
+    needs: [undercloud]
+    uses: [openstack]
+    basis: platform
+    permission: wi-logs
+    bundle: true
+    timeout_minutes: 240
+    wi: []
+    steps: [Overcloud nodes, Room on the nodes and sos installed, sos report per node]
+    params:
+      - {name: scope, label: "Nodes", type: select, options: [named, controllers], default: named, help: "At most 4 nodes per run (sos report loads each node for several minutes)."}
+      - {name: nodes, label: "Node names", type: text, pattern: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}(,[A-Za-z0-9][A-Za-z0-9_.-]{0,62}){0,3}$", help: "Comma-separated, e.g. overcloud-controller-0,overcloud-novacompute-3"}
+      - {name: instance, label: "Instance ID (optional)", type: uuid, help: "Adds the compute the instance runs on."}
+      - {name: case_id, label: "Red Hat case number (optional)", type: text, pattern: "^\\d{6,12}$", help: "Written into the archive names (sos report --case-id)."}
+      - {name: all_logs, label: "All logs (--all-logs)", type: select, options: ["no", "yes"], default: "no", help: "Every log file, not only the recent ones: much larger and slower; only when Red Hat asks for it."}
+
+  - id: overcloud-node-health
+    category: flex
+    title: Overcloud node health (CPU, memory, disk, containers)
+    summary: "Platform health (not from a KB page): CPU, memory, filesystems and inodes, failed systemd units (tripleo_*) and unhealthy or failed containers of the controllers, the computes, or one node — read through the director. Export it as a capacity report."
+    status: ready
+    needs: [undercloud]
+    basis: platform
+    wi: []
+    steps: [Nodes reached from the director, Summary per node, CPU, Memory, Filesystems, Failed systemd units, Containers]
+    params:
+      - {name: role, label: "Nodes", type: select, options: [controller, compute, all], default: controller}
+      - {name: node, label: "Only this node (optional)", type: text, pattern: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$", help: "An overcloud node name, e.g. overcloud-novacompute-3."}
+      - {name: disk_warn, label: "Disk warning at (%)", type: int, default: 80, min: 50, max: 99}
+      - {name: disk_fail, label: "Disk problem at (%)", type: int, default: 90, min: 50, max: 100}
+      - {name: mem_warn, label: "Memory warning at (%)", type: int, default: 85, min: 50, max: 99}
+      - {name: mem_fail, label: "Memory problem at (%)", type: int, default: 95, min: 50, max: 100}
+      - {name: cpu_warn, label: "CPU warning at (%)", type: int, default: 85, min: 50, max: 99}
+      - {name: cpu_fail, label: "CPU problem at (%)", type: int, default: 95, min: 50, max: 100}
+
+  - id: compute-capacity
+    category: flex
+    title: Compute capacity (vCPU, RAM per hypervisor)
+    summary: "Platform health (not from a KB page): vCPU and RAM used on every compute against its size and the allocation ratios, computes down, the room left in total, on one compute and per aggregate — the usual cause of \"No valid host\". Export it as a capacity report."
+    status: ready
+    needs: [openstack]
+    basis: platform
+    wi: []
+    steps: [Computes (hypervisors), Room left for new instances, Room per aggregate]
+    params:
+      - {name: cpu_ratio, label: "vCPU allocation ratio", type: select, options: ["1", "2", "4", "8", "16"], default: "4", help: "cpu_allocation_ratio of nova on this site (vCPU per physical core)."}
+      - {name: ram_ratio, label: "RAM allocation ratio", type: select, options: ["1", "1.5"], default: "1", help: "ram_allocation_ratio of nova on this site."}
+      - {name: warn, label: "Warning at (%)", type: int, default: 80, min: 50, max: 99}
+      - {name: fail, label: "Problem at (%)", type: int, default: 90, min: 50, max: 100}
+
+  - id: compute-drain
+    category: flex
+    title: Live migrate instances of a compute (choose the instances)
+    summary: "Platform operation (not from a KB page): the list of instances on one compute, read at once (one server list), and the real CPU / RAM use of the other computes; tick the instances to move and start — the running ones are live-migrated, the shut-off ones cold-migrated, one at a time, each to the least used compute whose CPU and RAM stay under 70% (read right before each migration; none: the instance is not moved), each followed until it ends: a destination that refuses is replaced by the next, a migration that does not finish is aborted (or forced), an instance left in ERROR is reset only after virsh shows where it runs. Disable / enable the compute when it is emptied for maintenance."
+    status: ready
+    needs: [openstack]
+    uses: [undercloud]
+    basis: platform
+    wi: []
+    steps: [The compute, Instances on the compute, "Destinations: CPU and RAM under the limit"]
+    params:
+      - {name: compute, label: "Compute", type: text, required: true, pattern: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$", help: "The host as in openstack compute service list, e.g. overcloud-novacompute-7.localdomain. Its instances are listed; you tick the ones to move."}
+      - {name: max_usage, label: "Destinations: CPU and RAM under (%)", type: int, default: 70, min: 30, max: 95, help: "Real use, read on each compute right before each migration (RAM with the instance). The least used compute under this takes the instance; none: it is not moved."}
+      - {name: target, label: "Destination compute (optional)", type: text, pattern: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$", help: "Empty = the least used compute under the limit (recommended). Named: only that compute, while it is under the limit."}
+      - {name: timeout_minutes, label: "Time limit per instance (minutes)", type: int, default: 60, min: 5, max: 480, help: "A live migration still running after this is aborted (or forced to complete)."}
+      - {name: stall, label: "When a live migration does not finish in time", type: select, options: ["abort", "force-complete"], default: "abort", help: "abort: the instance keeps running on its compute. force-complete: the instance pauses until the memory copy ends."}
+      - {name: on_failure, label: "When an instance cannot be migrated", type: select, options: ["stop", "continue"], default: "stop", help: "stop: the run stops there. continue: it is skipped (an instance that needs a person always stops the run)."}
+
+  - id: image-housekeeping
+    category: flex
+    title: Image housekeeping (size 0, deleted projects)
+    summary: "Platform operation (not from a KB page): Glance images with size 0 — uploads that never finished, empty active images, snapshots of volume-backed instances (their data is in Cinder volume snapshots) — and images of projects that no longer exist; tick the ones to delete. Protected images and images used by an instance are never offered."
+    status: ready
+    needs: [openstack]
+    basis: platform
+    wi: []
+    steps: [Images (Glance), Images with size 0, Images of projects that no longer exist, Not offered (kept)]
+    params:
+      - {name: days, label: "Older than (days)", type: int, default: 1, min: 0, max: 3650, help: "Only images created at least this many days ago are offered."}
+      - {name: project, label: "Project (ID or name, optional)", type: project, help: "Empty = every project."}
+
+  - id: vm-service-sync
+    category: flex
+    title: VM not shown in the Service Portal
+    summary: The Service Portal has no API for the portal. Check the instance with "Instance cannot be reached", then use Sync Instance in the Service Portal with its ID.
+    status: manual
+    wi: [{page: 5530, title: "VM Not Synchronized in the Service Portal"}]
+
+  - id: flex-vpn
+    category: flex
+    title: VPN problem (IPsec / OpenVPN, handshake)
+    summary: pfSense runs inside the customer project and the OpenVPN users live in the Service Portal — follow the WI (certificate, Phase 1/2 parameters, user expiry).
+    status: manual
+    wi:
+      - {page: 5543, title: "VPN Problem (IPsec & Open VPN)"}
+      - {page: 5545, title: "VPN Cannot Connect (Handshake Error)"}
+
+  # ------------------------------------------------------------------ NetApp
+  - id: ontap-cluster-health
+    category: netapp
+    title: ONTAP cluster health and cluster management LIF
+    summary: Node health, the cluster_mgmt LIF on its home port, LIFs down or not home, service processors, e0M ports, error events.
+    status: ready
+    needs: [ontap]
+    wi: [{page: 8796, title: "WI NetApp Cluster Management Recovery"}]
+    steps: [Reach the cluster, Node health and eligibility, Service processor online, Cluster management LIF on its home port, Other LIFs, Management ports e0M, Error events of the last 24 hours]
+    params: []
+
+  - id: ontap-ems-export
+    category: netapp
+    title: Collect ONTAP EMS events (export)
+    summary: "Log collection (permission collect logs; not from a KB page): every EMS event of the cluster for a time window (event log show), page by page up to 10000, with the ONTAP Restore account (read-only GET). The run shows them by severity and message with the newest 200; every event is in the raw output as CSV."
+    status: ready
+    needs: [ontap]
+    basis: platform
+    permission: wi-logs
+    wi: []
+    steps: [EMS events of the window, Events by message, Newest events]
+    params:
+      - {name: hours, label: "Events of the last (hours)", type: int, default: 24, min: 1, max: 720}
+      - {name: severity, label: "Severities", type: select, options: [all, notice, error], default: all, help: "all = every severity but debug; notice = emergency, alert, error and notice; error = emergency, alert and error."}
+
+  - id: ontap-capacity
+    category: netapp
+    title: ONTAP capacity (aggregates, FlexVols, snapshots, disks)
+    summary: "Platform health (not from a KB page): used space of the aggregates and FlexVols against the thresholds, snapshots using more than their reserve, and disks that are broken or out of service. Export it as a capacity report."
+    status: ready
+    needs: [ontap]
+    basis: platform
+    wi: []
+    steps: [Aggregates, FlexVols at the threshold, Snapshots using more than their reserve, Disks broken or out of service]
+    params:
+      - {name: warn, label: "Warning at (%)", type: int, default: 80, min: 50, max: 99}
+      - {name: fail, label: "Problem at (%)", type: int, default: 90, min: 50, max: 100}
+
+  - id: ontap-restore
+    category: netapp
+    title: Restore an OpenStack volume from an ONTAP snapshot
+    summary: Done by the ONTAP Restore module (restore-file, cinder manage, transfer, attach).
+    status: module
+    link: /ontap/
+    module: ontap
+    wi: [{page: 5577, title: "Restore Openstack Volume from a NetApp ONTAP Snapshot"}]
+
+  # ------------------------------------------------------------------ Acme Prime (VMware)
+  - id: vcenter-datastore
+    category: prime
+    title: Datastore low free space
+    summary: Free space of every datastore in vCenter and the VMs on the low ones (many VMs → Storage vMotion, few → old snapshots).
+    status: ready
+    needs: [ro-vcenter]
+    wi: [{page: 5566, title: "Datastore Low Free Space"}]
+    steps: [Datastores below the free threshold, VMs on the low datastores]
+    params:
+      - {name: min_free, label: "Minimum free space (%)", type: int, default: 20, min: 5, max: 50}
+
+  - id: nsxt-snat-priority
+    category: prime
+    title: SNAT priority Internet vs Colo/MPLS (NSX-T)
+    summary: Overlapping SNAT rules of one source on a Tier-1 gateway; the specific Colo/MPLS rule must be evaluated before the catch-all Internet rule.
+    status: ready
+    needs: [ro-nsxt]
+    wi: [{page: 8757, title: "WI_Configure_Priority_SNAT_Internet_Colo_MPLS_NSX-T"}]
+    steps: [SNAT rules, Specific rule first, catch-all last]
+    params:
+      - {name: tier1, label: "Tier-1 gateway ID", type: text, required: true, pattern: "^[A-Za-z0-9_.-]{1,128}$", help: "The policy ID of the Tier-1 gateway (NSX Manager → Networking → Tier-1 Gateways)."}
+      - {name: source, label: "Source IP (optional)", type: ip, help: "e.g. 172.31.50.2. Empty = every source."}
+
+  - id: vmware-host-usage
+    category: prime
+    title: Host high CPU / memory, VM resource pool
+    summary: CPU and memory of every ESXi host, the VMs that load the hot host, where they can go with vMotion, DRS, and vCloud VMs outside the resource pool of their Org VDC.
+    status: ready
+    needs: [ro-vcenter]
+    wi:
+      - {page: 5567, title: "Host High CPU_Memory Usage"}
+      - {page: 5568, title: "Check the VM Resource Pool Correctly"}
+    steps: [Hosts above the threshold, VMs using the most on the hot host, DRS of the cluster, vCloud VMs in their Org VDC pool]
+    params:
+      - {name: host, label: "ESXi host of the alert (optional)", type: text, pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$", help: "Name or IP as in vCenter, e.g. esxi-dca-02. Empty = every host."}
+      - {name: cpu, label: "CPU threshold (%)", type: int, default: 85, min: 50, max: 99}
+      - {name: memory, label: "Memory threshold (%)", type: int, default: 90, min: 50, max: 99}
+
+  - id: vcenter-events-export
+    category: prime
+    title: Collect vCenter events (export)
+    summary: "Log collection (permission collect logs; not from a KB page): every vCenter event of a time window — info, user, warning and error — read with an event history collector (up to 10000), with the read-only vCenter account. The run shows them by category and type with the newest 200; every event is in the raw output as CSV. vCenter / NSX-T support bundles need a diagnostics account and are not made here."
+    status: ready
+    needs: [ro-vcenter]
+    basis: platform
+    permission: wi-logs
+    wi: []
+    steps: [Events of the window, Events by type, Newest events]
+    params:
+      - {name: hours, label: "Events of the last (hours)", type: int, default: 24, min: 1, max: 720}
+
+  - id: vcenter-health
+    category: prime
+    title: vCenter alarms, events and hardware
+    summary: "Platform health (not from a KB page): triggered alarms, ESXi hosts not connected, hardware sensors (CIM), datastores not accessible, error / warning events of the last hours by kind (APD / PDL, VMFS heartbeat, latency, uplinks, HA, vMotion), VMs that need consolidation or keep old snapshots."
+    status: ready
+    needs: [ro-vcenter]
+    basis: platform
+    wi: []
+    steps: [Triggered alarms, ESXi hosts connected, Hardware sensors of the hosts, Datastores accessible, Error and warning events, "VMs: disk consolidation and snapshots"]
+    params:
+      - {name: hours, label: "Events of the last (hours)", type: int, default: 24, min: 1, max: 720}
+      - {name: snapshot_days, label: "Snapshots older than (days)", type: int, default: 3, min: 1, max: 365, help: "VMware: keep a snapshot no longer than 72 hours."}
+
+  - id: nsxt-health
+    category: network
+    title: NSX-T alarms and transport nodes
+    summary: "Platform health (not from a KB page): the open alarms of NSX Manager with NSX's own description and recommended action (edges, tunnels, BGP, certificates, capacity), the manager cluster, and transport nodes that are not ready."
+    status: ready
+    needs: [ro-nsxt]
+    basis: platform
+    wi: []
+    steps: [NSX Manager cluster, Open alarms, "Transport nodes (ESXi, edges)"]
+    params: []
+
+  - id: cert-expiry
+    category: network
+    title: Certificates expiring (vCenter, NSX-T, vCloud, ONTAP, Horizon, BMC)
+    summary: "Platform health (not from a KB page): the certificate each system of the site presents — vCenter, NSX-T Manager, vCloud Director, ONTAP, Horizon / the OpenStack public endpoint and every BMC of the page BMC — with the days left. Read from the portal server, no account."
+    status: ready
+    needs: []
+    basis: platform
+    wi: []
+    steps: [Certificates expiring, Addresses the portal could not read]
+    params:
+      - {name: warn_days, label: "Warning within (days)", type: int, default: 30, min: 7, max: 365}
+      - {name: fail_days, label: "Problem within (days)", type: int, default: 7, min: 0, max: 60}
+
+  - id: vcd-vm-power
+    category: prime
+    title: VM power on fails / inconsistent status / slow tasks (vCloud)
+    summary: The VM and its last tasks in vCloud Director, Org VDC allocation, IP Usage of its network for IP/MAC conflicts, power state in vCloud vs vCenter, the Org VDC resource pool, tasks stuck on a cell.
+    status: ready
+    needs: [ro-vcd]
+    uses: [ro-vcenter]
+    wi:
+      - {page: 5564, title: "Error on VM Power On"}
+      - {page: 5555, title: "Error on VM Power On (IP Address Conflict)"}
+      - {page: 5560, title: "Error on VM Power On after NIC Change"}
+      - {page: 5553, title: "VM in Inconsistent Status in vCloud"}
+      - {page: 5562, title: "Action Power On_Off or Edit VM Takes a Long Time in vCloud"}
+    steps: [VM in vCloud Director, Recent tasks, Org VDC allocation, IP Usage (conflict), vCloud vs vCenter state, Org VDC resource pool, Stuck tasks, Cells]
+    params:
+      - {name: vm, label: "VM name in vCloud", type: text, required: true, pattern: "^[A-Za-z0-9][A-Za-z0-9 _.()-]{0,127}$", help: "As shown in vCloud Director, e.g. web-02."}
+
+  - id: vcd-edge
+    category: prime
+    title: Edge gateway (IPsec state, NAT, firewall) in vCloud
+    summary: IPsec tunnels and their status, NAT rules for a VM, and the edge firewall rule that decides a port to the VM (NSX-T backed edges).
+    status: ready
+    needs: [ro-vcd]
+    wi:
+      - {page: 5563, title: "IPSec State Down in Statistics (VPN Connection Problem)"}
+      - {page: 5554, title: "Service on a VM Cannot Be Accessed from Outside (Port Specific)"}
+      - {page: 5561, title: "VM Cannot Connect to the Local_Internet Network"}
+      - {page: 5558, title: "Metro PTP Connection Is Not Connected"}
+    steps: [Edge gateway, IPsec tunnels, NAT rules, Edge firewall for the port]
+    params:
+      - {name: edge, label: "Edge gateway name", type: text, required: true, pattern: "^[A-Za-z0-9][A-Za-z0-9 _.()-]{0,127}$", help: "As shown in vCloud Director (Networking → Edge Gateways)."}
+      - {name: vm_ip, label: "VM IP (optional)", type: ip, help: "Internal IP of the VM. Checks SNAT/DNAT and, with a port, the firewall."}
+      - {name: port, label: "Port (optional)", type: port, help: "e.g. 443, 3389. Needs the VM IP."}
+      - {name: public_ip, label: "Public IP (optional)", type: ip, help: "The public IP the customer connects to."}
+      - {name: source, label: "Source IP (optional)", type: ip, help: "The customer's IP when only it must reach the port."}
+
+  - id: prime-manual
+    category: prime
+    title: VM name error, forgotten password, new organisation / VDC
+    summary: Changes in vCloud Director (rename, guest customization, new organisation and VDC) — follow the WI.
+    status: manual
+    wi:
+      - {page: 5557, title: "Error When Changing NIC Configuration or Upgrading CPU & Memory (Error Name)"}
+      - {page: 5556, title: "VM Forgotten Password for Login"}
+      - {page: 5565, title: "Creation of a New Organization and Virtual Data Center (VDC)"}
+
+  - id: mikrotik-ipsec
+    category: prime
+    title: IPsec MikroTik 1:1 with NSX-T
+    summary: Configuration on the customer's MikroTik (Phase 1/2 mapping) — the WI is the reference; the portal has no access to customer devices.
+    status: manual
+    wi: [{page: 8426, title: "WI_IPSec_MikroTik_to_NSX-T"}]
+
+  # ------------------------------------------------------------------ Acme CDN
+  - id: cdn-disk-run
+    category: cdn
+    title: "Alert: disk full on /run (disk_alert_cdn_*)"
+    summary: Usage of the tmpfs /run and the temporary AIDE files in /run/aide.
+    status: ready
+    needs: [hosts:cdn]
+    wi: [{page: 6823, title: "Disk Full Alert on -run"}]
+    steps: [Usage of /run, Temporary AIDE files]
+    params:
+      - {name: host, label: "CDN VM (name or IP of the alert)", type: host, groups: [cdn], required: true, help: "The instance of the alert, e.g. 11.16.30.4:9100 (the port is ignored)."}
+
+  - id: cdn-root-disk
+    category: cdn
+    title: "Alert: root disk full (disk_alert_cdn_*)"
+    summary: Root filesystem, largest folders, haproxy.log, logrotate, journal, deleted files still open, HAProxy and rsyslog.
+    status: ready
+    needs: [hosts:cdn]
+    wi: [{page: 8660, title: "Alert Root Disk Troubleshooting"}]
+    steps: [Usage of /, Largest folders and files, Size of haproxy.log, Logrotate for HAProxy, Journal size, Deleted files still held open, HAProxy and rsyslog active]
+    params:
+      - {name: host, label: "CDN VM (name or IP of the alert)", type: host, groups: [cdn], required: true}
+
+  - id: cdn-memory
+    category: cdn
+    title: "Alert: memory (memory_alert_cdn_*)"
+    summary: Memory use and which service takes it — Varnish, the Docker HAProxy lb, or stuck logparser processes.
+    status: ready
+    needs: [hosts:cdn]
+    wi: [{page: 6908, title: "Memory Alert CDN DCA-DCB-DCC"}]
+    steps: [Memory usage, Processes using the most memory, Which service takes the memory]
+    params:
+      - {name: host, label: "CDN VM (name or IP of the alert)", type: host, groups: [cdn], required: true}
+
+  - id: cdn-datasource
+    category: cdn
+    title: "Alert: DatasourceError (Grafana CDN)"
+    summary: The Docker HAProxy container lb (Prometheus runs inside it), its Prometheus backend, and whether Prometheus answers.
+    status: ready
+    needs: [hosts:cdn]
+    wi: [{page: 6884, title: "Datasource Error site DCB&DCA&DCC"}]
+    steps: [Docker HAProxy container lb, Prometheus backend, Prometheus answers]
+    params:
+      - {name: host, label: "Load balancer VM", type: host, groups: [cdn], required: true}
+
+  - id: cdn-repo
+    category: cdn
+    title: "Alert: cdn_user_alert (repository website)"
+    summary: nginx on the repository VM, its configuration test, the SSL certificate, and the HTTP answer.
+    status: ready
+    needs: [hosts:repo]
+    wi: [{page: 6834, title: "cdn user alert repo"}]
+    steps: [Web service nginx, nginx configuration test, SSL certificate, HTTPS answer]
+    params:
+      - {name: host, label: "Repository VM", type: host, groups: [repo], required: true}
+      - {name: domain, label: "Domain", type: text, default: ubuntu-mirror.example.com, pattern: "^[A-Za-z0-9.-]{3,253}$"}
+
+  - id: cdn-varnish-mse
+    category: cdn
+    title: Varnish MSE cache — pre-check before a resize
+    summary: Version, mse.conf, /cache usage vs cache use inside MSE, failures, service, AIDE. The resize itself is a change with approval.
+    status: ready
+    needs: [hosts:cdn]
+    wi: [{page: 8786, title: "WI Resize Varnish MSE Cache"}]
+    steps: [Varnish Cache Plus with MSE, Store size, Usage of /cache, Cache use inside MSE, MSE failures, Service and varnishadm, AIDE not scanning]
+    params:
+      - {name: host, label: "Varnish VM", type: host, groups: [cdn], required: true}
+
+  # ------------------------------------------------------------------ Acme DNS
+  - id: dns-recursor-syslog
+    category: dns
+    title: "Alert: DNS recursor disk / syslog full"
+    summary: Root disk, syslog size, PowerDNS Recursor quiet setting, query lines in syslog, service, journal.
+    status: ready
+    needs: [hosts:dns]
+    wi: [{page: 8677, title: "WI Recursive DNS Disk Log Full Alert"}]
+    steps: [Usage of /, Size of syslog, Query logging (quiet), Query lines in syslog, pdns-recursor active]
+    params:
+      - {name: host, label: "DNS recursor VM", type: host, groups: [dns], required: true}
+
+  # ------------------------------------------------------------------ Network
+  - id: vyos-nat-firewall
+    category: network
+    title: VyOS SNAT / DNAT not working
+    summary: Default route, SNAT and DNAT rules, the firewall chain that really handles WAN traffic, established/related, DNAT ports.
+    status: ready
+    needs: [hosts:vyos]
+    wi:
+      - {page: 8459, title: "WI Troubleshooting SNAT DNAT VyOS 1.5 Lesson Learned"}
+      - {page: 8410, title: "WI VyOS 1.5 NAT Static Route DNS Forwarder"}
+    steps: [Default route, SNAT on the WAN interface, DNAT rules, Firewall chain of the WAN interface, Established/related allowed, DNAT ports allowed]
+    params:
+      - {name: host, label: "VyOS gateway", type: host, groups: [vyos], required: true}
+      - {name: wan, label: "WAN interface (optional)", type: text, pattern: "^(eth|bond|br|wg)[0-9.]{1,6}$", help: "e.g. eth2. Empty = from the SNAT rules."}
+
+  - id: vyos-static-route
+    category: network
+    title: VyOS static route missing / Metro link
+    summary: Configured static routes present in the routing table, and the Metro gateway reachable from VyOS.
+    status: ready
+    needs: [hosts:vyos]
+    wi:
+      - {page: 5533, title: "IP Route on VyOS Does Not Show the Static Route"}
+      - {page: 5559, title: "Metro Link Interconnection Problems from the NAT Gateway (VyOS)"}
+    steps: [Static routes in the routing table, Metro gateway reachable]
+    params:
+      - {name: host, label: "VyOS gateway", type: host, groups: [vyos], required: true}
+      - {name: prefix, label: "Expected route (optional)", type: cidr}
+      - {name: gateway, label: "Metro gateway to ping (optional)", type: ip}
+
+  - id: vyos-upgrade-precheck
+    category: network
+    title: VyOS upgrade 1.3 → 1.5 and CVE-2025-30095 — pre-check
+    summary: Version, hw-id on every ethernet interface, installed images, dropbear host keys, config backup.
+    status: ready
+    needs: [hosts:vyos]
+    wi: [{page: 8398, title: "WI VyOS Upgrade + CVE Mitigation"}]
+    steps: [Current version, hw-id on every interface, Installed images, Dropbear host keys, Config backup]
+    params:
+      - {name: host, label: "VyOS gateway", type: host, groups: [vyos], required: true}
+
+  - id: vyos-upgrade
+    category: network
+    title: VyOS upgrade (image from the jump host)
+    summary: "WI VyOS Upgrade + CVE Mitigation, run from the portal: the VyOS (management IP, reached through its jump host on Hosts & SSH) is read — version, hw-id of every interface, room, images, dropbear keys, the baseline (interfaces, gateway, routes, NAT). Upgrade VyOS then runs the WI step by step: backup of the configuration to the jump host (none kept on the VyOS), hw-id, the image copied with scp from the jump host and its sha256 compared, add system image (Yes to every yes/no question, the proposed value to the others), new dropbear key (CVE-2025-30095), reboot, SSH again within 15 minutes, post-check against the baseline. After it, Roll back to the previous image is offered."
+    status: ready
+    needs: [hosts:vyos]
+    wi: [{page: 8398, title: "WI VyOS Upgrade + CVE Mitigation"}]
+    steps: [Jump host and image, Current version, hw-id on every ethernet interface (WI 2.2), Room for the image, Installed images, "CVE-2025-30095: dropbear keys (WI 2.4)", Baseline for the post-check]
+    params:
+      - {name: host, label: "VyOS to upgrade", type: host, groups: [vyos], required: true, help: "A VyOS of Hosts & SSH with its management IP and Connect through = the jump host that holds the image (e.g. 11.6.215.125)."}
+      - {name: image, label: "Image on the jump host", type: text, default: "/home/vyos/vyos-2026.03-generic-amd64.iso", pattern: "^/[A-Za-z0-9_./-]{1,200}\\.iso$", help: "Path of the ISO on the jump host; its name gives the version (vyos-<version>-generic-amd64.iso)."}
+      - {name: backup_dir, label: "Configuration backup folder on the jump host", type: text, default: "/home/vyos/config-backup", pattern: "^/[A-Za-z0-9_./-]{1,200}$", help: "Before anything changes, /config/config.boot of the VyOS is copied here (one folder per VyOS, file mode 600, sha256 compared); no copy is kept on the VyOS."}
+      - {name: wait_minutes, label: "Wait for SSH after the reboot (minutes)", type: int, default: 15, min: 5, max: 60, help: "SSH is tried every 15 seconds; when the VyOS does not answer in time, the fix fails with the console rollback steps."}
+
+  - id: linux-firewall
+    category: network
+    title: Port blocked on a Linux VM (NSX-T Traceflow Delivered)
+    summary: Listener, firewall services, nftables and iptables reject/drop rules, ufw, prohibit routes on the destination VM.
+    status: ready
+    needs: [hosts:linux]
+    wi: [{page: 8335, title: "WI troubleshooting firewall nsxt & linux"}]
+    steps: [Service listens on the port, Firewall services active, nftables reject/drop, iptables, ufw, Blackhole / prohibit routes]
+    params:
+      - {name: host, label: "Destination VM", type: host, groups: [linux], required: true}
+      - {name: port, label: "Port", type: port, required: true}
+      - {name: source, label: "Source IP (optional)", type: ip, help: "The client that must reach the port, e.g. 10.249.2.15. The fix then allows only this source."}
+
+  - id: huawei-bgp-prefix
+    category: network
+    title: Huawei RCGW — internet subnet advertised (pre/post-check)
+    summary: BGP peers, the prefix in the routing and BGP tables, the NULL0 discard route, ALLOWED_BGP_OUT, advertised to the upstream.
+    status: ready
+    validation: lab
+    needs: [hosts:huawei]
+    wi: [{page: 8774, title: "WI-Adding-Internet-Subnet-Huawei-RCGW"}]
+    steps: [BGP peers Established, Prefix in the routing table, Prefix in the BGP table, Static discard route, Prefix list ALLOWED_BGP_OUT, Advertised to the upstream]
+    params:
+      - {name: host, label: "Router", type: host, groups: [huawei], required: true}
+      - {name: prefix, label: "Prefix", type: cidr, required: true, help: "e.g. 11.5.244.0/23"}
+      - {name: peer, label: "Upstream peer (optional)", type: ip, help: "Default from sites.yml (hosts.huawei.upstream_peer)."}
+
+  - id: aci-static-port
+    category: network
+    title: ACI static port binding (add / remove)
+    summary: Done by the ACI module (preview with diff, one transaction, history and undo) — no vars.yml needed.
+    status: module
+    link: /aci/
+    module: aci
+    wi: [{page: 8223, title: "WI Ansible Static Port ACI"}]
+
+  # ------------------------------------------------------------------ SIEM
+  - id: siem-forwarder
+    category: siem
+    title: OpenStack RHEL VM forwards logs to the collector
+    summary: rsyslog, the omfwd target, SELinux port for rsyslog, TCP to the collector, rsyslog errors, configuration check.
+    status: ready
+    needs: [hosts:linux]
+    wi: [{page: 8741, title: "WI_OpenStack_RHEL_Forward_Log_to_172.26.0.40_Port_541"}]
+    steps: [rsyslog active, Forwarding configured, SELinux allows the port, TCP to the collector, rsyslog errors, Configuration check]
+    params:
+      - {name: host, label: "RHEL VM", type: host, groups: [linux], required: true}
+      - {name: collector, label: "Collector (IP:port)", type: ip_port, help: "Default from sites.yml (wi.siem_collector), e.g. 172.26.0.40:541."}
+
+  - id: siem-collector
+    category: siem
+    title: Syslog collector receives logs
+    summary: rsyslog and its listener, firewalld, new files per source type (vmware, windows-server, veeam, unknown), disk.
+    status: ready
+    needs: [hosts:siem]
+    wi:
+      - {page: 8696, title: "WI Forward Log ESXi To RHEL Collector"}
+      - {page: 8724, title: "WI_NXLog_Windows_AD_and_Veeam_to_RHEL_Collector"}
+    steps: [rsyslog active, Listening, Firewall, New files per source type, Disk]
+    params:
+      - {name: host, label: "Collector", type: host, groups: [siem], required: true}
+
+  - id: esxi-syslog
+    category: siem
+    title: ESXi host sends syslog to the collector
+    summary: Remote syslog host of the ESXi host, firewall ruleset, TCP to the collector, vmsyslogd errors.
+    status: ready
+    needs: [hosts:esxi]
+    wi: [{page: 8696, title: "WI Forward Log ESXi To RHEL Collector"}]
+    steps: [Remote syslog host, Firewall ruleset syslog, TCP to the collector, vmsyslogd errors]
+    params:
+      - {name: host, label: "ESXi host", type: host, groups: [esxi], required: true}
+      - {name: collector, label: "Collector (IP:port)", type: ip_port, help: "Default from sites.yml (wi.esxi_collector), e.g. 172.26.80.73:514."}
+
+  - id: windows-nxlog
+    category: siem
+    title: NXLog on Windows AD / Veeam
+    summary: Service and connection on the Windows servers need WinRM access from the portal; check the collector side with "Syslog collector receives logs".
+    status: planned
+    reason: "Needs WinRM (pywinrm) and a read-only Windows account."
+    wi: [{page: 8724, title: "WI_NXLog_Windows_AD_and_Veeam_to_RHEL_Collector"}]
+
+  # ------------------------------------------------------------------ Linux VM (Acme Tolong)
+  - id: linux-service-port
+    category: linux
+    title: Service not answering on its port / port conflict
+    summary: What listens on the port, the service, a local connection, and internet access of the VM.
+    status: ready
+    needs: [hosts:linux]
+    wi:
+      - {page: 6924, title: "WI_custom_port_tcp_down"}
+      - {page: 8233, title: "WI_Nginx_Port_Conflict"}
+    steps: [A process listens on the port, Service, Port held by another program, Local connection, Internet access]
+    params:
+      - {name: host, label: "VM", type: host, groups: [linux, cdn, repo, dns], required: true}
+      - {name: port, label: "Port", type: port, required: true}
+      - {name: service, label: "Service (systemd, optional)", type: service, help: "e.g. nginx, myapp. Empty = only what listens on the port."}
+
+  - id: linux-resources
+    category: linux
+    title: Server resources (CPU, memory, disk)
+    summary: "Platform health (not from a KB page): CPU busy and load, memory, filesystems and inodes, failed systemd units and the largest processes of one Linux server of Hosts & SSH (CDN, repository, DNS, SIEM, GB200, Linux VMs, VyOS). Export it as a report."
+    status: ready
+    needs: ["hosts:linux|cdn|repo|dns|siem|gb200|vyos"]
+    basis: platform
+    wi: []
+    steps: [CPU, Memory, Filesystems, Failed systemd units]
+    params:
+      - {name: host, label: "Server", type: host, groups: [linux, cdn, repo, dns, siem, gb200, vyos], required: true}
+      - {name: disk_warn, label: "Disk warning at (%)", type: int, default: 80, min: 50, max: 99}
+      - {name: disk_fail, label: "Disk problem at (%)", type: int, default: 90, min: 50, max: 100}
+      - {name: mem_warn, label: "Memory warning at (%)", type: int, default: 85, min: 50, max: 99}
+      - {name: mem_fail, label: "Memory problem at (%)", type: int, default: 95, min: 50, max: 100}
+      - {name: cpu_warn, label: "CPU warning at (%)", type: int, default: 85, min: 50, max: 99}
+      - {name: cpu_fail, label: "CPU problem at (%)", type: int, default: 95, min: 50, max: 100}
+
+  - id: linux-recovery
+    category: linux
+    title: Emergency mode / login loop recovery
+    summary: Recovery from a rescue image (chroot, packages, initramfs, PAM, SELinux) — follow the WI; nothing to read while the VM does not boot.
+    status: manual
+    wi:
+      - {page: 5572, title: "WI_Emergency_Mode_Recovery"}
+      - {page: 5571, title: "WI_VM_Recovery_Poltekkes_Malang"}
+
+  # ------------------------------------------------------------------ GB200
+  - id: gb200-nic-link
+    category: gb200
+    title: Compute tray NIC link down (CX7 / BF3)
+    summary: NIC devices on PCIe, link detected per interface, mlx5 / BlueField errors in dmesg.
+    status: ready
+    needs: [hosts:gb200]
+    wi: [{page: 5575, title: "SOP_CT_Linkdown_check 0.1"}]
+    steps: [NIC devices on PCIe, Links detected, Driver errors and resets]
+    params:
+      - {name: host, label: "Compute tray", type: host, groups: [gb200], required: true}
+
+  - id: gb200-nvlink
+    category: gb200
+    title: NVLink switch status
+    summary: System health, NMX-T / NMX-C, telemetry, partitions and the 144 ACP connections of an NVLink switch (NVOS).
+    status: planned
+    reason: "NVOS commands to be validated on a lab NVLink switch first."
+    wi: [{page: 5576, title: "SOP_NVLink_Status_Check_GB200 0.1"}]
+
+  # ------------------------------------------------------------------ Acme Box
+  - id: bmc-health
+    category: hardware
+    title: Server hardware (BMC)
+    summary: "Platform health (not from a KB page): from the BMC of one server (Lenovo XClarity Controller, Inspur), with Redfish over HTTPS on its management IP — overall health, power supplies and redundancy, fans and temperatures, RAID controllers and drives, alerts active now and the hardware event log, each with the vendor's documentation."
+    status: ready
+    needs: ["hosts:bmc"]
+    basis: platform
+    wi: []
+    steps: [Server and BMC, Overall health, Power supplies, Fans and temperatures, "Memory modules (DIMMs)", DIMM slot map, Processors, RAID controllers and drives, Alerts active now, Hardware event log]
+    params:
+      - {name: bmc, label: "Server (BMC)", type: host, groups: [bmc], required: true, help: "BMCs are added by an administrator on the page BMC (management IP and web account)."}
+      - {name: days, label: "Event log of the last (days)", type: int, default: 7, min: 1, max: 90}
+
+  - id: bmc-log-export
+    category: hardware
+    title: Collect BMC event logs (export)
+    summary: "Log collection (permission collect logs; not from a KB page): every entry of every event log of one server's BMC — system event log, platform / active alerts, audit log — read page by page with Redfish over HTTPS (up to 5000 per log). The run shows the newest entries; every entry is in the raw output as CSV, for the vendor's support."
+    status: ready
+    needs: ["hosts:bmc"]
+    basis: platform
+    permission: wi-logs
+    wi: []
+    steps: [Event logs of the BMC, Entries by severity, Newest entries]
+    params:
+      - {name: bmc, label: "Server (BMC)", type: host, groups: [bmc], required: true, help: "BMCs are added by an administrator on the page BMC (management IP and web account)."}
+      - {name: days, label: "Show the last (days)", type: int, default: 30, min: 1, max: 3650, help: "The run page shows the entries of these days; the export has every entry read."}
+
+  - id: acmebox-transfer
+    category: box
+    title: Slow or failing rclone transfers (lessons learned)
+    summary: Bandwidth on the customer side, quota and rclone settings — validation steps of the lessons learned, run with the customer.
+    status: manual
+    wi: [{page: 7186, title: "Technical Lessons Learned BPKAD Aceh Acmebox with Validation"}]

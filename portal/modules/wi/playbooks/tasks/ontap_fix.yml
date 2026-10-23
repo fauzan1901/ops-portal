@@ -1,0 +1,104 @@
+# Revert the cluster management LIF (or another LIF found by the check) to its home port, with the ONTAP Restore account
+# of the site. The cluster management address may be the one that is down: node management addresses are tried after it.
+- name: "ONTAP: does the cluster management address answer"
+  ansible.builtin.uri:
+    url: "{{ ontap_hosts[0] }}/api/cluster?fields=name"
+    method: GET
+    url_username: "{{ lookup('ansible.builtin.env', 'WI_ONTAP_FIX_USER') }}"
+    url_password: "{{ lookup('ansible.builtin.env', 'WI_ONTAP_FIX_PASSWORD') }}"
+    force_basic_auth: true
+    validate_certs: "{{ ontap_validate_certs | default(false) | bool }}"
+    status_code: [200]
+    timeout: 15
+  register: ontap_probe_cluster
+  failed_when: false
+
+- name: "ONTAP: else a node management address ({{ ontap_hosts[1:] | length }} to try)"
+  ansible.builtin.uri:
+    url: "{{ item }}/api/cluster?fields=name"
+    method: GET
+    url_username: "{{ lookup('ansible.builtin.env', 'WI_ONTAP_FIX_USER') }}"
+    url_password: "{{ lookup('ansible.builtin.env', 'WI_ONTAP_FIX_PASSWORD') }}"
+    force_basic_auth: true
+    validate_certs: "{{ ontap_validate_certs | default(false) | bool }}"
+    status_code: [200]
+    timeout: 15
+  loop: "{{ ontap_hosts[1:] }}"
+  register: ontap_probe_nodes
+  failed_when: false
+  when: ontap_probe_cluster.status | default(0) != 200
+
+- name: "ONTAP: use the first address that answered"
+  ansible.builtin.set_fact:
+    ontap_base: >-
+      {{ ontap_hosts[0] if ontap_probe_cluster.status | default(0) == 200 else
+         ((ontap_probe_nodes.results | default([]) | selectattr('status', 'defined') | selectattr('status', 'equalto', 200)
+           | map(attribute='item') | list) + ['']) | first }}
+
+- name: "ONTAP: an address must answer"
+  ansible.builtin.assert:
+    that: ontap_base | length > 0
+    fail_msg: >-
+      Neither the cluster management address nor a node management address answers with the ONTAP account
+      ({{ ontap_hosts | join(', ') }}). Use the service processor console (ssh to the SP address of the node).
+    quiet: true
+
+- name: "ONTAP: bring {{ ontap_lif }} up"
+  ansible.builtin.uri:
+    url: "{{ ontap_base }}/api/network/ip/interfaces/{{ ontap_lif_uuid }}"
+    method: PATCH
+    body: {"enabled": true}
+    body_format: json
+    url_username: "{{ lookup('ansible.builtin.env', 'WI_ONTAP_FIX_USER') }}"
+    url_password: "{{ lookup('ansible.builtin.env', 'WI_ONTAP_FIX_PASSWORD') }}"
+    force_basic_auth: true
+    validate_certs: "{{ ontap_validate_certs | default(false) | bool }}"
+    status_code: [200, 202]
+    timeout: 60
+  register: ontap_enable_out
+  when: ontap_enable | default(false) | bool
+
+- name: "ONTAP: revert {{ ontap_lif }} to its home port"
+  ansible.builtin.uri:
+    url: "{{ ontap_base }}/api/network/ip/interfaces/{{ ontap_lif_uuid }}"
+    method: PATCH
+    body: {"location": {"is_home": true}}
+    body_format: json
+    url_username: "{{ lookup('ansible.builtin.env', 'WI_ONTAP_FIX_USER') }}"
+    url_password: "{{ lookup('ansible.builtin.env', 'WI_ONTAP_FIX_PASSWORD') }}"
+    force_basic_auth: true
+    validate_certs: "{{ ontap_validate_certs | default(false) | bool }}"
+    status_code: [200, 202]
+    timeout: 60
+  register: ontap_revert_out
+
+- name: "ONTAP: check {{ ontap_lif }} is home and up"
+  ansible.builtin.uri:
+    url: "{{ ontap_base }}/api/network/ip/interfaces/{{ ontap_lif_uuid }}?fields=name,state,enabled,location.is_home,location.node.name,location.port.name"
+    method: GET
+    url_username: "{{ lookup('ansible.builtin.env', 'WI_ONTAP_FIX_USER') }}"
+    url_password: "{{ lookup('ansible.builtin.env', 'WI_ONTAP_FIX_PASSWORD') }}"
+    force_basic_auth: true
+    validate_certs: "{{ ontap_validate_certs | default(false) | bool }}"
+    status_code: [200]
+    timeout: 30
+  register: ontap_check
+  retries: 6
+  delay: 5
+  until: (ontap_check.json.location.is_home | default(false)) and (ontap_check.json.state | default('') == 'up')
+  failed_when: false
+
+- name: Result of the fix
+  vars:
+    lif: "{{ ontap_check.json | default({}) }}"
+    home: "{{ (lif.location | default({})).is_home | default(false) }}"
+  ansible.builtin.set_fact:
+    job_result:
+      ok: "{{ home | bool and lif.state | default('') == 'up' }}"
+      status: "{{ 'ok' if home | bool and lif.state | default('') == 'up' else 'failed' }}"
+      summary: "{{ ontap_lif }} is {{ lif.state | default('?') }} on {{ ((lif.location | default({})).node | default({})).name | default('?') }} {{ ((lif.location | default({})).port | default({})).name | default('?') }}, is-home {{ home | string | lower }}"
+      error: "{{ '' if home | bool and lif.state | default('') == 'up' else ontap_lif ~ ' is not back on its home port and up: check it on the ONTAP CLI' }}"
+      steps:
+        - {command: "PATCH {{ ontap_lif }} enabled=true", rc: "{{ 0 if ontap_enable_out.status | default(200) in [200, 202] else 1 }}", out: "{{ 'done' if ontap_enable | default(false) | bool else 'not needed (already up)' }}"}
+        - {command: "PATCH {{ ontap_lif }} location.is_home=true via {{ ontap_base }}", rc: "{{ 0 if ontap_revert_out.status | default(0) in [200, 202] else 1 }}", out: "HTTP {{ ontap_revert_out.status | default('?') }}"}
+        - {command: "GET {{ ontap_lif }} (state, home port)", rc: "{{ 0 if home | bool else 1 }}", out: "state {{ lif.state | default('?') }}, node {{ ((lif.location | default({})).node | default({})).name | default('?') }}, port {{ ((lif.location | default({})).port | default({})).name | default('?') }}, is-home {{ home | string | lower }}"}

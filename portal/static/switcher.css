@@ -1,0 +1,21 @@
+/* Ops Portal: application launcher in the masthead of every module (PatternFly "Application launcher": a plain
+   toggle with the grid icon that opens a menu of applications, as in the OpenShift console masthead).
+   Uses only the --pf-* tokens that the portal and every module define identically (docs/UI-SPEC.md). */
+.pf-app-launcher { position: relative; display: inline-flex; }
+.pf-app-launcher__toggle { display: grid; place-items: center; width: 40px; height: 40px; padding: 0; border: 0; border-radius: var(--pf-radius, 3px); background: transparent; color: #f0f0f0; cursor: pointer; }
+.pf-app-launcher__toggle:hover, .pf-app-launcher__toggle[aria-expanded="true"] { background: #3c3f42; color: #fff; }
+.pf-app-launcher__toggle:focus-visible { outline: 2px solid #fff; outline-offset: -2px; }
+.pf-app-launcher__toggle svg { width: 20px; height: 20px; fill: currentColor; }
+.pf-app-launcher__menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 250; width: 320px; padding: var(--pf-space-sm, 8px) 0; background: var(--pf-bg, #fff); color: var(--pf-text, #151515); box-shadow: var(--pf-shadow-lg, 0 8px 16px 0 rgba(3, 3, 3, .16)); font-family: var(--pf-font-text, sans-serif); font-size: var(--pf-font-sm, 14px); text-align: left; }
+.pf-app-launcher__group + .pf-app-launcher__group { margin-top: var(--pf-space-sm, 8px); padding-top: var(--pf-space-sm, 8px); border-top: 1px solid var(--pf-border, #d2d2d2); }
+.pf-app-launcher__group-title { margin: 0; padding: var(--pf-space-sm, 8px) var(--pf-space-md, 16px) var(--pf-space-xs, 4px); color: var(--pf-text-secondary, #6a6e73); font-size: var(--pf-font-xs, 12px); font-weight: 500; }
+.pf-app-launcher__list { margin: 0; padding: 0; list-style: none; }
+.pf-app-launcher__item { display: grid; grid-template-columns: 24px minmax(0, 1fr); column-gap: var(--pf-space-sm, 8px); align-items: start; width: 100%; padding: var(--pf-space-sm, 8px) var(--pf-space-md, 16px); border: 0; background: none; color: var(--pf-text, #151515); font: inherit; text-align: left; text-decoration: none; cursor: pointer; }
+.pf-app-launcher__item:hover, .pf-app-launcher__item:focus-visible { background: var(--pf-bg-hover, #f5f5f5); color: var(--pf-text, #151515); text-decoration: none; outline: 0; }
+.pf-app-launcher__item[aria-current="page"] { box-shadow: inset 3px 0 0 var(--pf-primary, #06c); }
+.pf-app-launcher__item[aria-disabled="true"] { color: var(--pf-text-disabled, #8a8d90); cursor: not-allowed; }
+.pf-app-launcher__item-icon { display: grid; place-items: center; width: 24px; height: 24px; margin-top: -1px; color: var(--pf-text-secondary, #6a6e73); }
+.pf-app-launcher__item-icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.pf-app-launcher__item-text { min-width: 0; }
+.pf-app-launcher__item-description { grid-column: 2; color: var(--pf-text-secondary, #6a6e73); font-size: var(--pf-font-xs, 12px); }
+@media (max-width: 700px) { .pf-app-launcher__menu { position: fixed; left: 8px; right: 8px; top: 64px; width: auto; } }

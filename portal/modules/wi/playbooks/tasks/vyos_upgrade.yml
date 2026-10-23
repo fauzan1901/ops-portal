@@ -1,0 +1,426 @@
+# VyOS upgrade (action_kind vyos_upgrade) or roll back to the previous image (vyos_rollback), WI "VyOS Upgrade +
+# CVE Mitigation" (KB 8398); the steps are described in wi_analysis/vyos_upgrade.py. Each step is checked before the next;
+# the first problem stops the fix with every step done so far in the result.
+# Vars: host_target (with its jump host), vu (from the stored result: image, target, hwid, old_image, rollback_image,
+# wait, poll, baseline). Keys: wi_keyfile (VyOS) and wi_jumpkey (jump host), written by host_setup.yml.
+- name: "VyOS {{ host_target.name }}: {{ 'roll back to ' ~ vu.rollback_image if action_kind == 'vyos_rollback' else 'upgrade to ' ~ vu.target }}"
+  block:
+    - name: Start
+      ansible.builtin.set_fact:
+        vu_steps: []
+        vu_rollback: "{{ action_kind == 'vyos_rollback' }}"
+        vu_iso_name: "{{ vu.image | basename }}"
+        # pinged before and after: default gateway and next-hops of the static routes (results of older checks: the gateway)
+        vu_targets: "{{ vu.baseline.targets | default([vu.baseline.gateway] if vu.baseline.gateway | default('') else []) }}"
+        vu_ping_before: ""
+        vu_grow_reboot: false
+
+    # ---- 1. the VyOS is still as the check saw it
+    - name: "1. Read the VyOS again"
+      ansible.builtin.include_tasks: vyos_step.yml
+      vars:
+        vs_label: "1. Read the VyOS again (version, interfaces, routes, NAT, room)"
+        vs_script: "{{ 'state' | wi_vu_step({}) }}"
+
+    - name: Keep the state before
+      ansible.builtin.set_fact:
+        vu_before: "{{ vs_out.stdout | default('') | wi_vu_state }}"
+
+    - name: Verify it is still the VyOS of the check
+      ansible.builtin.assert:
+        that:
+          - vu_before.read
+          - vu_before.version == vu.baseline.version
+          - vu_before.ifaces == vu.baseline.ifaces
+        fail_msg: >-
+          Nothing was changed: {{ host_target.name }} is now {{ vu_before.version or '?' }} with interfaces
+          {{ vu_before.ifaces | join(', ') or '?' }}, not {{ vu.baseline.version }} with {{ vu.baseline.ifaces | join(', ') }} as
+          in the check. Run the check again.
+        quiet: true
+
+    - name: "1. Ping before the upgrade"
+      ansible.builtin.include_tasks: vyos_step.yml
+      vars:
+        vs_label: "1. ping {{ vu_targets | join(' ') }} (before, for the post-check)"
+        vs_script: "{{ 'ping' | wi_vu_step({'targets': vu_targets}) }}"
+        vs_optional: true
+      when: vu_targets | length > 0
+
+    - name: Keep the pings before
+      ansible.builtin.set_fact:
+        vu_ping_before: "{{ vs_out.stdout | default('') }}"
+      when: vu_targets | length > 0
+
+    - name: Upgrade steps
+      when: not vu_rollback
+      block:
+        # ---- 2. backup (WI 2.1): saved on the VyOS, the copy kept on the jump host only
+        - name: "2. Save the configuration"
+          ansible.builtin.include_tasks: vyos_step.yml
+          vars:
+            vs_label: "2. Backup: save, sha256 of /config/config.boot"
+            vs_script: "{{ 'backup' | wi_vu_step({}) }}"
+
+        - name: Remember the sha256 of the configuration
+          ansible.builtin.set_fact:
+            vu_config_sha: "{{ (vs_out.stdout | default('') | wi_vu_iso).sha256 }}"
+
+        - name: "2. Copy the configuration to {{ host_target.jump.name }}"
+          ansible.builtin.shell:
+            cmd: "{{ 'backup' | wi_vu_jump(host_target, vu, wi_jumpkey.path | default(''), wi_keyfile.path | default(''), true) }}"
+            executable: /bin/bash
+          register: vj_out
+          changed_when: true
+          failed_when: false
+          timeout: 300
+
+        - name: Record the backup
+          ansible.builtin.set_fact:
+            vu_steps: "{{ vu_steps + [{'command': '2. Backup: /config/config.boot → ' ~ host_target.jump.name ~ ':'
+                                                    ~ (vu_backup.file or (vu.backup_dir | default('') ~ '/' ~ host_target.name ~ '/')),
+                                         'rc': vj_out.rc | default(1), 'out': vj_out | wi_vu_out}] }}"
+          vars:
+            vu_backup: "{{ vj_out.stdout | default('') | wi_vu_backup }}"
+
+        - name: Verify the backup
+          vars:
+            vu_backup: "{{ vj_out.stdout | default('') | wi_vu_backup }}"
+          ansible.builtin.assert:
+            that:
+              - vj_out.rc | default(1) == 0
+              - vu_config_sha | length == 64
+              - vu_backup.sha256 == vu_config_sha
+            fail_msg: >-
+              Nothing was changed: the configuration of {{ host_target.name }} was not backed up on {{ host_target.jump.name }}
+              ({{ 'sha256 differs from the VyOS' if vj_out.rc | default(1) == 0 else (vj_out | wi_vu_out | wi_vu_clip(300)) }}).
+              Check the folder {{ vu.backup_dir | default('') }} on the jump host and that the login user of the VyOS can
+              read /config/config.boot.
+            quiet: true
+
+        # ---- 3. hw-id (WI 2.2)
+        - name: "3. hw-id on every interface"
+          ansible.builtin.include_tasks: vyos_step.yml
+          vars:
+            vs_label: "3. hw-id: {{ vu.hwid | map('join', ' ') | join(', ') }} (commit, save)"
+            vs_script: "{{ 'hwid' | wi_vu_step({'hwid': vu.hwid}) }}"
+          when: vu.hwid | length > 0
+
+        - name: Verify the hw-id lines
+          ansible.builtin.assert:
+            that: vu.hwid | map('last') | select('in', vs_out.stdout | default('') | lower) | list | length == vu.hwid | length
+            fail_msg: "The hw-id was not saved on every interface: {{ vs_out.stdout | default('') | truncate(400) }}"
+            quiet: true
+          when: vu.hwid | length > 0
+
+        # ---- 4. the image on the jump host
+        - name: "4. Image on the jump host {{ host_target.jump.name }}"
+          ansible.builtin.shell:
+            cmd: "{{ 'iso' | wi_vu_jump(host_target, vu, wi_jumpkey.path | default(''), '', false) }}"
+            executable: /bin/bash
+          register: vj_out
+          changed_when: false
+          failed_when: false
+          timeout: 300
+
+        - name: Record the image
+          ansible.builtin.set_fact:
+            vu_steps: "{{ vu_steps + [{'command': '4. Image ' ~ vu.image ~ ' on ' ~ host_target.jump.name, 'rc': vj_out.rc | default(1),
+                                         'out': vj_out | wi_vu_out}] }}"
+            vu_iso: "{{ vj_out.stdout | default('') | wi_vu_iso }}"
+
+        - name: Verify the image
+          ansible.builtin.assert:
+            that: vj_out.rc | default(1) == 0 and vu_iso.size > 100000000 and vu_iso.sha256 | length == 64
+            fail_msg: "Nothing was changed: the image {{ vu.image }} on {{ host_target.jump.name }} cannot be read ({{ ((vj_out.stdout | default('')) ~ ' ' ~ (vj_out.stderr | default(''))) | trim | truncate(300) }})."
+            quiet: true
+
+        # ---- 5. room on the VyOS
+        - name: "5. Room on the VyOS"
+          ansible.builtin.include_tasks: vyos_step.yml
+          vars:
+            vs_label: "5. Room for the image ({{ (vu_iso.size / 1048576) | round | int }} MB): /tmp, the disk, the image store"
+            vs_script: "{{ 'room' | wi_vu_step({'iso': vu.image, 'user': host_target.user | default('')}) }}"
+
+        - name: Keep the room
+          ansible.builtin.set_fact:
+            vu_room: "{{ vs_out.stdout | default('') }}"
+
+        # the image store too small: its partition grows to the end of the disk (online). A disk enlarged in OpenStack /
+        # vCenter that the VyOS does not see yet: reboot first, read again
+        - name: Is the image store big enough
+          ansible.builtin.set_fact:
+            vu_grow: "{{ vu_room | wi_vu_grow(vu.image, vu_iso.size) }}"
+
+        - name: Record the plan for the disk
+          ansible.builtin.set_fact:
+            vu_steps: "{{ vu_steps + [{'command': '5. Image store too small: ' ~ vu_grow.summary, 'rc': 0 if vu_grow.can else 1,
+                                         'out': vu_grow.text}] }}"
+            vu_grow_reboot: "{{ vu_grow.can and not vu_grow.enough }}"
+          when: vu_grow.needed
+
+        - name: "5. Reboot to read the enlarged disk"
+          ansible.builtin.include_tasks: vyos_reboot.yml
+          vars:
+            vr_n: "5."
+            vr_why: "to read the disk enlarged in OpenStack / vCenter; nothing is installed yet"
+            vr_fail: "Nothing was installed yet: open its console (vCenter / OpenStack)."
+          when: vu_grow.needed and vu_grow_reboot | bool
+
+        - name: "5. Room after the reboot"
+          ansible.builtin.include_tasks: vyos_step.yml
+          vars:
+            vs_label: "5. Room after the reboot"
+            vs_script: "{{ 'room' | wi_vu_step({'iso': vu.image, 'user': host_target.user | default('')}) }}"
+          when: vu_grow.needed and vu_grow_reboot | bool
+
+        - name: The disk after the reboot
+          ansible.builtin.set_fact:
+            vu_room: "{{ vs_out.stdout | default('') }}"
+            vu_grow: "{{ vs_out.stdout | default('') | wi_vu_grow(vu.image, vu_iso.size) }}"
+          when: vu_grow.needed and vu_grow_reboot | bool
+
+        - name: Verify the disk can grow enough
+          ansible.builtin.assert:
+            that: not vu_grow.needed or (vu_grow.can and vu_grow.enough)
+            fail_msg: "Nothing was installed: {{ vu_grow.text }}"
+            quiet: true
+
+        - name: "5. Grow the image store"
+          ansible.builtin.include_tasks: vyos_step.yml
+          vars:
+            vs_label: >-
+              5. Grow {{ vu_grow.dev }} to the whole disk {{ vu_grow.disk }} (+{{ (vu_grow.free_kb / 1024) | round | int }} MB) and
+              its filesystem, online
+            vs_script: "{{ 'grow' | wi_vu_step({'dev': vu_grow.dev, 'disk': vu_grow.disk, 'num': vu_grow.num}) }}"
+          when: vu_grow.needed
+
+        - name: "5. Room after growing"
+          ansible.builtin.include_tasks: vyos_step.yml
+          vars:
+            vs_label: "5. Room after growing {{ vu_grow.dev }}"
+            vs_script: "{{ 'room' | wi_vu_step({'iso': vu.image, 'user': host_target.user | default('')}) }}"
+          when: vu_grow.needed
+
+        - name: The room after growing
+          ansible.builtin.set_fact:
+            vu_room: "{{ vs_out.stdout | default('') }}"
+          when: vu_grow.needed
+
+        # /tmp is a RAM disk (half the memory of the VM): when the ISO does not fit there, it goes to the disk (home folder)
+        - name: Where the image goes
+          ansible.builtin.set_fact:
+            vu_place: "{{ vu_room | wi_vu_place(vu.image, vu_iso.size, vu.home | default('')) }}"
+
+        - name: Record where the image goes
+          ansible.builtin.set_fact:
+            vu_steps: "{{ vu_steps + [{'command': '5. The image goes to ' ~ (vu_place.dir or 'nowhere: too little room'),
+                                         'rc': 0 if vu_place.dir else 1, 'out': vu_place.text}] }}"
+
+        - name: Verify the room
+          ansible.builtin.assert:
+            that:
+              - vu_place.dir | length > 0
+              - vu_place.store is none or vu_place.store >= 1572864
+            fail_msg: >-
+              Nothing was copied: {{ vu_place.text }}
+              {{ '' if vu_place.store is none or vu_place.store >= 1572864 else (vu_place.store // 1024) ~ ' MB in the image store (1536 MB needed: delete system image <old>).' }}
+            quiet: true
+
+        # ---- 6. scp from the jump host (the VyOS key forwarded for this command only)
+        - name: The image goes to the VyOS now (removed again when the fix stops)
+          ansible.builtin.set_fact:
+            vu_dir: "{{ vu_place.dir }}"
+            vu_copy_started: true
+
+        - name: "6. Copy the image from {{ host_target.jump.name }} to {{ host_target.name }}:{{ vu_dir }}"
+          ansible.builtin.shell:
+            cmd: "{{ 'copy' | wi_vu_jump(host_target, vu | combine({'dir': vu_dir}), wi_jumpkey.path | default(''), wi_keyfile.path | default(''), true) }}"
+            executable: /bin/bash
+          register: vj_out
+          changed_when: true
+          failed_when: false
+          timeout: 3600
+
+        - name: Record the copy
+          ansible.builtin.set_fact:
+            vu_steps: "{{ vu_steps + [{'command': '6. scp ' ~ vu.image ~ ' → ' ~ host_target.name ~ ':' ~ vu_dir ~ '/' ~ vu_iso_name, 'rc': vj_out.rc | default(1),
+                                         'out': vj_out | wi_vu_out}] }}"
+
+        - name: Verify the copy
+          ansible.builtin.assert:
+            that: vj_out.rc | default(1) == 0
+            fail_msg: "The image was not copied: {{ ((vj_out.stderr | default('')) ~ ' ' ~ (vj_out.stdout | default(''))) | trim | truncate(400) }}"
+            quiet: true
+
+        # ---- 7. the same file on the VyOS
+        - name: "7. Checksum on the VyOS"
+          ansible.builtin.include_tasks: vyos_step.yml
+          vars:
+            vs_label: "7. sha256 of {{ vu_dir }}/{{ vu_iso_name }} (on the jump host: {{ vu_iso.sha256 }})"
+            vs_script: "{{ 'checksum' | wi_vu_step({'iso': vu.image, 'dir': vu_dir}) }}"
+
+        - name: Verify the checksum
+          ansible.builtin.assert:
+            that: vu_iso.sha256 in (vs_out.stdout | default(''))
+            fail_msg: "The copy on the VyOS differs from the image on the jump host (sha256); nothing was installed. Copy it again."
+            quiet: true
+
+        # ---- 8. install (WI 2.3), no reboot yet
+        - name: "8. add system image"
+          ansible.builtin.include_tasks: vyos_step.yml
+          vars:
+            vs_label: "8. add system image {{ vu_dir }}/{{ vu_iso_name }} (Yes to every yes/no question, the proposed value to the others)"
+            vs_script: "{{ 'install' | wi_vu_step({'iso': vu.image, 'dir': vu_dir}) }}"
+            vs_timeout: 2400
+
+        - name: Verify the new image
+          vars:
+            after_install: "{{ vs_out.stdout | default('') | wi_vu_images }}"
+          ansible.builtin.assert:
+            that:
+              - vs_out.rc | default(1) == 0
+              - after_install.default_image | length > 0
+              - after_install.default_image != vu_before.default_image
+              # a new name, or an image of the same name replaced (answered Yes): it carries the version of the ISO
+              - after_install.default_image not in vu_before.images or vu.target in after_install.default_image
+            fail_msg: >-
+              The image was not installed as the default boot (no reboot was done): {{ vs_out | wi_vu_out | wi_vu_clip(400) }}
+            quiet: true
+
+        - name: Remember the new image
+          ansible.builtin.set_fact:
+            vu_new_image: "{{ (vs_out.stdout | default('') | wi_vu_images).default_image }}"
+
+        # ---- 9. CVE-2025-30095 (WI 2.4)
+        - name: "9. New dropbear key"
+          ansible.builtin.include_tasks: vyos_step.yml
+          vars:
+            vs_label: "9. CVE-2025-30095: dropbear keys removed, a new one generated"
+            vs_script: "{{ 'cve' | wi_vu_step({}) }}"
+
+        - name: "10. Remove the image from the VyOS"
+          ansible.builtin.include_tasks: vyos_step.yml
+          vars:
+            vs_label: "10. rm {{ vu_dir }}/{{ vu_iso_name }}"
+            vs_script: "{{ 'cleanup' | wi_vu_step({'iso': vu.image, 'dir': vu_dir}) }}"
+
+    - name: Roll back steps
+      when: vu_rollback
+      block:
+        - name: "2. Default boot back to {{ vu.rollback_image }}"
+          ansible.builtin.include_tasks: vyos_step.yml
+          vars:
+            vs_label: "2. set system image default-boot '{{ vu.rollback_image }}'"
+            vs_script: "{{ 'default_boot' | wi_vu_step({'image': vu.rollback_image}) }}"
+
+        - name: Verify the default boot
+          ansible.builtin.assert:
+            that: (vs_out.stdout | default('') | wi_vu_images).default_image == vu.rollback_image
+            fail_msg: "The default boot is not {{ vu.rollback_image }}; no reboot was done: {{ vs_out.stdout | default('') | truncate(400) }}"
+            quiet: true
+
+        - name: Remember the image
+          ansible.builtin.set_fact:
+            vu_new_image: "{{ vu.rollback_image }}"
+
+    # ---- 11. reboot (WI 2.5), then SSH until the VyOS answers with a new boot ID
+    - name: The reboot into the new image
+      ansible.builtin.set_fact:
+        vu_rebooted: true
+
+    - name: "11. Reboot and wait"
+      ansible.builtin.include_tasks: vyos_reboot.yml
+      vars:
+        vr_n: "11."
+        vr_why: "{{ 'back to ' ~ vu.rollback_image if vu_rollback else 'into ' ~ (vu_new_image | default(vu.target)) }}"
+        vr_fail: >-
+          Open its console (vCenter / OpenStack): when it does not boot, choose the previous image {{ vu.old_image | default('') }}
+          in the GRUB menu, or restore the snapshot of the VM.
+
+    # ---- 12. post-check (WI 2.6) against the baseline
+    - name: "12. Read the VyOS after the reboot"
+      ansible.builtin.include_tasks: vyos_step.yml
+      vars:
+        vs_label: "12. Read the VyOS after the reboot"
+        vs_script: "{{ 'state' | wi_vu_step({}) }}"
+
+    - name: Keep the state after
+      ansible.builtin.set_fact:
+        vu_after: "{{ vs_out.stdout | default('') | wi_vu_state }}"
+
+    - name: "12. Ping after the reboot"
+      ansible.builtin.include_tasks: vyos_step.yml
+      vars:
+        vs_label: "12. ping {{ vu_targets | join(' ') }} (default gateway, next-hops of the static routes)"
+        vs_script: "{{ 'ping' | wi_vu_step({'targets': vu_targets}) }}"
+        vs_optional: true
+      when: vu_targets | length > 0
+
+    - name: Post-check
+      ansible.builtin.set_fact:
+        vu_post: >-
+          {{ vu.baseline | wi_vu_post(vu_after, (vs_out.stdout | default('')) if vu_targets | length > 0 else '',
+                                      vu.rollback_image if vu_rollback else vu.target, vu_new_image | default(''),
+                                      vu_ping_before) }}
+
+    - name: Record the post-check
+      ansible.builtin.set_fact:
+        vu_steps: "{{ vu_steps + [{'command': '12. Post-check against the baseline', 'rc': 0 if vu_post | rejectattr('ok') | list | length == 0 else 1,
+                                     'out': vu_post | map(attribute='line') | list | wi_vu_lines}] }}"
+
+    - name: Result
+      ansible.builtin.set_fact:
+        job_result:
+          ok: "{{ vu_post | rejectattr('ok') | list | length == 0 }}"
+          status: "{{ 'ok' if vu_post | rejectattr('ok') | list | length == 0 else 'failed' }}"
+          summary: >-
+            {{ host_target.name }} {{ 'is back on ' ~ vu.rollback_image if vu_rollback else 'upgraded to ' ~ vu_after.version }};
+            post-check {{ 'passed' if vu_post | rejectattr('ok') | list | length == 0 else 'NOT passed' }}.
+          error: >-
+            {{ '' if vu_post | rejectattr('ok') | list | length == 0 else
+               'Post-check not passed: ' ~ (vu_post | rejectattr('ok') | map(attribute='line') | join('; ')) ~
+               ('' if vu_rollback else '. Roll back from the check (Roll back to ' ~ vu.old_image ~ ') or follow WI 4.') }}
+          steps: "{{ vu_steps }}"
+
+  rescue:
+    - name: The step that stopped the fix
+      ansible.builtin.set_fact:
+        vu_failed_step: "{{ ansible_failed_task.name | default('') }}"
+        vu_failed_msg: "{{ ansible_failed_result.msg | default('no message') }}"
+
+    # the copy of the image fills /tmp (a RAM disk on VyOS) or the disk: removed (a next run copies it again)
+    - name: Remove the image from the VyOS
+      ansible.builtin.raw: "{{ (host_prefix ~ ' ' ~ (vu_cleanup | quote)) if host_prefix else vu_cleanup }}"
+      vars:
+        vu_cleanup: "{{ 'cleanup' | wi_vu_step({'iso': vu.image, 'dir': vu_dir | default('/tmp')}) }}"
+      delegate_to: wi_target
+      register: vu_clean
+      changed_when: true
+      failed_when: false
+      ignore_unreachable: true
+      timeout: 60
+      when: vu_copy_started | default(false) and not (vu_rebooted | default(false))
+
+    - name: Record the cleanup
+      ansible.builtin.set_fact:
+        vu_steps: >-
+          {{ vu_steps | default([]) + [{'command': 'Stopped: rm ' ~ (vu_dir | default('/tmp')) ~ '/' ~ vu_iso_name ~ ' (the copy of the image)',
+                                        'rc': 255 if vu_clean.unreachable | default(false) else vu_clean.rc | default(1),
+                                        'out': vu_clean | wi_vu_out | wi_vu_clip}] }}
+      when: vu_copy_started | default(false) and not (vu_rebooted | default(false))
+
+    - name: The result of the stopped fix
+      ansible.builtin.set_fact:
+        job_result:
+          ok: false
+          status: failed
+          summary: ""
+          step: "{{ vu_failed_step }}"
+          error: "{{ vu_failed_msg }}"
+          steps: "{{ vu_steps | default([]) }}"
+
+  always:
+    - name: The full output of the steps (raw output of the fix)
+      ansible.builtin.set_fact:
+        action_out:
+          stdout: "{{ vu_steps | default([]) | wi_vu_text }}"

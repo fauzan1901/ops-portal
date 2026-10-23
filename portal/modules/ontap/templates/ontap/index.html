@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="ui-version" content="{{ ui_version }}">
+<title>ONTAP Restore</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='3' fill='%230066cc'/%3E%3Cellipse cx='16' cy='10' rx='8' ry='3' stroke='white' stroke-width='2' fill='none'/%3E%3Cpath d='M8 10v12c0 1.7 3.6 3 8 3s8-1.3 8-3V10M8 16c0 1.7 3.6 3 8 3s8-1.3 8-3' stroke='white' stroke-width='2' fill='none'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="{{ url_for('ontap.static', filename='app.css', v=ui_version) }}">
+<link rel="stylesheet" href="/static/switcher.css">
+</head>
+<body>
+<svg xmlns="http://www.w3.org/2000/svg" class="sprite" aria-hidden="true">
+  <symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5.5" rx="7.5" ry="2.8"/><path d="M4.5 5.5v13c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8v-13M4.5 12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8"/></symbol>
+  <symbol id="i-bars" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+  <symbol id="i-restore" viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3"/><path d="M4.5 4.5v4h4"/><path d="M12 8.5V12l2.5 1.5"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-check-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 12.2l2.8 2.8L16.2 9.5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></symbol>
+  <symbol id="i-x-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9 9l6 6M15 9l-6 6"/></symbol>
+  <symbol id="i-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/></symbol>
+  <symbol id="i-in-progress" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5v-3a1 1 0 0 0-1-1h-9a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h3"/></symbol>
+  <symbol id="i-sign-out" viewBox="0 0 24 24"><path d="M9.5 4.5h-3a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h3M14.5 8l4 4-4 4M18.5 12h-9"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-eye-closed" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/><path d="M4 4l16 16"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6.5 16.5V11a5.5 5.5 0 0 1 11 0v5.5l1.5 2H5l1.5-2z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3.8L2.8 19.5h18.4L12 3.8z"/><path d="M12 10v4.2M12 17v.01"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5.5M12 7.8v.01"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="9.5" rx="2"/><path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3"/></symbol>
+  <symbol id="i-angle-right" viewBox="0 0 24 24"><path d="M10 7l5 5-5 5"/></symbol>
+  <symbol id="i-cubes" viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/></symbol>
+  <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 19.5c.6-3.4 3.2-5.5 6.5-5.5s5.9 2.1 6.5 5.5"/><path d="M15.5 4.8a3.5 3.5 0 0 1 0 6.4M17.5 14.3c2.1.6 3.6 2.4 4 5.2"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15.5" r="4.5"/><path d="M11.3 12.2L20 3.5M16.5 7l2.5 2.5M14 9.5l2 2"/></symbol>
+  <symbol id="i-caret-down" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+</svg>
+
+<!-- ======================= APP ======================= -->
+<div class="pf-page" id="appView" hidden>
+  <header class="pf-masthead">
+    <button type="button" class="pf-masthead__toggle" id="navToggle" aria-label="Toggle navigation" aria-expanded="true"><svg class="pf-icon" aria-hidden="true"><use href="#i-bars"></use></svg></button>
+    <div class="pf-masthead__brand"><span class="pf-masthead__logo"><svg class="pf-icon" aria-hidden="true"><use href="#i-database"></use></svg></span><span><b>ONTAP</b> Restore</span></div>
+    <div class="pf-masthead__content">
+      <div class="pf-toggle-group pf-m-dark" id="siteSwitch" role="radiogroup" aria-label="Site"></div>
+      <a class="pf-masthead__notify" href="#/approvals" id="notifyBtn" hidden><svg class="pf-icon" aria-hidden="true"><use href="#i-bell"></use></svg><span class="pf-badge" id="notifyCount"></span></a>
+      <div id="portalLauncher" data-current="ontap"></div>
+      <div class="pf-masthead__user" id="userMenuWrap">
+        <button type="button" class="pf-user-toggle" id="userToggle" aria-haspopup="menu" aria-expanded="false" aria-controls="userMenu">
+          <span class="pf-avatar" id="userAvatar" aria-hidden="true"></span>
+          <span class="pf-user-toggle__name" id="userName"></span>
+          <span class="pf-label pf-m-compact" id="userRole"></span>
+          <svg class="pf-icon" aria-hidden="true"><use href="#i-caret-down"></use></svg>
+        </button>
+        <div class="pf-menu" id="userMenu" role="menu" aria-labelledby="userToggle" hidden>
+          <div class="pf-menu__header">
+            <b id="userMenuName"></b>
+            <span class="mono pf-text-secondary" id="userMenuLogin"></span>
+            <span class="pf-text-secondary pf-text-sm" id="userMenuMfa"></span>
+            <span class="pf-text-secondary pf-text-sm" id="userMenuClient"></span>
+          </div>
+          <button type="button" class="pf-menu__item" role="menuitem" id="logoutBtn"><svg class="pf-icon" aria-hidden="true"><use href="#i-sign-out"></use></svg>Sign out</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <aside class="pf-sidebar" id="sidebar">
+    <nav class="pf-nav" aria-label="Navigation">
+      <div class="pf-nav__section">Storage</div>
+      <ul>
+        <li><a class="pf-nav__link" href="#/restore" data-route="restore"><svg class="pf-icon" aria-hidden="true"><use href="#i-restore"></use></svg>Restore volume</a></li>
+        <li><a class="pf-nav__link" href="#/jobs" data-route="jobs"><svg class="pf-icon" aria-hidden="true"><use href="#i-list"></use></svg>Jobs</a></li>
+        <li><a class="pf-nav__link" href="#/approvals" data-route="approvals"><svg class="pf-icon" aria-hidden="true"><use href="#i-check-circle"></use></svg>Approvals<span class="pf-badge pf-nav__badge" id="navApprovalsBadge" hidden></span></a></li>
+      </ul>
+      <div class="pf-nav__section admin-only" hidden>Administration</div>
+      <ul class="admin-only" hidden>
+        <li><a class="pf-nav__link" href="/#/users"><svg class="pf-icon" aria-hidden="true"><use href="#i-users"></use></svg>Users</a></li>
+        <li><a class="pf-nav__link" href="/#/credentials"><svg class="pf-icon" aria-hidden="true"><use href="#i-key"></use></svg>Credentials</a></li>
+      </ul>
+      <div class="pf-nav__sites" id="navSites"></div>
+    </nav>
+  </aside>
+
+  <main class="pf-page__main">
+    <!-- ---------- Restore (wizard) ---------- -->
+    <div id="page-restore" data-page="restore">
+      <section class="pf-page__section pf-m-light">
+        <h1 class="pf-title">Restore volume</h1>
+        <p>Site <b class="site-name-current"></b>. Restores a LUN from an ONTAP snapshot to a new LUN and volume, then moves it to the target project. The original volume is not changed.</p>
+      </section>
+      <section class="pf-page__section">
+        <div id="siteWarning"></div>
+        <div class="pf-wizard">
+          <nav class="pf-wizard__nav" aria-label="Restore steps"><ol id="wizNav"></ol></nav>
+          <div class="pf-wizard__main">
+            <div class="pf-wizard__body">
+              <!-- Step 1 -->
+              <div data-step="0">
+                <h2 class="pf-title">Volume</h2>
+                <p class="pf-text-secondary">Enter the OpenStack volume ID. In ONTAP the volume appears as LUN <code>volume-&lt;ID&gt;</code>.</p>
+                <form class="pf-form-group" id="volumeForm" novalidate>
+                  <label class="pf-form-label" for="volumeId">OpenStack volume ID <span class="pf-required" aria-hidden="true">*</span></label>
+                  <div class="pf-input-group">
+                    <input class="pf-form-control mono" id="volumeId" placeholder="a80a1a07-06b8-489b-a984-b046981f68b9" autocomplete="off" spellcheck="false" maxlength="60" aria-describedby="volumeHelp">
+                    <button type="submit" class="pf-btn pf-m-secondary" id="findBtn"><svg class="pf-icon" aria-hidden="true"><use href="#i-search"></use></svg>Find LUN</button>
+                  </div>
+                  <span class="pf-helper-text" id="volumeHelp">Copy it from the ID column of openstack volume list, or from Horizon.</span>
+                </form>
+                <div id="volumeInfo"></div>
+                <div id="osInfo"></div>
+              </div>
+              <!-- Step 2 -->
+              <div data-step="1" hidden>
+                <h2 class="pf-title">Snapshot</h2>
+                <p class="pf-text-secondary">Select the FlexVol snapshot to restore from.</p>
+                <div class="pf-toolbar" style="padding: 0 0 var(--pf-space-md);">
+                  <div class="pf-toggle-group pf-m-compact" id="snapFilter" role="radiogroup" aria-label="Snapshot schedule"></div>
+                  <span class="pf-toolbar__spacer" id="snapCount"></span>
+                </div>
+                <div class="snap-scroll">
+                  <table class="pf-table" aria-label="Snapshot">
+                    <thead><tr><th style="width: 48px;"><span class="sr-only">Select</span></th><th>Time</th><th>Snapshot name</th><th>Schedule</th></tr></thead>
+                    <tbody id="snapList"></tbody>
+                  </table>
+                </div>
+              </div>
+              <!-- Step 3 -->
+              <div data-step="2" hidden>
+                <h2 class="pf-title">Target project</h2>
+                <p class="pf-text-secondary">After <code>cinder manage</code>, the new volume is moved to this project with a volume transfer.</p>
+                <div class="pf-form-group">
+                  <label class="pf-form-label" for="projectId">Target project ID</label>
+                  <input class="pf-form-control mono" id="projectId" placeholder="Leave empty to use the original project" autocomplete="off" spellcheck="false" maxlength="64" aria-describedby="projectHelp">
+                  <span class="pf-helper-text" id="projectHelp">Leave empty to use the original volume's project.</span>
+                </div>
+              </div>
+              <!-- Step 4 -->
+              <div data-step="3" hidden>
+                <h2 class="pf-title">Review</h2>
+                <p class="pf-text-secondary">Ansible checks every prerequisite on ONTAP and OpenStack (read-only) before the restore can run.</p>
+                <div id="reviewBody"></div>
+              </div>
+            </div>
+            <footer class="pf-wizard__footer">
+              <button type="button" class="pf-btn pf-m-primary" id="wizNext">Next</button>
+              <button type="button" class="pf-btn pf-m-secondary" id="wizBack">Back</button>
+              <button type="button" class="pf-btn pf-m-link" id="wizCancel">Cancel</button>
+              <span class="pf-helper-text" id="wizHint"></span>
+            </footer>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ---------- Jobs ---------- -->
+    <div id="page-jobs" data-page="jobs" hidden>
+      <section class="pf-page__section pf-m-light">
+        <h1 class="pf-title">Jobs</h1>
+        <p>Every restore by every user and site, recorded before it runs.</p>
+      </section>
+      <section class="pf-page__section">
+        <div class="pf-card">
+          <div class="pf-toolbar">
+            <input class="pf-form-control pf-m-search" id="hiQ" maxlength="100" placeholder="Search volume ID, name, project, snapshot" aria-label="Search jobs">
+            <select class="pf-form-control" id="hiUser" aria-label="User"></select>
+            <select class="pf-form-control" id="hiSite" aria-label="Site"></select>
+            <select class="pf-form-control" id="hiStatus" aria-label="Status"><option value="">All statuses</option><option value="success">Successful</option><option value="failed">Failed</option><option value="running">Running</option><option value="unknown">Unknown</option></select>
+            <span class="pf-toolbar__spacer" id="hiShown"></span>
+            <button type="button" class="pf-btn pf-m-secondary pf-m-small" id="hiExportBtn">Export CSV</button>
+          </div>
+          <div class="pf-table-wrap">
+            <table class="pf-table" aria-label="Restore jobs">
+              <thead><tr><th>ID</th><th>Volume</th><th>Status</th><th>Site</th><th>Snapshot</th><th>Target</th><th>User</th><th>Started</th></tr></thead>
+              <tbody id="hiList"></tbody>
+            </table>
+          </div>
+          <div class="pf-toolbar" id="hiMore" hidden><button type="button" class="pf-btn pf-m-link" id="hiMoreBtn">Load more</button></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ---------- Approvals (deletion of original volumes) ---------- -->
+    <div id="page-approvals" data-page="approvals" hidden>
+      <section class="pf-page__section pf-m-light">
+        <h1 class="pf-title">Approvals</h1>
+        <p>Original volumes of restores, scheduled for deletion. Nothing is deleted automatically: when a volume is due,
+          an administrator approves the deletion, keeps the volume, or postpones it. The deletion checks the volume again
+          first and never uses --force or --cascade. A volume still attached as a data disk is detached first; a volume that
+          is the boot disk (vda) of an instance can be deleted with that instance (its name typed to confirm): the instance
+          first, then the volume — or, with delete on termination, Nova deletes the volume and the portal checks it is gone.</p>
+      </section>
+      <section class="pf-page__section">
+        <div id="apNotice"></div>
+        <div class="pf-card">
+          <div class="pf-toolbar">
+            <div class="pf-toggle-group pf-m-compact" id="apView" role="radiogroup" aria-label="Show">
+              <label><input type="radio" name="apView" value="open" checked><span>Open</span></label>
+              <label><input type="radio" name="apView" value="awaiting"><span>Needs a decision</span></label>
+              <label><input type="radio" name="apView" value="done"><span>Deleted or kept</span></label>
+              <label><input type="radio" name="apView" value="all"><span>All</span></label>
+            </div>
+            <span class="pf-toolbar__spacer" id="apShown"></span>
+          </div>
+          <div class="pf-table-wrap">
+            <table class="pf-table" aria-label="Original volumes scheduled for deletion">
+              <thead><tr><th>Due</th><th>Original volume</th><th>Site</th><th>Restore</th><th>State</th><th><span class="sr-only">Actions</span></th></tr></thead>
+              <tbody id="apList"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ---------- Job ---------- -->
+    <div id="page-job" data-page="job" hidden>
+      <section class="pf-page__section pf-m-light">
+        <nav class="pf-breadcrumb" aria-label="Breadcrumb"><a href="#/jobs">Jobs</a><svg class="pf-icon" aria-hidden="true"><use href="#i-angle-right"></use></svg><span id="jobCrumb"></span></nav>
+        <div class="pf-title-row"><h1 class="pf-title" id="jobTitle"></h1><span id="jobStatus"></span></div>
+      </section>
+      <section class="pf-page__section">
+        <div id="jobOutcome"></div>
+        <div class="pf-grid">
+          <div class="pf-card">
+            <div class="pf-card__header"><h2 class="pf-card__title">Details</h2></div>
+            <div class="pf-card__body" id="jobDetail"></div>
+          </div>
+          <div class="pf-card">
+            <div class="pf-card__header"><h2 class="pf-card__title">Progress</h2><span class="pf-card__actions" id="jobElapsed"></span></div>
+            <div class="pf-card__body"><ol class="pf-progress-stepper" id="jobSteps"></ol></div>
+          </div>
+        </div>
+        <div class="pf-card">
+          <div class="pf-card__header"><h2 class="pf-card__title">Output</h2><span class="pf-card__actions" id="jobLines"></span></div>
+          <div class="pf-card__body"><div class="pf-log" id="jobLog" role="log" aria-label="Ansible output"></div></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ---------- Restore group: several volumes of one instance ---------- -->
+    <div id="page-group" data-page="group" hidden>
+      <section class="pf-page__section pf-m-light">
+        <nav class="pf-breadcrumb" aria-label="Breadcrumb"><a href="#/jobs">Jobs</a><svg class="pf-icon" aria-hidden="true"><use href="#i-angle-right"></use></svg><span id="groupCrumb"></span></nav>
+        <div class="pf-title-row"><h1 class="pf-title" id="groupTitle"></h1><span id="groupStatus"></span></div>
+      </section>
+      <section class="pf-page__section">
+        <div id="groupOutcome"></div>
+        <div class="pf-card">
+          <div class="pf-card__header"><h2 class="pf-card__title">Volumes</h2><span class="pf-card__actions">One restore (job) after the other</span></div>
+          <div class="pf-card__body pf-m-flush">
+            <div class="pf-table-wrap">
+              <table class="pf-table" aria-label="Volumes of the group">
+                <thead><tr><th>#</th><th>Device</th><th>Source volume</th><th>New volume</th><th>Status</th><th>Restore</th></tr></thead>
+                <tbody id="groupList"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <div class="pf-card">
+          <div class="pf-card__header"><h2 class="pf-card__title">Details</h2></div>
+          <div class="pf-card__body" id="groupDetail"></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ---------- No access: signed in, but this account may not use ONTAP Restore ---------- -->
+    <div id="page-noaccess" data-page="noaccess" hidden>
+      <section class="pf-page__section">
+        <div class="pf-empty-state">
+          <svg class="pf-icon" aria-hidden="true"><use href="#i-lock"></use></svg>
+          <h2 class="pf-title">No access to ONTAP Restore</h2>
+          <span>Your account may not use this module. Ask an administrator to give it on the Users page.</span>
+          <a class="pf-btn pf-m-primary pf-mt-md" href="/">Go to the portal home</a>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<dialog class="pf-modal pf-m-large" id="approveDialog" aria-labelledby="approveTitle">
+  <form method="dialog">
+    <header class="pf-modal__header">
+      <h1 class="pf-title" id="approveTitle"></h1>
+    </header>
+    <div class="pf-modal__body" id="approveBody"></div>
+    <footer class="pf-modal__footer" id="approveFooter"></footer>
+  </form>
+</dialog>
+
+<dialog class="pf-modal pf-m-small" id="confirmDialog" aria-labelledby="confirmTitle" aria-describedby="confirmBody">
+  <form method="dialog">
+    <header class="pf-modal__header">
+      <h1 class="pf-title" id="confirmTitle"></h1>
+    </header>
+    <div class="pf-modal__body"><p id="confirmBody"></p></div>
+    <footer class="pf-modal__footer">
+      <button type="submit" class="pf-btn pf-m-danger" value="ok" id="confirmOk">Remove</button>
+      <button type="submit" class="pf-btn pf-m-link" value="cancel" id="confirmCancel">Cancel</button>
+    </footer>
+  </form>
+</dialog>
+
+<div class="pf-alert-group" id="toasts" aria-live="polite"></div>
+<script src="/static/switcher.js"></script>
+<script src="{{ url_for('ontap.static', filename='app.js', v=ui_version) }}"></script>
+</body>
+</html>

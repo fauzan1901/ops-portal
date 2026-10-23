@@ -1,0 +1,26 @@
+# ONTAP: move the restored LUN to the FlexVol of the Cinder pool the operator selected (lun move, same SVM, pool of the
+# selected volume type), then cinder manage in that pool. Only used data is copied, inside ONTAP; no OpenStack migration.
+# Native REST (proven on ONTAP 9.13.1): PATCH /api/storage/luns/{uuid} {"name": <target path>}, watch movement.progress.
+# Proven on DCB: a lun move started too soon after restore-file is stopped by ONTAP without creating the target LUN.
+# The plugin first waits until the used size of the -restore LUN is stable (ontap.move_settle_seconds), then tries again
+# if it is stopped (ontap.move_attempts, delay ontap.move_retry_delay_seconds).
+- name: "ONTAP: lun move {{ restore_path }} to FlexVol {{ move_target.flexvol | default('') }}"
+  ontap_lun_move:
+    host: "{{ cfg.ontap.host }}"
+    validate_certs: "{{ cfg.ontap.validate_certs | default(false) | bool }}"
+    source_path: "{{ restore_path }}"
+    destination_path: "{{ move_path }}"
+    poll_seconds: "{{ cfg.ontap.move_poll_seconds | default(10) }}"
+    timeout_seconds: "{{ cfg.ontap.move_wait_seconds | default(7200) }}"
+    attempts: "{{ cfg.ontap.move_attempts | default(5) }}"
+    retry_delay_seconds: "{{ cfg.ontap.move_retry_delay_seconds | default(120) }}"
+    settle_seconds: "{{ cfg.ontap.move_settle_seconds | default(60) }}"
+    settle_max_seconds: "{{ cfg.ontap.move_settle_max_seconds | default(900) }}"
+    patch_timeout_seconds: "{{ cfg.ontap.move_patch_timeout_seconds | default(300) }}"
+  register: move_wait
+
+- name: Restored LUN is now in the target FlexVol
+  ansible.builtin.set_fact:
+    moved_from: "{{ restore_path }}"
+    restore_path: "{{ move_path }}"
+    cinder_host: "{{ move_target.host | default(cinder_host) }}"

@@ -1,0 +1,320 @@
+# Collect and check all prerequisites (read only): the OpenStack volume and its instance, the target project, the volume
+# types and their Cinder pools, the LUN, the FlexVol, the snapshot, and the action after the restore.
+# Used by plan.yml (before Review) and restore.yml (restore_run: checked again right before execution, including the
+# pool selected by the operator and the action after the restore).
+
+# ---------------- OpenStack ----------------
+- name: Original volume info
+  ansible.builtin.include_tasks: openstack_cmd.yml
+  vars:
+    os_label: "volume info {{ volume_id }}"
+    os_command: "openstack volume show {{ volume_id | quote }} -f json"
+
+- name: Save original volume info
+  ansible.builtin.set_fact:
+    os_volume: "{{ os_out.stdout | extract_json }}"
+
+- name: Validate original volume info
+  ansible.builtin.assert:
+    that:
+      - os_volume['os-vol-host-attr:host'] | default('') is match('^[A-Za-z0-9_.:@-]+#[A-Za-z0-9_.-]+$')
+      - os_volume['os-vol-tenant-attr:tenant_id'] | default('') | length > 0
+    fail_msg: >-
+      Incomplete volume info (Cinder host: '{{ os_volume['os-vol-host-attr:host'] | default('') }}').
+      Make sure overcloudrc uses the admin user.
+    quiet: true
+
+- name: Set Cinder host and target project
+  ansible.builtin.set_fact:
+    cinder_host: "{{ os_volume['os-vol-host-attr:host'] }}"
+    cinder_pool: "{{ os_volume['os-vol-host-attr:host'].split('#') | last }}"
+    source_project: "{{ os_volume['os-vol-tenant-attr:tenant_id'] }}"
+    target_project: "{{ project_id | default('', true) or os_volume['os-vol-tenant-attr:tenant_id'] }}"
+    # Volume type of the new volume: the type of the original volume, or another type picked by the operator in Review
+    # (target_type).
+    original_volume_type: "{{ os_volume.type | default('', true) }}"
+    manage_volume_type: "{{ target_type | default('', true) or os_volume.type | default('', true) }}"
+    move_target: {}
+    move_path: ""
+
+# One connection to the director: admin identity (without token), target project, volume types, Cinder pool capacity,
+# and the instances in the target project (the "attach to instance" choice).
+- name: Admin identity, target project, volume types and Cinder pools
+  ansible.builtin.include_tasks: openstack_batch.yml
+  vars:
+    osb_label: admin identity, target project, volume types, Cinder pools
+    osb_parallel: true   # only reads
+    osb_commands:
+      - {key: token, label: admin identity, cmd: "openstack token issue -f json -c user_id -c project_id"}
+      - {key: project, label: "target project {{ target_project }}", cmd: "openstack project show {{ target_project | quote }} -f json"}
+      - {key: types, cmd: "openstack volume type list --long -f json", optional: true}
+      - {key: pools, cmd: "cinder get-pools --detail", optional: true}
+      - {key: servers, cmd: "openstack server list --all-projects --project {{ target_project | quote }} -f json", optional: true}
+
+- name: Save admin identity, target project and Cinder pools
+  vars:
+    identity: "{{ osb.results.token.out | extract_json }}"
+  ansible.builtin.set_fact:
+    admin_user_id: "{{ identity.user_id }}"
+    admin_project_id: "{{ identity.project_id }}"
+    target_project_info: "{{ osb.results.project.out | extract_json }}"
+    needs_transfer: "{{ target_project != identity.project_id }}"
+    admin_roles: []
+    os_volume_types: "{{ osb.results.types | batch_json([]) }}"
+    cinder_pools_text: "{{ osb.results.pools.out if osb.results.pools.ok else '' }}"
+    target_servers: "{{ osb.results.servers | batch_json([]) }}"
+    target_servers_read: "{{ osb.results.servers.ok }}"
+
+- name: Admin roles in the target project
+  ansible.builtin.include_tasks: openstack_cmd.yml
+  vars:
+    os_label: admin roles in the target project
+    os_command: "openstack role assignment list --user {{ admin_user_id | quote }} --project {{ target_project | quote }} --names -f json"
+  when: needs_transfer | bool
+
+- name: Save admin roles in the target project
+  ansible.builtin.set_fact:
+    admin_roles: "{{ os_out.stdout | extract_json | map(attribute='Role') | list }}"
+  when: needs_transfer | bool
+
+# Requested flow: volume show first, then its instance (flavor, network interfaces, other volumes).
+- name: Instance of the volume
+  ansible.builtin.include_tasks: instance_info.yml
+
+# ---------------- ONTAP ----------------
+- name: ONTAP cluster info
+  ansible.builtin.include_tasks: ontap_call.yml
+  vars:
+    call_path: /api/cluster?fields=name,version
+
+- name: Save cluster info
+  ansible.builtin.set_fact:
+    ontap_cluster: "{{ ontap_resp.json }}"
+
+- name: Find LUN volume-{{ volume_id }}
+  ansible.builtin.include_tasks: ontap_call.yml
+  vars:
+    call_path: "/api/storage/luns?name=*volume-{{ volume_id }}&fields=name,uuid,svm.name,location.volume.name,location.volume.uuid,space.size,space.used,status.state,status.mapped&max_records=20"
+
+# LUNs in a clone/reclaimed FlexVol (copies made by cloning, not a Cinder pool) are ignored; if there is still more than
+# one, the one in the Cinder pool of this volume is used.
+- name: Save LUN search result
+  ansible.builtin.set_fact:
+    lun_matches: "{{ ontap_resp.json.records | default([]) | lun_candidates(cinder_pool, cfg.ontap.ignore_flexvol_regex | default('', true)) }}"
+    lun_ref_id: "{{ volume_id }}"
+    volume_name_id: "{{ os_volume | volume_name_id }}"
+
+# A volume that was migrated or retyped is stored on the backend as volume-<name_id>, not volume-<ID>.
+# name_id is taken from the openstack volume show above; if it is empty, this step is skipped.
+- name: Find LUN by OpenStack name_id
+  ansible.builtin.include_tasks: ontap_call.yml
+  vars:
+    call_path: "/api/storage/luns?name=*volume-{{ volume_name_id }}&fields=name,uuid,svm.name,location.volume.name,location.volume.uuid,space.size,space.used,status.state,status.mapped&max_records=20"
+  when: lun_matches | length == 0 and volume_name_id | length > 0
+
+- name: Save LUN search result by name_id
+  ansible.builtin.set_fact:
+    lun_matches: "{{ ontap_resp.json.records | default([]) | lun_candidates(cinder_pool, cfg.ontap.ignore_flexvol_regex | default('', true)) }}"
+    lun_ref_id: "{{ volume_name_id }}"
+  when: lun_matches | length == 0 and volume_name_id | length > 0
+
+- name: Verify exactly one LUN is found
+  ansible.builtin.assert:
+    that: lun_matches | length == 1
+    fail_msg: >-
+      {{ ('LUN volume-' ~ volume_id ~ ((' (or volume-' ~ volume_name_id ~ ', the name_id from OpenStack)') if volume_name_id else '')
+          ~ ' was not found in ONTAP ' ~ site) if lun_matches | length == 0
+         else 'More than one LUN found: ' ~ (lun_matches | map(attribute='name') | join(', ')) }}
+    quiet: true
+
+- name: Save LUN info
+  ansible.builtin.set_fact:
+    lun: "{{ lun_matches | first }}"
+
+- name: Validate the LUN against Cinder
+  ansible.builtin.assert:
+    that:
+      - lun.name is match('^/vol/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$')
+      - lun.location.volume.name == cinder_pool
+    fail_msg: >-
+      LUN {{ lun.name }} is in FlexVol {{ lun.location.volume.name }}, but Cinder records pool {{ cinder_pool }}.
+      Check it manually before restoring.
+    quiet: true
+
+- name: FlexVol info
+  ansible.builtin.include_tasks: ontap_call.yml
+  vars:
+    call_path: "/api/storage/volumes/{{ lun.location.volume.uuid }}?fields=name,state,space.available,space.size,svm.name"
+
+- name: Save FlexVol info
+  ansible.builtin.set_fact:
+    flexvol: "{{ ontap_resp.json }}"
+
+- name: List FlexVol snapshots
+  ansible.builtin.include_tasks: ontap_call.yml
+  vars:
+    call_path: "/api/storage/volumes/{{ lun.location.volume.uuid }}/snapshots?fields=name,create_time&max_records=5000"
+
+- name: Find snapshot {{ snapshot }}
+  ansible.builtin.set_fact:
+    chosen_snapshot: >-
+      {{ (ontap_resp.json.records | default([]) | snapshot_choices('', cfg.timezone | default('+07:00'))).snapshots
+         | selectattr('name', 'equalto', snapshot) | first | default({}) }}
+    lun_used_bytes: "{{ (lun.space.used | default(lun.space.size)) | int }}"
+
+# ---------------- Volume types and Cinder pools ----------------
+# Original volume type: pools on the same backend/tier (they pass the CapabilitiesFilter rules of that type). Other type
+# (picked by the operator in Review, target_type): pools that pass the rules of that type; reached with lun move, so they
+# must be in the SVM of the LUN. Private types, __DEFAULT__, and the openstack.hidden_volume_types of this site (old
+# types) are not offered. The operator picks the pool; capacity = Cinder allocated against total x the site's
+# openstack.overcommit_ratio (1 = no overcommit), plus ONTAP space.
+- name: FlexVols of the Cinder pools
+  ansible.builtin.set_fact:
+    pool_flexvols: "{{ cinder_pools_text | pool_flexvols(cinder_host, cfg.ontap.ignore_flexvol_regex | default('', true)) | map('urlencode') | list }}"
+
+- name: FlexVols of these pools
+  ansible.builtin.include_tasks: ontap_call.yml
+  vars:
+    call_path: "/api/storage/volumes?name={{ pool_flexvols | join('%7C') }}&fields=name,svm.name,state,space.available,space.size&max_records=500"
+
+- name: Evaluate the volume types and their Cinder pools (capacity, SVM, state)
+  vars:
+    os_cfg: "{{ cfg.openstack | default({}) }}"
+  ansible.builtin.set_fact:
+    type_options: >-
+      {{ os_volume_types | type_choices(cinder_pools_text, cinder_host, original_volume_type, ontap_resp.json.records | default([]),
+                                        lun.svm.name, lun_used_bytes, os_cfg.pool_max_used_percent | default(85, true),
+                                        cfg.ontap.move_flexvol_regex | default('', true), cfg.ontap.ignore_flexvol_regex | default('', true),
+                                        os_cfg.overcommit_ratio | default(1, true), os_cfg.hidden_volume_types | default([], true)) }}
+
+- name: Cinder pools of volume type {{ manage_volume_type or '(no type)' }}
+  vars:
+    picked_type: "{{ type_options | selectattr('name', 'equalto', manage_volume_type) | first | default({}) }}"
+  ansible.builtin.set_fact:
+    pool_options: "{{ picked_type.pools | default({'pools': [], 'selectable': 0, 'max_used_percent': 85, 'pool_found': false}) }}"
+    type_check:
+      key: volume_type
+      ok: "{{ picked_type | length > 0 }}"
+      detail: >-
+        {% if picked_type | length == 0 %}Volume type {{ manage_volume_type }} cannot be used here (unknown, private, or hidden on site {{ site }})
+        {%- else %}Volume type changes from {{ original_volume_type or '(no type)' }} to {{ manage_volume_type }}{% endif %}
+
+# Restore: the pool selected by the operator (target_pool = Cinder host host@backend#pool). The pool of the LUN itself =
+# no lun move; another pool = lun move (same SVM) to the FlexVol of that pool first, then cinder manage there.
+- name: Selected Cinder pool
+  vars:
+    wanted: "{{ target_pool | default('', true) | string | trim }}"
+    picked: "{{ pool_options.pools | selectattr('host', 'equalto', wanted) | first | default({}) }}"
+    usable: "{{ picked | length > 0 and picked.selectable }}"
+  ansible.builtin.set_fact:
+    chosen_pool: "{{ picked }}"
+    move_target: "{{ {'flexvol': picked.flexvol, 'host': picked.host} if (usable | bool and not picked.current) else {} }}"
+    move_path: "{{ ('/vol/' ~ picked.flexvol ~ '/' ~ ((lun.name ~ restore_suffix) | basename)) if (usable | bool and not picked.current) else '' }}"
+    pool_check:
+      key: pool
+      ok: "{{ usable | bool }}"
+      detail: >-
+        {% if not wanted %}No Cinder pool selected (target_pool)
+        {%- elif not picked %}{{ wanted }} is not a Cinder pool of volume type {{ manage_volume_type or '(no type)' }} in site {{ site }}
+        {%- elif not picked.selectable %}Cinder pool {{ picked.flexvol }} cannot take the volume: {{ picked.reason }}
+        {%- elif picked.current %}Cinder pool {{ picked.flexvol }} (pool of the LUN, no lun move)
+        {%- else %}Cinder pool {{ picked.flexvol }}: the restored LUN is moved there (lun move) before cinder manage{% endif %}
+  when: restore_run | default(false) | bool
+
+- name: Check that the lun move target LUN does not exist
+  ansible.builtin.include_tasks: ontap_call.yml
+  vars:
+    call_path: "/api/storage/luns?name={{ move_path }}&fields=name"
+  when: move_target | length > 0
+
+- name: Save lun move prerequisite
+  ansible.builtin.set_fact:
+    move_check:
+      key: move_path_free
+      ok: "{{ ontap_resp.json.num_records | int == 0 }}"
+      detail: >-
+        lun move target LUN {{ move_path }} {{ 'does not exist yet' if ontap_resp.json.num_records | int == 0
+        else 'already exists (left over from an earlier move); delete or manage it first' }}
+  when: move_target | length > 0
+
+# ---------------- After the restore ----------------
+# All volumes: transfer to the project only, or attach to an instance (Instance ID, in the target project).
+# Boot volume: also a new instance like the old one (flavor, security group, AZ). Network of each network interface: the
+# original network if the target project can use it, otherwise the target project network chosen by the operator
+# (new_port_networks = [{network_id, subnet_id}] per port, from Review; checked again here at restore time).
+- name: Options after the restore
+  ansible.builtin.set_fact:
+    new_instance: >-
+      {{ instance | new_instance_plan(volume_role_info.role, target_project, instance_networks,
+                                      (instance.name | default('', true)) | instance_name('restore-' ~ (chosen_snapshot.local_time | default('')
+                                        | replace('-', '') | replace(':', '') | replace(' ', '-'))),
+                                      target_networks, new_port_networks | default([], true),
+                                      restore_run | default(false) | bool and post_action | default('', true) == 'instance') }}
+    attach_choices: "{{ target_servers | server_choices(attached_server_id) }}"
+    image_props: "{{ (os_volume | image_properties) if (os_volume.bootable | default('false') | string | lower) == 'true' else {} }}"
+
+- name: Check the action after the restore
+  vars:
+    after_action: "{{ post_action | default('', true) }}"
+    picked: "{{ attach_choices | selectattr('id', 'equalto', attach_server_id | default('', true) | lower) | first | default({}) }}"
+  ansible.builtin.set_fact:
+    post_check:
+      key: after_restore
+      ok: >-
+        {{ (picked | length > 0 and picked.attachable) if after_action == 'attach' else new_instance.possible }}
+      detail: >-
+        {% if after_action == 'attach' and not target_servers_read %}The instances of project {{ target_project_info.name | default(target_project) }} could not be read
+        {%- elif after_action == 'attach' and not picked %}Instance {{ attach_server_id | default('') }} is not in project {{ target_project_info.name | default(target_project) }}
+        {%- elif after_action == 'attach' and not picked.attachable %}Instance {{ picked.name }} is {{ picked.status }}; a volume can only be attached when it is ACTIVE, SHUTOFF, PAUSED, SUSPENDED or SHELVED
+        {%- elif after_action == 'attach' %}Attach the new volume to instance {{ picked.name }} ({{ picked.status }})
+        {%- elif not new_instance.possible %}A new instance cannot be created: {{ new_instance.reason }}
+        {%- else %}New instance {{ new_instance_name | default('', true) or new_instance.default_name }} (flavor {{ new_instance.flavor.name }},
+        {{ new_instance.ports | length }} network interface{{ '' if new_instance.ports | length == 1 else 's' }}:
+        {{ new_instance.ports | map(attribute='network_name') | join(', ') }}) boots from the new volume{% endif %}
+  when: restore_run | default(false) | bool and post_action | default('', true) in ['attach', 'instance']
+
+- name: Check that the restored LUN does not exist
+  ansible.builtin.include_tasks: ontap_call.yml
+  vars:
+    call_path: "/api/storage/luns?name={{ lun.name ~ restore_suffix }}&fields=name,status.state"
+
+- name: Evaluate restore prerequisites
+  vars:
+    lun_used: "{{ (lun.space.used | default(lun.space.size)) | int }}"
+  ansible.builtin.set_fact:
+    restore_path: "{{ lun.name ~ restore_suffix }}"
+    checks:
+      - key: snapshot
+        ok: "{{ chosen_snapshot | length > 0 }}"
+        detail: "Snapshot {{ snapshot }}{{ (' created ' ~ chosen_snapshot.local_time) if chosen_snapshot else ' does not exist in FlexVol ' ~ flexvol.name }}"
+      - key: flexvol_online
+        ok: "{{ flexvol.state == 'online' }}"
+        detail: "FlexVol {{ flexvol.name }} {{ flexvol.state }}"
+      - key: space
+        ok: "{{ flexvol.space.available | int >= lun_used | int }}"
+        detail: >-
+          FlexVol free {{ '%.1f' | format(flexvol.space.available | int / 1073741824) }} GiB,
+          LUN data {{ '%.1f' | format(lun_used | int / 1073741824) }} GiB
+      - key: restore_path_free
+        ok: "{{ ontap_resp.json.num_records | int == 0 }}"
+        detail: >-
+          {{ 'LUN ' ~ lun.name ~ restore_suffix ~ (' does not exist yet' if ontap_resp.json.num_records | int == 0
+             else ' already exists (left over from an earlier restore); delete or manage it first') }}
+      - key: project
+        ok: "{{ target_project_info.enabled | default(true) | bool }}"
+        detail: "Target project {{ target_project_info.name | default(target_project) }}"
+      - key: pool_available
+        ok: "{{ pool_options.selectable | int > 0 }}"
+        detail: >-
+          {% if pool_options.selectable | int > 0 %}{{ pool_options.selectable }} of {{ pool_options.pools | length }} Cinder
+          pool{{ '' if pool_options.pools | length == 1 else 's' }} of volume type {{ manage_volume_type or '(no type)' }} can take the volume
+          {%- else %}No Cinder pool of volume type {{ manage_volume_type or '(no type)' }} can take the volume
+          ({{ pool_options.pools | map(attribute='flexvol') | zip(pool_options.pools | map(attribute='reason')) | map('join', ': ') | join('; ') }}){% endif %}
+
+- name: Add the volume type, the selected pool and the action after the restore
+  ansible.builtin.set_fact:
+    checks: >-
+      {{ checks + ([type_check] if manage_volume_type != original_volume_type else []) + [pool_check]
+         + ([move_check] if move_target | length > 0 else [])
+         + ([post_check] if post_action | default('', true) in ['attach', 'instance'] else []) }}
+  when: restore_run | default(false) | bool

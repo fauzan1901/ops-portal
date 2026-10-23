@@ -1,0 +1,49 @@
+# ONTAP: restore a LUN from a snapshot as a new LUN (<LUN>-restore). Active data is not touched.
+# Same command as in the WI: volume snapshot restore-file (through the REST CLI passthrough).
+- name: "ONTAP: volume snapshot restore-file {{ snapshot }}"
+  ansible.builtin.include_tasks: ontap_call.yml
+  vars:
+    call_method: POST
+    call_path: /api/private/cli/volume/snapshot/restore-file
+    call_body:
+      vserver: "{{ lun.svm.name }}"
+      volume: "{{ lun.location.volume.name }}"
+      snapshot: "{{ snapshot }}"
+      path: "{{ lun.name }}"
+      restore-path: "{{ restore_path }}"
+    call_timeout: 900
+
+- name: "ONTAP: wait for LUN {{ restore_path }} to be online"
+  ansible.builtin.uri:
+    url: "https://{{ cfg.ontap.host }}/api/storage/luns?name={{ restore_path }}&fields=name,uuid,status.state,space.size"
+  register: restored_lun
+  until: >-
+    restored_lun.status | default(-1) == 200
+    and (restored_lun.json | default({})).num_records | default(0) | int == 1
+    and restored_lun.json.records[0].status.state == 'online'
+  retries: "{{ lun_wait_retries | default(60) | int }}"
+  delay: 5
+  ignore_errors: true
+
+- name: Verify the restored LUN is online
+  ansible.builtin.assert:
+    that: >-
+      restored_lun.status | default(-1) == 200
+      and (restored_lun.json | default({})).num_records | default(0) | int == 1
+      and restored_lun.json.records[0].status.state == 'online'
+    fail_msg: "LUN {{ restore_path }} did not appear or is not online. Check it in ONTAP (LUNs)."
+    quiet: true
+
+# As in the WI: the restore process in ONTAP is still running after the LUN appears; cinder manage is only run
+# after the used capacity of the -restore LUN equals the used capacity of the existing LUN.
+- name: "ONTAP: wait for restored LUN used space to match the original"
+  ontap_wait_used:
+    host: "{{ cfg.ontap.host }}"
+    validate_certs: "{{ cfg.ontap.validate_certs | default(false) | bool }}"
+    lun_path: "{{ restore_path }}"
+    target: "{{ (lun.space.used | default(lun.space.size)) | int }}"
+    tolerance_pct: "{{ cfg.ontap.used_tolerance_pct | default(1) }}"
+    poll_seconds: "{{ cfg.ontap.used_poll_seconds | default(10) }}"
+    stable_seconds: "{{ cfg.ontap.used_stable_seconds | default(300) }}"
+    timeout_seconds: "{{ cfg.ontap.used_wait_seconds | default(7200) }}"
+  register: used_wait

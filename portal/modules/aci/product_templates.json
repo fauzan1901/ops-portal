@@ -1,0 +1,94 @@
+{
+  "_catatan": "Static port templates per product and per site. Derived from 'ACI Report DCB/DCA/DCC.xlsx' (September 2026): a group with default=true is a path used by almost every EPG of that product (ticked at once), default=false is an optional uplink. Checked against APIC on 24 September 2026: on DCB, Openstack-Traffic-AZ1-A..F and VMware-Traffic-G01..G10 were dropped because their policy groups were deleted; the ESXi ports of Acme Prime DCB (leaf 118 & 119) follow EPG CLOUD-03/VMware_DCB (VMOTION-Network, KVM-VMware_Observium). RHOSO (only on DCB so far) follows the 7 RHOSO network EPGs in CLOUD-03/RHOSO-ENV-DCB: RHOSO-TRAFFIC-A..E + RHOSOMGMT-01/02. Edit this file when a host or leaf is added; the app reads it again without a restart.",
+  "products": {
+    "flex": {"label": "Acme Flex", "platform": "OpenStack", "mode": "regular", "immediacy": "immediate"},
+    "prime": {"label": "Acme Prime", "platform": "VMware", "mode": "regular", "immediacy": "immediate"},
+    "rhoso": {"label": "RHOSO", "platform": "Red Hat OpenStack", "mode": "regular", "immediacy": "immediate"}
+  },
+  "sites": {
+    "DCB": {
+      "flex": [
+        {"name": "OpenStack Traffic (leaf 118-119)", "default": true,
+         "vpcs": [{"nodes": "118-119", "policy_groups": ["Openstack-Traffic-A-PG", "Openstack-Traffic-B-PG", "Openstack-Traffic-C-PG", "Openstack-Traffic-D-PG",
+                                                         "Openstack-Traffic-E-PG", "Openstack-Traffic-F-PG", "Openstack-Traffic-G-PG", "Openstack-Traffic-H-PG"]}]},
+        {"name": "OpenStack Traffic AZ1 (leaf 122-123)", "default": true,
+         "vpcs": [{"nodes": "122-123", "policy_groups": ["Openstack-Traffic-AZ1-G-PG", "Openstack-Traffic-AZ1-H-PG", "Openstack-Traffic-AZ1-I-PG",
+                                                         "Openstack-Traffic-AZ1-J-PG", "Openstack-Traffic-AZ1-K-PG", "Openstack-Traffic-AZ1-L-PG"]}]},
+        {"name": "Uplink 10G Cloud (leaf 109-110)", "default": false,
+         "vpcs": [{"nodes": "109-110", "policy_groups": ["VPC-10G-CLOUD-PG"]}]},
+        {"name": "Uplink Metro-E & VPN MPLS (leaf 109-110)", "default": false,
+         "vpcs": [{"nodes": "109-110", "policy_groups": ["VPC-SR50-METRO-E-PG", "VPC-SR50-VPN-MPLS-PG"]}]},
+        {"name": "Uplink 25G Cloud (leaf 118-119)", "default": false,
+         "vpcs": [{"nodes": "118-119", "policy_groups": ["VPC-25G-CLOUD-A-PG", "VPC-25G-CLOUD-B-PG"]}]}
+      ],
+      "prime": [
+        {"name": "Port ESXi (leaf 118 & 119)", "default": true,
+         "ports": [{"node": 118, "interfaces": "eth1/17-18, eth1/21, eth1/23, eth1/31, eth1/33, eth1/35, eth1/37, eth1/39, eth1/43, eth1/45"},
+                   {"node": 119, "interfaces": "eth1/17-18, eth1/21, eth1/23, eth1/31, eth1/33, eth1/35, eth1/37, eth1/39, eth1/43, eth1/45"}]},
+        {"name": "Uplink 10G Cloud (leaf 109-110)", "default": true,
+         "vpcs": [{"nodes": "109-110", "policy_groups": ["VPC-10G-CLOUD-PG"]}]},
+        {"name": "Uplink 25G Cloud (leaf 118-119)", "default": true,
+         "vpcs": [{"nodes": "118-119", "policy_groups": ["VPC-25G-CLOUD-A-PG", "VPC-25G-CLOUD-B-PG"]}]},
+        {"name": "Port eth1/4 (leaf 109)", "default": false,
+         "ports": [{"node": 109, "interfaces": "eth1/4"}]},
+        {"name": "Uplink VPC-1G & VPC-10G (leaf 109-110)", "default": false,
+         "vpcs": [{"nodes": "109-110", "policy_groups": ["VPC-1G-PG", "VPC-10G-PG"]}]},
+        {"name": "Monitoring Po-Solarwinds (leaf 111)", "default": false,
+         "ports": [{"node": 111, "interfaces": "Po-Solarwinds"}]}
+      ],
+      "rhoso": [
+        {"name": "RHOSO Traffic (leaf 122-123)", "default": true,
+         "vpcs": [{"nodes": "122-123", "policy_groups": ["RHOSO-TRAFFIC-A-PG", "RHOSO-TRAFFIC-B-PG", "RHOSO-TRAFFIC-C-PG", "RHOSO-TRAFFIC-D-PG", "RHOSO-TRAFFIC-E-PG"]}]},
+        {"name": "RHOSO Management (leaf 122-123)", "default": true,
+         "vpcs": [{"nodes": "122-123", "policy_groups": ["RHOSOMGMT-01-PG", "RHOSOMGMT-02-PG"]}]},
+        {"name": "Uplink 10G Cloud (leaf 109-110)", "default": false,
+         "vpcs": [{"nodes": "109-110", "policy_groups": ["VPC-10G-CLOUD-PG"]}]}
+      ]
+    },
+    "DCA": {
+      "flex": [
+        {"name": "OpenStack Traffic (leaf 109-110)", "default": true,
+         "vpcs": [{"nodes": "109-110", "policy_groups": ["Openstack-Traffic-N-PG", "Openstack-Traffic-O-PG", "Openstack-Traffic-P-PG", "Openstack-Traffic-Q-PG", "Openstack-Traffic-R-PG",
+                                                         "Openstack-Traffic-S-PG", "Openstack-Traffic-T-PG", "Openstack-Traffic-U-PG", "Openstack-Traffic-V-PG", "Openstack-Traffic-W-PG"]}]},
+        {"name": "Uplink Nexus OpenStack DC2A.BD17 (leaf 106-107)", "default": true,
+         "vpcs": [{"nodes": "106-107", "policy_groups": ["UPLINK-VPC-DC2A.BD17-NEXUS-OPENSTACK"]}]},
+        {"name": "Uplink MPLS & Metro Net (leaf 101-102)", "default": false,
+         "vpcs": [{"nodes": "101-102", "policy_groups": ["UPLINK-VPC-MPLS-NET", "UPLINK-VPC-METRO-NET"]}]}
+      ],
+      "prime": [
+        {"name": "Port ESXi (leaf 111 & 112)", "default": true,
+         "ports": [{"node": 111, "interfaces": "eth1/1-10, eth1/16-24"}, {"node": 112, "interfaces": "eth1/1-10, eth1/16-24"}]},
+        {"name": "VMware Traffic (leaf 109-110)", "default": true,
+         "vpcs": [{"nodes": "109-110", "policy_groups": ["VMWare-Traffic-C01", "VMWare-Traffic-C02", "VMWare-Traffic-C03", "VMWare-Traffic-C04", "VMWare-Traffic-C05", "VMWare-Traffic-C06"]}]},
+        {"name": "Uplink FI Public Cloud 10G (leaf 101-102)", "default": true,
+         "vpcs": [{"nodes": "101-102", "policy_groups": ["UPLINK-VPC-FI-A-PUBLIC-CLOUD-10G", "UPLINK-VPC-FI-B-PUBLIC-CLOUD-10G"]}]},
+        {"name": "Uplink Metro Net & Router DCI (leaf 101-102)", "default": false,
+         "vpcs": [{"nodes": "101-102", "policy_groups": ["UPLINK-VPC-METRO-NET", "UPLINK-ROUTER_DCI"]}]}
+      ]
+    },
+    "DCC": {
+      "flex": [
+        {"name": "OpenStack Traffic (leaf 103-104)", "default": true,
+         "vpcs": [{"nodes": "103-104", "policy_groups": ["Openstack-Traffic-A-PG", "Openstack-Traffic-B-PG", "Openstack-Traffic-C-PG", "Openstack-Traffic-D-PG",
+                                                         "Openstack-Traffic-E-PG", "Openstack-Traffic-F-PG", "Openstack-Traffic-G-PG", "Openstack-Traffic-H-PG"]}]},
+        {"name": "Uplink Metro-E VPN (leaf 101-102)", "default": false,
+         "vpcs": [{"nodes": "101-102", "policy_groups": ["VPC-METRO-E-VPN-PG"]}]},
+        {"name": "Uplink FI Public Cloud (leaf 101-102)", "default": false,
+         "vpcs": [{"nodes": "101-102", "policy_groups": ["UPLINK-FI-A-PUBLIC-CLOUD", "UPLINK-FI-B-PUBLIC-CLOUD"]}]}
+      ],
+      "prime": [
+        {"name": "Port ESXi (leaf 105 & 106)", "default": true,
+         "ports": [{"node": 105, "interfaces": "eth1/17-25, eth1/27-35"}, {"node": 106, "interfaces": "eth1/17-25, eth1/27-35"}]},
+        {"name": "VMware Traffic (leaf 107-108)", "default": true,
+         "vpcs": [{"nodes": "107-108", "policy_groups": ["VPC-VMware-Traffic-D-PG", "VPC-VMware-Traffic-E-PG", "VPC-VMware-Traffic-F-PG",
+                                                         "VPC-VMware-Traffic-G-PG", "VPC-VMware-Traffic-H-PG", "VPC-VMware-Traffic-I-PG"]}]},
+        {"name": "Uplink FI Public Cloud (leaf 101-102)", "default": true,
+         "vpcs": [{"nodes": "101-102", "policy_groups": ["UPLINK-FI-A-PUBLIC-CLOUD", "UPLINK-FI-B-PUBLIC-CLOUD"]}]},
+        {"name": "Uplink Metro-E VPN (leaf 101-102)", "default": false,
+         "vpcs": [{"nodes": "101-102", "policy_groups": ["VPC-METRO-E-VPN-PG"]}]},
+        {"name": "Port eth1/26 (leaf 105 & 106)", "default": false,
+         "ports": [{"node": 105, "interfaces": "eth1/26"}, {"node": 106, "interfaces": "eth1/26"}]}
+      ]
+    }
+  }
+}

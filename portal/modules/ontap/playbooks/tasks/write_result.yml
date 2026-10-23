@@ -1,0 +1,11 @@
+# Write the job result (JSON) for the Web UI, and its summary for readers of the log.
+- name: Write job result
+  ansible.builtin.copy:
+    content: "{{ job_result | to_nice_json }}"
+    dest: "{{ result_file }}"
+    mode: "0600"
+  when: result_file | default('') | length > 0
+
+- name: Summary
+  ansible.builtin.debug:
+    msg: "{{ job_result.summary if job_result.ok else 'FAILED at step \"' ~ job_result.step ~ '\": ' ~ job_result.error }}"

@@ -27,7 +27,7 @@ import settings
 from .report import safe_cell
 
 DB_PATH = settings.DB_PATH   # one database for the whole portal; the tests point this at a database of their own
-ACTIONS = ("static-port", "provisioning", "template")
+ACTIONS = ("static-port", "provisioning", "template", "access-policy")
 STATUSES = ("pending", "success", "failed", "unknown")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 MAX_LIMIT = 500

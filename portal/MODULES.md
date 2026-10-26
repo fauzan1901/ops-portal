@@ -15,7 +15,7 @@ owns its own pages, API, playbooks and tables.
 
 `app.py`, `core.py`, `settings.py`, `sites.py`, `jobs.py`, `portal_auth.py`, `templates/shell.html`,
 `templates/_sprite.html`, `static/portal.css`, `static/shell.js`, `static/switcher.css`, `static/switcher.js`,
-`static/fonts/`. A module that needs a change there says so instead.
+`static/guide.js`, `static/guide.css`, `static/fonts/`. A module that needs a change there says so instead.
 
 ## Python side
 
@@ -66,6 +66,15 @@ Only these changes:
    `/#/users` and `/#/credentials` on the portal.
 5. Sign out: `POST /api/logout`, then `location.assign('/')`.
 6. Every request of the module goes to `/<id>/...` (one `BASE` constant), fonts come from `/static/fonts/`.
+7. Guides: every page ends with a fold "Guide: …" that shows with an animation how the page is used, on a copy of the
+   page as it is now (`static/guide.js` + `static/guide.css` of the portal: `PortalGuide.mount({<page>: {title, width?,
+   build()}}, {page: name => element})`). The guides of a module are in `static/guides.js` of the module and are built
+   with the module's own markup functions (rows, dialogs, plans), so they follow the page; a guide only reads (the same
+   GET requests as the page) and never sends a change. When a page, its ids or its dialogs change, check its guide.
+   A page with steps can have a guide per part: `{page: '<page>', when: () => <applies now>}` on each guide, and the page
+   calls `PortalGuide.refresh()` when its state changes (ONTAP Restore: one guide for Volume, Snapshot and Target
+   project, one for the Review step). The miniature is drawn wider (smaller) when a table would not fit, so nothing is
+   cut; logs and code blocks that scroll sideways on the page do not count.
 
 ## Tests
 

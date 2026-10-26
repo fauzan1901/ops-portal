@@ -10,6 +10,7 @@
 <link rel="stylesheet" href="/static/portal.css">
 <link rel="stylesheet" href="/static/switcher.css">
 <link rel="stylesheet" href="{{ url_for('wi.static', filename='wi.css', v=ui_version) }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='guide.css', v=ui_version) }}">
 </head>
 <body>
 {% include "_sprite.html" %}
@@ -45,8 +46,10 @@
     <nav class="pf-nav" aria-label="Navigation">
       <div class="pf-nav__section">Checks</div>
       <ul>
-        <li><a class="pf-nav__link" href="#/checks" data-route="checks"><svg class="pf-icon" aria-hidden="true"><use href="#i-home"></use></svg>All products</a></li>
+        <li><a class="pf-nav__link" href="#/checks" data-route="checks"><svg class="pf-icon" aria-hidden="true"><use href="#i-home"></use></svg><span class="pf-nav__text">All checks</span></a></li>
       </ul>
+      <div class="pf-nav__section">Activities</div>
+      <ul class="pf-nav__list" id="navActivities"></ul>
       <div class="pf-nav__section">Products</div>
       <ul class="pf-nav__list" id="navProducts"></ul>
       <div class="pf-nav__section">History</div>
@@ -77,63 +80,103 @@
       </section>
     </div>
 
-    <!-- ---------- All products (overview) ---------- -->
+    <!-- ---------- All checks: search, what to do (activities), products ---------- -->
     <div id="page-checks" data-page="checks" hidden>
       <section class="pf-page__section pf-m-light">
-        <h1 class="pf-title">Checks by product</h1>
-        <p>Choose a product to see its problems and work instructions, on site <b class="site-name-current"></b>. Every check reads with read-only accounts and changes nothing. The fix is shown as commands with the values found; on hosts of Hosts &amp; SSH that allow it, and on ONTAP, an allowed operator can run it from the result.</p>
+        <div class="pf-title-row"><h1 class="pf-title">Checks</h1>
+          <span class="wi-title-actions"><button type="button" class="pf-btn pf-m-secondary" data-create-template hidden><svg class="pf-icon" aria-hidden="true"><use href="#i-plus"></use></svg>Create template</button></span></div>
+        <p>On site <b class="site-name-current"></b>. Every check reads with read-only accounts and changes nothing; a fix runs only when you start it from a result.</p>
         <div class="ov-search">
-          <input class="pf-form-control pf-m-search" id="ovQ" maxlength="100" placeholder="Search every product: an alert name, a problem or a WI title" aria-label="Search every product">
+          <input class="pf-form-control pf-m-search" id="ovQ" maxlength="100" placeholder="Search: an alert name, a problem or a WI title  ( / )" aria-label="Search every check" data-search>
         </div>
       </section>
       <section class="pf-page__section">
         <div class="pf-card" id="ovResults" hidden>
-          <div class="pf-card__header"><h2 class="pf-card__title">Search results</h2><span class="pf-card__actions" id="ovShown"></span></div>
+          <div class="pf-card__header"><h2 class="pf-card__title">Search results</h2><span class="pf-card__actions" id="ovShown" aria-live="polite"></span></div>
+          <div class="pf-card__body" id="ovList"></div>
+        </div>
+        <div class="pf-card ov-recent" id="ovRecent" hidden>
+          <div class="pf-card__header"><h2 class="pf-card__title">Recent problems on <span class="site-name-current"></span></h2>
+            <span class="pf-card__actions"><a class="wi-link" href="#/runs">All runs</a></span></div>
           <div class="pf-table-wrap">
-            <table class="pf-table" aria-label="Search results">
-              <thead><tr><th>Check</th><th>Work instruction</th><th>Reads</th><th>Status</th><th><span class="sr-only">Actions</span></th></tr></thead>
-              <tbody id="ovList"></tbody>
+            <table class="pf-table pf-m-compact" aria-label="Recent runs with a problem">
+              <thead><tr><th>Check</th><th>Result</th><th>Started</th><th>User</th></tr></thead>
+              <tbody id="ovRecentList"></tbody>
             </table>
           </div>
         </div>
-        <div class="pf-l-gallery" id="ovProducts"></div>
+        <h2 class="ov-heading">What is the problem?</h2>
+        <div class="ov-symptoms" id="ovSymptoms"></div>
       </section>
     </div>
 
-    <!-- ---------- One product: its problems and work instructions ---------- -->
+    <!-- ---------- One product or one activity: its checks, as a compact list ---------- -->
     <div id="page-product" data-page="product" hidden>
       <section class="pf-page__section pf-m-light">
-        <nav class="pf-breadcrumb" aria-label="Breadcrumb"><a href="#/checks">All products</a><svg class="pf-icon" aria-hidden="true"><use href="#i-angle-right"></use></svg><span id="pdCrumb"></span></nav>
+        <nav class="pf-breadcrumb" aria-label="Breadcrumb"><a href="#/checks">All checks</a><svg class="pf-icon" aria-hidden="true"><use href="#i-angle-right"></use></svg><span id="pdCrumb"></span></nav>
         <div class="pf-title-row"><span class="pf-card__icon" id="pdIcon"></span><h1 class="pf-title" id="pdTitle"></h1></div>
         <p id="pdSummary"></p>
       </section>
       <section class="pf-page__section">
         <div class="pf-card">
           <div class="pf-toolbar">
-            <input class="pf-form-control pf-m-search" id="ckQ" maxlength="100" placeholder="Search a problem, an alert name or a WI title" aria-label="Search checks of this product">
-            <div class="pf-toggle-group pf-m-compact" id="ckStatus" role="radiogroup" aria-label="Status">
-              <label><input type="radio" name="ckStatus" value="" checked><span>All</span></label>
-              <label><input type="radio" name="ckStatus" value="ready"><span>Ready</span></label>
-              <label><input type="radio" name="ckStatus" value="planned"><span>Planned</span></label>
-              <label><input type="radio" name="ckStatus" value="manual"><span>Manual / module</span></label>
-            </div>
-            <span class="pf-toolbar__spacer" id="ckShown"></span>
+            <input class="pf-form-control pf-m-search" id="ckQ" maxlength="100" placeholder="Search: an alert name, a problem or a WI title  ( / )" aria-label="Search these checks" data-search>
+            <div id="ckFilter"></div>
+            <label class="pf-check ck-runnable"><input type="checkbox" id="ckRunnable"><span>Runnable on <b class="site-name-current"></b></span></label>
+            <span class="pf-toolbar__spacer" id="ckShown" aria-live="polite"></span>
+            <button type="button" class="pf-btn pf-m-secondary" data-create-template hidden><svg class="pf-icon" aria-hidden="true"><use href="#i-plus"></use></svg>Create template</button>
           </div>
-          <div class="pf-table-wrap">
-            <table class="pf-table" aria-label="Checks of this product">
-              <thead><tr><th>Problem</th><th>Work instruction</th><th>Reads</th><th>Status</th><th><span class="sr-only">Actions</span></th></tr></thead>
-              <tbody id="ckList"></tbody>
-            </table>
-          </div>
+          <div class="pf-card__body" id="ckList"></div>
         </div>
+      </section>
+    </div>
+
+    <!-- ---------- Create or edit a template (administrators): a check of your own, in steps, without writing Ansible ---------- -->
+    <div id="page-template" data-page="template" hidden>
+      <section class="pf-page__section pf-m-light">
+        <nav class="pf-breadcrumb" aria-label="Breadcrumb"><a href="#/checks">All checks</a><svg class="pf-icon" aria-hidden="true"><use href="#i-angle-right"></use></svg><span id="tpCrumb">Create template</span></nav>
+        <h1 class="pf-title" id="tpTitle">Create template</h1>
+        <p>A check of your own, without writing Ansible: the commands to run on a host, and what in their output is a problem.
+          Commands that only read run with the check. Any other command runs afterwards, as a fix, once the operator types the host name.</p>
+      </section>
+      <section class="pf-page__section">
+        <div id="tpNotice"></div>
+        <form class="pf-card" id="tpForm" novalidate autocomplete="off">
+          <div class="pf-card__body">
+            <div class="pf-alert pf-m-danger pf-mb-md" id="tpError" role="alert" tabindex="-1" hidden></div>
+            <div class="tp-grid tp-grid--2">
+              <div class="pf-form-group"><label class="pf-form-label" for="tpName">Name <span class="pf-required" aria-hidden="true">*</span></label>
+                <input class="pf-form-control" id="tpName" maxlength="80" required placeholder="e.g. Disk and nginx of a CDN VM"></div>
+              <div class="pf-form-group"><label class="pf-form-label" for="tpGroup">Runs on <span class="pf-required" aria-hidden="true">*</span></label>
+                <select class="pf-form-control" id="tpGroup" required aria-describedby="tpGroupHelp"></select>
+                <span class="pf-helper-text" id="tpGroupHelp">The operator picks one host of this group (Hosts &amp; SSH, sites.yml) when running the template.</span></div>
+              <div class="pf-form-group"><label class="pf-form-label" for="tpActivity">Activity <span class="pf-required" aria-hidden="true">*</span></label>
+                <select class="pf-form-control" id="tpActivity" required></select></div>
+              <div class="pf-form-group"><label class="pf-form-label" for="tpCategory">Product <span class="pf-required" aria-hidden="true">*</span></label>
+                <select class="pf-form-control" id="tpCategory" required></select></div>
+            </div>
+            <div class="pf-form-group tp-wide"><label class="pf-form-label" for="tpSummary">Description</label>
+              <textarea class="pf-form-control" id="tpSummary" rows="2" maxlength="500" placeholder="What the template checks, and when to use it"></textarea></div>
+            <h2 class="tp-heading">Steps</h2>
+            <p class="pf-helper-text tp-intro">One command per step, as you would type it on the host (with <span class="mono">sudo</span> when it needs root).
+              The portal tells which steps only read and which change the host.</p>
+            <ol class="tp-steps" id="tpSteps"></ol>
+            <button type="button" class="pf-btn pf-m-secondary" id="tpAdd"><svg class="pf-icon" aria-hidden="true"><use href="#i-plus"></use></svg>Add step</button>
+          </div>
+          <div class="pf-card__footer tp-actions">
+            <button type="submit" class="pf-btn pf-m-primary" id="tpSave">Save</button>
+            <a class="pf-btn pf-m-link" href="#/checks" id="tpCancel">Cancel</a>
+            <button type="button" class="pf-btn pf-m-danger tp-delete" id="tpDelete" hidden><svg class="pf-icon" aria-hidden="true"><use href="#i-trash"></use></svg>Delete template</button>
+          </div>
+        </form>
       </section>
     </div>
 
     <!-- ---------- Launch a check ---------- -->
     <div id="page-launch" data-page="launch" hidden>
       <section class="pf-page__section pf-m-light">
-        <nav class="pf-breadcrumb" aria-label="Breadcrumb"><a href="#/checks">All products</a><svg class="pf-icon" aria-hidden="true"><use href="#i-angle-right"></use></svg><a id="lnProduct" href="#/checks"></a><svg class="pf-icon" aria-hidden="true"><use href="#i-angle-right"></use></svg><span id="lnCrumb"></span></nav>
-        <div class="pf-title-row"><h1 class="pf-title" id="lnTitle"></h1><span id="lnStatus"></span></div>
+        <nav class="pf-breadcrumb" aria-label="Breadcrumb"><a href="#/checks">All checks</a><svg class="pf-icon" aria-hidden="true"><use href="#i-angle-right"></use></svg><a id="lnProduct" href="#/checks"></a><svg class="pf-icon" aria-hidden="true"><use href="#i-angle-right"></use></svg><span id="lnCrumb"></span></nav>
+        <div class="pf-title-row"><h1 class="pf-title" id="lnTitle"></h1><span id="lnStatus"></span><span class="wi-title-actions" id="lnActions"></span></div>
         <p id="lnSummary"></p>
       </section>
       <section class="pf-page__section">
@@ -202,18 +245,24 @@
           <span class="wi-title-actions">
             <button type="button" class="pf-btn pf-m-secondary pf-m-small" id="runAgainBtn" hidden><svg class="pf-icon" aria-hidden="true"><use href="#i-refresh"></use></svg>Run again</button>
             <button type="button" class="pf-btn pf-m-secondary pf-m-small" id="runNoteBtn" hidden><svg class="pf-icon" aria-hidden="true"><use href="#i-copy"></use></svg>Copy ticket note</button>
-            <button type="button" class="pf-btn pf-m-secondary pf-m-small" id="runCsvBtn" hidden>Export CSV</button>
-            <button type="button" class="pf-btn pf-m-secondary pf-m-small" id="runPdfBtn" hidden>Export PDF</button>
-            <button type="button" class="pf-btn pf-m-secondary pf-m-small" id="runRawBtn" hidden title="Every command the check ran and its full output, the Ansible log and the full output of the fixes (secrets masked)"><svg class="pf-icon" aria-hidden="true"><use href="#i-download"></use></svg>Raw output (.zip)</button>
+            <span class="wi-menu" id="runExportWrap" hidden>
+              <button type="button" class="pf-btn pf-m-secondary pf-m-small" id="runExportToggle" aria-haspopup="menu" aria-expanded="false" aria-controls="runExportMenu"><svg class="pf-icon" aria-hidden="true"><use href="#i-download"></use></svg>Export<svg class="pf-icon" aria-hidden="true"><use href="#i-caret-down"></use></svg></button>
+              <div class="pf-menu" id="runExportMenu" role="menu" aria-labelledby="runExportToggle" hidden>
+                <button type="button" class="pf-menu__item" role="menuitem" id="runCsvBtn" hidden>CSV: every step and its table</button>
+                <button type="button" class="pf-menu__item" role="menuitem" id="runPdfBtn" hidden>PDF report</button>
+                <button type="button" class="pf-menu__item" role="menuitem" id="runRawBtn" hidden title="Every command the check ran and its full output, the Ansible log and the full output of the fixes (secrets masked)">Raw output (.zip)</button>
+              </div>
+            </span>
             <a class="pf-btn pf-m-primary pf-m-small" id="runBundleBtn" hidden download><svg class="pf-icon" aria-hidden="true"><use href="#i-download"></use></svg><span>Download log bundle</span></a>
           </span>
         </div>
+        <div class="wi-run-meta" id="runDetail"></div>
       </section>
       <section class="pf-page__section">
         <div id="runOutcome"></div>
-        <div class="pf-card" id="runTopoCard" hidden>
-          <div class="pf-card__header"><h2 class="pf-card__title">Where it was checked</h2><span class="pf-card__actions">Hover a system for the steps read there.</span></div>
-          <div class="pf-card__body" id="runTopo"></div>
+        <div class="pf-card" id="runStepsCard">
+          <div class="pf-card__header"><h2 class="pf-card__title">Result per step</h2><span class="pf-card__actions" id="runElapsed"></span></div>
+          <div class="pf-card__body"><ol class="wi-steps" id="runSteps"></ol></div>
         </div>
         <div class="pf-card" id="runRecsCard" hidden>
           <div class="pf-card__header"><h2 class="pf-card__title">How to fix it</h2><span class="pf-card__actions pf-text-secondary">Commands for this run, with the values found.</span></div>
@@ -223,18 +272,10 @@
           <div class="pf-card__header"><h2 class="pf-card__title">Where to look</h2><span class="pf-card__actions pf-text-secondary">The screens with the values of this run; the numbers mark what the check found.</span></div>
           <div class="pf-card__body" id="runScreens"></div>
         </div>
-        <div class="pf-grid">
-          <div class="pf-card">
-            <div class="pf-card__header"><h2 class="pf-card__title">Result per step</h2><span class="pf-card__actions" id="runElapsed"></span></div>
-            <div class="pf-card__body"><ol class="wi-steps" id="runSteps"></ol></div>
-          </div>
-          <div>
-            <div class="pf-card">
-              <div class="pf-card__header"><h2 class="pf-card__title">Details</h2></div>
-              <div class="pf-card__body" id="runDetail"></div>
-            </div>
-          </div>
-        </div>
+        <details class="pf-card wi-fold" id="runTopoCard" hidden>
+          <summary class="pf-card__header"><h2 class="pf-card__title">Where it was checked</h2><span class="pf-card__actions pf-text-secondary" id="runTopoSummary"></span></summary>
+          <div class="pf-card__body" id="runTopo"></div>
+        </details>
         <div class="pf-card">
           <div class="pf-card__header"><h2 class="pf-card__title">Output</h2><span class="pf-card__actions" id="runLines"></span></div>
           <div class="pf-card__body"><div class="pf-log" id="runLog" role="log" aria-label="Ansible output"></div></div>
@@ -328,6 +369,8 @@
 <script src="/static/switcher.js"></script>
 <script src="{{ url_for('wi.static', filename='consoles/icons.js', v=ui_version) }}"></script>
 <script src="{{ url_for('wi.static', filename='wi.js', v=ui_version) }}"></script>
+<script src="{{ url_for('static', filename='guide.js', v=ui_version) }}"></script>
+<script src="{{ url_for('wi.static', filename='guides.js', v=ui_version) }}"></script>
 <dialog class="pf-modal pf-m-small" id="confirmDialog" aria-labelledby="confirmTitle" aria-describedby="confirmBody">
   <form method="dialog">
     <header class="pf-modal__header">

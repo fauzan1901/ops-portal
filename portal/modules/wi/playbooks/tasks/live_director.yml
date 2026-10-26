@@ -1,0 +1,66 @@
+# A long script on the director (an item of an OpenStack fix), with its output shown on the run page while it runs
+# (wi_analysis.live_start / live_poll / live_wait / live_end): started in the background (it survives the SSH session),
+# its new lines read every few seconds into live_file on the portal server, then its full output and exit code
+# registered in live_out exactly as one raw run of the script would give them.
+# Vars: live_script, live_label, live_deadline (epoch seconds), live_file (optional), live_header (first line, optional).
+- name: "Start: {{ live_label }}"
+  ansible.builtin.raw: "{{ director_prefix }} {{ (live_script | wi_live_start) | quote }}"
+  delegate_to: mgmt
+  register: live_started
+  changed_when: true
+  failed_when: false
+  ignore_unreachable: true
+
+- name: "Follow: {{ live_label }}"
+  ansible.builtin.set_fact:
+    live_folder: "{{ live_started.stdout | default('') | wi_live_dir }}"
+    live_until: "{{ live_deadline | int }}"   # fixed now (the deadline of the item)
+    live_seen: 0
+    live_rc: ""
+    live_polls: 0
+    live_misses: 0
+    live_miss_since: ""
+    live_text: "{{ live_header | default('') }}"
+
+- name: Live output for the run page (the item starts)
+  ansible.builtin.copy:
+    content: "{{ live_text }}"
+    dest: "{{ live_file }}"
+    mode: "0600"
+  failed_when: false
+  when: live_file | default('') | length > 0
+
+- name: "Output while it runs: {{ live_label }}"
+  ansible.builtin.include_tasks: live_poll.yml
+  when: live_folder | length > 0
+
+- name: "Wait for the end: {{ live_label }}"
+  ansible.builtin.raw: "{{ director_prefix }} {{ (live_folder | wi_live_wait((live_until | int) - (now(fmt='%s') | int))) | quote }}"
+  delegate_to: mgmt
+  register: live_waited
+  changed_when: false
+  failed_when: false
+  ignore_unreachable: true
+  when: live_folder | length > 0 and (live_rc | string | length) == 0   # also after the director did not answer for a while
+
+- name: The end, when the wait saw it
+  ansible.builtin.set_fact:
+    live_rc: "{{ (live_waited.stdout | default('') | wi_live_lines).rc if (live_waited.stdout | default('') | wi_live_lines).rc is not none else '' }}"
+  when: live_waited is defined and live_waited.stdout is defined
+
+- name: "Result: {{ live_label }}"
+  ansible.builtin.raw: "{{ director_prefix }} {{ (live_folder | wi_live_end) | quote }}"
+  delegate_to: mgmt
+  register: live_ended
+  changed_when: false
+  failed_when: false
+  ignore_unreachable: true
+  when: live_folder | length > 0 and (live_rc | string | length) > 0
+
+- name: "Output of: {{ live_label }}"
+  ansible.builtin.set_fact:
+    live_out: >-
+      {{ live_ended if (live_folder | length > 0 and (live_rc | string | length) > 0) else
+         (live_started if live_folder | length == 0 else
+          {'stdout': '', 'rc': 99, 'unreachable': false,
+           'msg': 'the director stopped answering while the item ran: it may still run there (' ~ live_folder ~ ')'}) }}

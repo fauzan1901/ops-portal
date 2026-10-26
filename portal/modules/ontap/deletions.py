@@ -4,8 +4,9 @@ The restore succeeded and the operator ticked the option in Review: the original
 N hours (sites.yml openstack.delete_after_hours, default 72). After it is due, administrators get a notification in
 the portal (badge in the masthead and the Approvals menu) and choose:
   - Approve delete: the dialog runs Check first (OpenStack + the LUN on NetApp), then the job delete_volume.yml checks
-    again (the volume still exists, same project, status available, not attached, no Cinder snapshots, LUN readable
-    on NetApp) and runs openstack volume delete, without --force/--cascade. Detach and delete detaches the volume from
+    again (the volume still exists, same project, status available, not attached, LUN readable on NetApp), deletes the
+    Cinder snapshots of the volume shown in the check (the same ones, each available or error) and then runs openstack
+    volume delete, without --force/--cascade. Detach and delete detaches the volume from
     the instance first (not for a boot disk). A volume that no longer exists in OpenStack and NetApp is recorded as
     already deleted;
   - Keep: the volume is not deleted;

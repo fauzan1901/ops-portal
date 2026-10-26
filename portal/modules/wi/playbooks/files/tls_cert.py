@@ -5,9 +5,12 @@
 
 Opens a TLS connection (no sign-in, nothing sent after the handshake), takes the certificate without verifying it
 (self-signed BMC / vCenter certificates are read too) and prints one JSON document:
-    {"host:port": {"ok": true, "subject", "issuer", "not_after", "days_left", "self_signed", "san"} | {"ok": false, "error"}}
+    {"host:port": {"ok": true, "subject", "issuer", "not_after", "days_left", "self_signed", "san", "sha256", "subject_dn",
+                   "issuer_dn", "aki"} | {"ok": false, "error"}}
+(sha256, the full names and the authority key identifier: to compare with the certificates another system trusts)
 """
 import datetime
+import hashlib
 import json
 import re
 import socket
@@ -37,8 +40,14 @@ def read(host, port):
         san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value.get_values_for_type(x509.DNSName)[:5]
     except x509.ExtensionNotFound:
         san = []
+    try:   # the key of the CA that issued it (to find that CA among the certificates another system trusts)
+        aki = cert.extensions.get_extension_for_class(x509.AuthorityKeyIdentifier).value.key_identifier
+    except Exception:
+        aki = None
     return {"ok": True, "subject": name_of(cert.subject), "issuer": name_of(cert.issuer), "not_after": after.isoformat(),
-            "days_left": (after - now).days, "self_signed": cert.subject == cert.issuer, "san": san}
+            "days_left": (after - now).days, "self_signed": cert.subject == cert.issuer, "san": san,
+            "sha256": hashlib.sha256(der).hexdigest(), "subject_dn": cert.subject.rfc4514_string(),
+            "issuer_dn": cert.issuer.rfc4514_string(), "aki": aki.hex() if aki else ""}
 
 
 def main():

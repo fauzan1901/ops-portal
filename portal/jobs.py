@@ -71,6 +71,14 @@ class Jobs:
         with self._lock:
             return self._jobs.get(job_id)
 
+    def latest(self, kind, owner, **params):
+        """The newest successful job of this kind started by this owner whose params match (None if there is none),
+        for example to show a result again without running the playbook again."""
+        with self._lock:
+            found = [j for j in self._jobs.values() if j["kind"] == kind and j["owner"] == owner and j["status"] == "success"
+                     and all(j["params"].get(k) == v for k, v in params.items())]
+        return max(found, key=lambda j: j["started"], default=None)
+
     def busy(self, key):
         with self._lock:
             return key in self._busy

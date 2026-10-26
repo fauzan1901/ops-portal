@@ -85,7 +85,8 @@ for _rec in INTERRUPTED:
 def _ui_version():
     """Fingerprint of the module UI files; it changes with every new version, so an old tab knows it must reload."""
     digest = hashlib.sha256()
-    for name in ("static/app.js", "static/app.css", "templates/ontap/index.html"):
+    for name in ("static/app.js", "static/app.css", "static/guides.js", "../../static/guide.js", "../../static/guide.css",
+                 "templates/ontap/index.html"):
         with open(os.path.join(blueprint.root_path, name), "rb") as f:
             digest.update(f.read())
     return digest.hexdigest()[:12]
@@ -723,6 +724,23 @@ def job_status(job_id):
             "elapsed": round((job["finished"] or time.time()) - job["started"])}
 
 
+@blueprint.get("/api/guide")
+@json_api
+def guide_data():
+    """For the guide of the Restore page, nothing runs: the newest check (plan) of this session on the site and the
+    OpenStack read (volume_info) of its volume, from jobs that already ran. Without a plan, the newest OpenStack read."""
+    PORTAL.require(MODULE_ID)
+    site = request.args.get("site", "")
+    owner = owner_of(PORTAL.session_id())
+    plan_job = JOBS.latest("plan", owner, site=site)
+    volume_id = plan_job["params"]["volume_id"] if plan_job else None
+    info_job = JOBS.latest("volume_info", owner, site=site, with_instance=True,
+                           **({"volume_id": volume_id} if volume_id else {}))
+    return {"plan": {"job_id": plan_job["id"], "params": plan_job["params"], "result": plan_job["result"],
+                     "age": round(time.time() - plan_job["finished"])} if plan_job else None,
+            "volume_info": {"volume_id": info_job["params"]["volume_id"], "result": info_job["result"]} if info_job else None}
+
+
 # ---------------- History ----------------
 @blueprint.get("/api/history")
 @json_api
@@ -776,11 +794,12 @@ def deletion_or_404(deletion_id):
     return item
 
 
-def start_delete_job(item, check_only, on_finish=None, detach_servers=None, delete_server=None):
+def start_delete_job(item, check_only, on_finish=None, detach_servers=None, delete_server=None, delete_snapshots=None):
     """Job delete_volume.yml: checks OpenStack + the LUN on NetApp, then deletes (unless check_only). detach_servers =
     detach from those instances first (must be the same as the attachments at deletion time). delete_server = (ID,
     name typed by the administrator): the volume is the boot disk of that instance, so the instance is deleted first.
-    One job per volume (same key as the restore)."""
+    delete_snapshots = the Cinder snapshots of the volume shown in the check: deleted before the volume (must be the
+    same as its snapshots at deletion time). One job per volume (same key as the restore)."""
     _, creds = pick_site(item["site"])
     params = {"site": item["site"], "volume_id": item["volume_id"], "expect_project": item["project_id"],
               "keep_volume_id": item["new_volume_id"], "lun_ref_id": item.get("lun_ref_id") or "",
@@ -789,6 +808,8 @@ def start_delete_job(item, check_only, on_finish=None, detach_servers=None, dele
         params.update(detach=True, detach_servers=detach_servers)
     if delete_server:
         params.update(delete_instance=True, delete_server=delete_server[0], delete_server_name=delete_server[1])
+    if delete_snapshots:
+        params.update(delete_snapshots=delete_snapshots)
     return JOBS.start("delete_volume", creds["username"], creds["password"], params,
                       key=(item["site"], item["volume_id"]), on_finish=on_finish, owner=owner_of(PORTAL.session_id()))
 
@@ -858,18 +879,27 @@ def deletion_approve(deletion_id):
         if detach_servers:
             raise ValueError("Either detach or delete the instance, not both")
         delete_server = (sid, name)
+    # The Cinder snapshots of the volume the administrator saw in the check: deleted first, so the volume can be deleted;
+    # the playbook refuses when the volume has other snapshots by then.
+    raw = d.get("snapshots") if d.get("snapshots") is not None else []
+    if not isinstance(raw, list) or len(raw) > 200:
+        raise ValueError("Snapshots: the snapshot IDs from the check")
+    delete_snapshots = [str(x).strip().lower() for x in raw]
+    if not all(UUID_RE.match(x) for x in delete_snapshots):
+        raise ValueError("Invalid snapshot ID")
     item = deletions.start_delete(deletion_id, s["username"])
     client = PORTAL.client_address()   # the job ends in a background thread, without the request
     try:
         job = start_delete_job(item, False, on_finish=lambda j: _finish_delete(deletion_id, item, s["username"], j, client),
-                               detach_servers=detach_servers, delete_server=delete_server)
+                               detach_servers=detach_servers, delete_server=delete_server, delete_snapshots=delete_snapshots)
     except ValueError as e:
         deletions.finish_delete(deletion_id, {"status": "failed", "error": str(e), "lines": []})
         raise
     deletions.set_job(deletion_id, job["id"])
     PORTAL._event(s["username"], "deletion.approve", item["volume_id"], f"restore #{item['restore_id']}, site {item['site']}"
                   + (f", detach from {', '.join(detach_servers)} first" if detach_servers else "")
-                  + (f", delete instance {delete_server[1]} ({delete_server[0]}) first" if delete_server else ""))
+                  + (f", delete instance {delete_server[1]} ({delete_server[0]}) first" if delete_server else "")
+                  + (f", delete {len(delete_snapshots)} snapshot(s) first ({', '.join(delete_snapshots)})" if delete_snapshots else ""))
     log.info("DELETION approved #%s by %s site=%s volume=%s", deletion_id, s["username"], item["site"], item["volume_id"])
     return {"job_id": job["id"]}
 

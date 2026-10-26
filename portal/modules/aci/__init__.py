@@ -12,13 +12,14 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 
 from flask import Blueprint, g, jsonify, make_response, render_template, request, send_file
 
 import portal_auth
 from core import PORTAL, register
 
-from . import aci, audit, ip_usage, report, template_store
+from . import aci, audit, fabric, ip_usage, report, template_store, vpc
 from .apic_sites import ApicHttpError, ServiceConnections, ServiceLoginError, site_from_request, site_hosts, test_login
 
 MODULE_ID = "aci"
@@ -26,6 +27,7 @@ log = logging.getLogger("portal.aci")
 blueprint = Blueprint(MODULE_ID, __name__, url_prefix="/aci", template_folder="templates", static_folder="static",
                       static_url_path="/static")
 APIC_TIMEOUT_SECONDS = 60
+VPC_PATH_WAIT_SECONDS = 10   # after a new vPC: how long to wait for APIC to show its path
 audit.init()
 template_store.init()
 ip_usage.init()
@@ -50,9 +52,10 @@ def credential_changed(name):
         CONNECTIONS.drop(name.split(":", 1)[1])
 
 
-register(MODULE_ID, "ACI", "Static port, provisioning, report and change history on Cisco ACI (APIC).", "/aci/", "network",
+register(MODULE_ID, "ACI", "Static port, new vPCs, provisioning, report and change history on Cisco ACI (APIC).", "/aci/", "network",
          targets=credential_targets, tester=test_credential, on_credential_change=credential_changed,
-         permissions=[{"id": template_store.PERMISSION, "title": "ACI: edit product templates"}])
+         permissions=[{"id": template_store.PERMISSION, "title": "ACI: edit product templates"},
+                      {"id": vpc.PERMISSION, "title": "ACI: create vPCs (interface policy group and selectors)"}])
 # APIC tokens are kept in memory, like the portal sessions: the portal runs as a single process.
 CONNECTIONS = ServiceConnections(lambda site: PORTAL.credential(credential_name(site)))
 
@@ -60,7 +63,8 @@ CONNECTIONS = ServiceConnections(lambda site: PORTAL.credential(credential_name(
 def _ui_version():
     """Fingerprint of the UI (JS, CSS, HTML). It changes with every new version, so open tabs know to reload."""
     digest = hashlib.sha256()
-    for name in ("static/app.js", "static/app.css", "templates/aci/index.html"):
+    for name in ("static/app.js", "static/app.css", "static/guides.js", "../../static/guide.js", "../../static/guide.css",
+                 "templates/aci/index.html"):
         with open(os.path.join(blueprint.root_path, name), "rb") as f:
             digest.update(f.read())
     return digest.hexdigest()[:12]
@@ -98,7 +102,7 @@ def session_payload():
     user = payload["user"]
     allowed = bool(user) and MODULE_ID in user["modules"]
     return {"ui_version": UI_VERSION, **payload, "allowed": allowed, "sites": sites_payload(allowed),
-            "can_edit_templates": allowed and template_store.can_edit(user)}
+            "can_edit_templates": allowed and template_store.can_edit(user), "can_create_vpc": allowed and vpc.can_create(user)}
 
 
 def site_api(site=None):
@@ -185,6 +189,15 @@ def paths_check():
         raise ValueError(f"At most {template_store.MAX_PATHS} paths per check")
     existing = aci.fabric_paths(site_api())
     return {"site": site_from_request(), "exists": {t: t in existing for t in tdns}}
+
+
+# ---------------- Fabric interfaces ----------------
+@blueprint.get("/api/fabric")
+@json_api
+def fabric_interfaces():
+    """Every leaf port of this site with what uses it (port-channel, vPC, interface policy, static paths, neighbour) and
+    the ports free on both leaves of each vPC pair: to pick ports for static port bindings and new vPCs. Read-only."""
+    return {"site": site_from_request(), **fabric.fabric_interfaces(site_api())}
 
 
 # ---------------- Product templates ----------------
@@ -548,6 +561,46 @@ def audit_detail(record_id):
         raise ValueError(f"Audit record #{record_id} not found")
     return {"item": record}
 
+# ---------------- New vPC (Fabric > Access Policies) ----------------
+@blueprint.get("/api/vpc/options")
+@json_api
+def vpc_options():
+    """vPC pairs with their interface profiles and ports, vPC policy groups and interface policies. Read-only."""
+    return {"site": site_from_request(), "can_create": vpc.can_create(signed_in()), **vpc.options(site_api())}
+
+
+@blueprint.post("/api/vpc/preview")
+@json_api
+def vpc_preview():
+    """The new vPC as it would be sent, checked against APIC now. Read-only."""
+    return {"site": site_from_request(), **vpc.plan(site_api(), json_body())}
+
+
+@blueprint.post("/api/vpc/apply")
+@json_api
+def vpc_apply():
+    """Create the vPC policy group and its selectors in one APIC transaction, after the same checks as the preview
+    (read again from APIC now). Administrators and accounts with the permission 'ACI: create vPCs' only."""
+    if not vpc.can_create(signed_in()):
+        raise portal_auth.Forbidden("Your account cannot create vPCs. An administrator can allow it on the Users page "
+                                    "(ACI: create vPCs).")
+    api = site_api()
+    plan = vpc.plan(api, json_body())
+    if plan["blocked"]:
+        raise ValueError("The vPC was not created: " + " ".join(plan["blocked"]))
+    ports = "; ".join(f"leaf {n} {vpc.block_text(p)}" for n, p in plan["ports"].items())
+    plan["audit_id"] = audited_apply("access-policy", plan["pg_dn"], None, f"vPC {plan['name']} on leaves {plan['pair']}: {ports}",
+                                     {"steps": plan["steps"], "checks": plan["checks"], "warnings": plan["warnings"],
+                                      "payload": plan["payload"], "path": plan["path"]},
+                                     lambda: vpc.apply(api, plan))
+    # APIC makes the path of the vPC from the policy group and the selectors: usually at once, at most a few seconds.
+    deadline = time.time() + VPC_PATH_WAIT_SECONDS
+    plan["path_ready"] = vpc.path_ready(api, plan["path"])
+    while not plan["path_ready"] and time.time() < deadline:
+        time.sleep(1)
+        plan["path_ready"] = vpc.path_ready(api, plan["path"])
+    return {"site": site_from_request(), "applied": True, **plan}
+
 
 # One undo at a time, so two requests cannot undo the same change twice.
 UNDO_LOCK = threading.Lock()
@@ -562,6 +615,9 @@ def undo_target(record_id):
     if record["action"] == "template":
         raise ValueError(f"Change #{record_id} is a product template change. It never touched APIC, so there is nothing to "
                          "undo there; edit the template again (or reset it to the default) on Fabric \u2192 Templates.")
+    if record["action"] == "access-policy":
+        raise ValueError(f"Change #{record_id} created a vPC. It cannot be undone here, because the portal never deletes "
+                         "access policies; remove the selector and the policy group on APIC if it is not used.")
     if record["action"] != "static-port":
         raise ValueError(f"Change #{record_id} is a provisioning change. Provisioning changes cannot be undone here, "
                          "because the portal never deletes objects.")

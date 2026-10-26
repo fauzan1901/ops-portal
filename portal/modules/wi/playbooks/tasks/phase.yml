@@ -30,6 +30,21 @@
     loop_var: rest_source
   when: wi_reads[rest_source] | length > 0
 
+- name: "Phase {{ phase }}: next pages of the lists"
+  ansible.builtin.set_fact:
+    wi_pages_done: false
+    # rounds only when a list of this phase announces a next page (most lists fit in one answer: no round at all)
+    wi_page_rounds: >-
+      {{ range(0, 9) | list if (wi_data | wi_next_pages(wi_reads) | dict2items | map(attribute='value') | map('length') | sum) > 0
+         else [] }}
+  when: (wi_reads.ontap | length) + (wi_reads.nsxt | length) + (wi_reads.vcd | length) > 0
+
+- name: "Phase {{ phase }}: next pages of the lists (rounds)"
+  ansible.builtin.include_tasks: read_pages.yml
+  loop: "{{ wi_page_rounds | default([]) if (wi_reads.ontap | length) + (wi_reads.nsxt | length) + (wi_reads.vcd | length) > 0 else [] }}"
+  loop_control:
+    loop_var: page_round   # wi_analysis.PAGE_ROUNDS + 1 rounds: the last only merges and finds nothing more
+
 - name: "Phase {{ phase }}: vCenter inventory"
   ansible.builtin.include_tasks: read_vsphere.yml
   when: wi_reads.vsphere | length > 0

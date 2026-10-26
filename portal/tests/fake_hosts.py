@@ -531,10 +531,15 @@ RESOURCES = [  # the reads of the check Server resources (same on every host; ap
     ("ps -eo pid,user,pmem,pcpu,rss,comm", lambda n: "    PID USER     %MEM %CPU   RSS COMMAND\n   2201 mongodb  61.2 12.0 9955000 mongod\n    880 root      2.1  0.3 340000 dockerd"),
     ("ps -eo pid,user,pcpu,pmem,comm", lambda n: "    PID USER     %CPU %MEM COMMAND\n   2201 mongodb  45.0 61.2 mongod\n    880 root      1.0  2.1 dockerd"),
     ("uptime", lambda n: " 10:00:00 up 12 days,  3:04,  0 users,  load average: 3.80, 3.10, 2.40"),
+    ("uname -n", lambda n: n),   # the connection step of a template
 ]
 
 
 def answer(name, cmd):
+    m = re.match(r"^sleep (\d+)$", cmd)
+    if m:   # the wait of a template step: a real pause, at most one second here
+        time.sleep(min(1, int(m.group(1))))
+        return 0, ""
     for needle, fn in RESOURCES:
         if cmd.startswith(needle):
             return 0, fn(name)

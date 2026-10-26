@@ -7,7 +7,7 @@
     osb_label: "volume {{ volume_id }} and its snapshots"
     osb_commands:
       - {key: volume, cmd: "openstack volume show {{ volume_id | quote }} -f json", optional: true}
-      - {key: snapshots, cmd: "openstack volume snapshot list --all-projects --volume {{ volume_id | quote }} -f json", optional: true}
+      - {key: snapshots, cmd: "openstack volume snapshot list --all-projects --long --volume {{ volume_id | quote }} -f json", optional: true}
 
 - name: Save the volume
   ansible.builtin.set_fact:

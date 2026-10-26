@@ -384,6 +384,8 @@ async function changeSite(name) {
   Site.render(true);
   try {
     const tenants = (await api('/api/discover?kind=tenants')).items;
+    Fabric.onSite();
+    Vpc.onSite();
     await Promise.all([StaticPort.onSite(tenants).finally(() => Templates.onSite()), Provision.onSite(tenants), Report.onSite(tenants),
       IpUsage.onSite(tenants)]);
   } catch (e) {
@@ -418,6 +420,7 @@ const Session = {
     this.user = status.user;
     Site.set(status);
     Templates.setAccess(!!status.can_edit_templates);
+    Vpc.canCreate = !!status.can_create_vpc;
     if ($('#appView').hidden) return;
     UserMenu.render(status.user, status.client);
     Site.render();
@@ -465,6 +468,7 @@ const Session = {
     this.user = status.user;
     Site.set(status);
     Templates.setAccess(!!status.can_edit_templates);
+    Vpc.canCreate = !!status.can_create_vpc;
     const saved = tabStore.get('aci_site');
     const first = Site.list.find(x => x.configured) || Site.list[0];
     Site.current = Site.list.some(x => x.name === saved) ? saved : (first ? first.name : '');
@@ -540,7 +544,7 @@ const UserMenu = {
 // Sidebar menu (PatternFly navigation). The URL hash (#static, #provision, ...) follows the open page.
 // Administration (Users, Credentials) is on the portal: links to /#/users and /#/credentials.
 const Tabs = {
-  names: ['static', 'templates', 'provision', 'report', 'ips', 'audit'],
+  names: ['static', 'fabric', 'vpc', 'templates', 'provision', 'report', 'ips', 'audit'],
   current: '',
   init() {
     // Menu links of this page (links to the portal, such as Users and "Set it in Credentials.", are normal links).
@@ -577,6 +581,7 @@ const Tabs = {
     window.scrollTo(0, 0);
     if (name === 'audit') Audit.onShow();
     if (name === 'templates') Templates.onShow();
+    if (name === 'vpc') Vpc.onShow();
   },
 };
 
@@ -704,7 +709,7 @@ async function downloadFile(url, fallbackName) {
 /* =========================================================================
    Change history (audit from the server: all users, all sites)
    ========================================================================= */
-const ACTION_LABEL = {'static-port': 'Static Port', provisioning: 'Provisioning', template: 'Product template'};
+const ACTION_LABEL = {'static-port': 'Static Port', provisioning: 'Provisioning', template: 'Product template', 'access-policy': 'vPC (access policy)'};
 const AUDIT_STATUS = {success: ['badge-new', 'Successful'], failed: ['badge-danger', 'Failed'], unknown: ['badge-change', 'Unknown'],
   pending: ['badge-change', 'Incomplete']};
 // Browser local time, en-GB 24 h: "25 Sep 2026, 08:48:19". Newer ICU writes September as "Sept"; it is shown as "Sep".
@@ -783,28 +788,35 @@ const Audit = {
   },
   render() {
     const filtered = Object.values(this.filters()).some(Boolean);
-    $('#auTable tbody').innerHTML = this.items.map(x => {
-      const [cls, label] = AUDIT_STATUS[x.status] || ['badge', x.status];
-      return `<tr data-id="${Number(x.id)}" tabindex="0"><td>${esc(fmtTime(x.ts))}</td><td><span class="badge ${cls}">${esc(label)}</span>`
-        + `${x.undone_by ? ` <span class="badge badge-info" title="Undone by change #${Number(x.undone_by)}">Undone</span>` : ''}</td>`
-        + `<td><b>${esc(x.username)}</b></td><td>${x.site ? `<span class="site-pill" style="${Site.style(x.site)}">${esc(x.site)}</span>` : '<span class="muted">All sites</span>'}</td>`
-        + `<td>${esc(ACTION_LABEL[x.action] || x.action)}</td><td>${esc(x.product || '—')}</td>`
-        + `<td class="mono wrap">${esc(x.target.replace(/^uni\//, ''))}</td><td class="wrap">${esc(x.summary)}</td></tr>`;
-    }).join('') || `<tr class="empty-row"><td colspan="8"><div class="empty">${icon('clock')}<div><b>${filtered ? 'No results found' : 'No changes yet'}</b>`
+    $('#auTable tbody').innerHTML = this.items.map(x => this.rowHtml(x)).join('') || `<tr class="empty-row"><td colspan="8"><div class="empty">${icon('clock')}<div><b>${filtered ? 'No results found' : 'No changes yet'}</b>`
       + `<p>${filtered ? 'Change the filters or search terms.' : 'Every change applied from this Web UI is recorded here.'}</p></div></div></td></tr>`;
     $('#auShown').textContent = this.items.length ? `Showing ${this.items.length} of ${plural(this.total, 'change')}` : '';
     $('#auMoreBtn').hidden = this.items.length >= this.total;
   },
+  rowHtml(x) {
+    const [cls, label] = AUDIT_STATUS[x.status] || ['badge', x.status];
+    return `<tr data-id="${Number(x.id)}" tabindex="0"><td>${esc(fmtTime(x.ts))}</td><td><span class="badge ${cls}">${esc(label)}</span>`
+      + `${x.undone_by ? ` <span class="badge badge-info" title="Undone by change #${Number(x.undone_by)}">Undone</span>` : ''}</td>`
+      + `<td><b>${esc(x.username)}</b></td><td>${x.site ? `<span class="site-pill" style="${Site.style(x.site)}">${esc(x.site)}</span>` : '<span class="muted">All sites</span>'}</td>`
+      + `<td>${esc(ACTION_LABEL[x.action] || x.action)}</td><td>${esc(x.product || '—')}</td>`
+      + `<td class="mono wrap">${esc(x.target.replace(/^uni\//, ''))}</td><td class="wrap">${esc(x.summary)}</td></tr>`;
+  },
   async open(id) {
     const x = (await api(`/api/audit/${id}`)).item;
+    $('#auditTitle').textContent = `Change #${x.id}`;
+    $('#auditBody').innerHTML = this.bodyHtml(x);
+    // Already open when a linked change (Undo of / Undone by) is opened, or after an undo.
+    if (!$('#auditDialog').open) $('#auditDialog').showModal();
+    $('#auditBody').scrollTop = 0;
+  },
+  bodyHtml(x) {
     const [cls, label] = AUDIT_STATUS[x.status] || ['badge', x.status];
     const meta = [['Time', fmtTime(x.ts) + (x.finished ? ` (finished ${fmtTime(x.finished)})` : '')], ['User', x.username],
       ['APIC account', x.apic_user || '—'], ['Site', x.site ? `${x.site} · ${x.apic}` : 'All sites'], ['Action', ACTION_LABEL[x.action] || x.action], ['Product', x.product || '—'],
       ['Target', x.target], ['Summary', x.summary], ['Client IP', x.client_ip || '—']];
     const details = x.details || {};
     const link = n => `<a href="#audit" data-audit="${Number(n)}">change #${Number(n)}</a>`;
-    $('#auditTitle').textContent = `Change #${x.id}`;
-    $('#auditBody').innerHTML = `<dl class="meta-grid">${meta.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join('')}`
+    return `<dl class="meta-grid">${meta.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join('')}`
         + `<dt>Status</dt><dd><span class="badge ${cls}">${esc(label)}</span></dd>`
         + (x.undo_of ? `<dt>Undo of</dt><dd>${link(x.undo_of)}</dd>` : '')
         + (x.undone_by ? `<dt>Undone by</dt><dd>${link(x.undone_by)}</dd>` : '') + '</dl>'
@@ -818,11 +830,10 @@ const Audit = {
         + '<div class="table-wrap"><table class="table table-data"><thead><tr><th>Path</th><th>Reason</th></tr></thead><tbody>'
         + details.skipped.map(s => `<tr><td class="mono">${esc(s.tdn)}</td><td class="wrap">${esc(s.reason)}</td></tr>`).join('') + '</tbody></table></div>' : '')
       + (details.warnings?.length ? alertBox('warning', `<b>Warnings at the time</b><ul>${details.warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul>`) : '')
-      + (details.steps ? `<h3 class="detail-title">Provisioning steps</h3>${stepsTable(details.steps)}`
+      + (details.path ? `<h3 class="detail-title">vPC path</h3><p class="mono">${esc(details.path)}</p>` : '')
+      + (details.steps ? `<h3 class="detail-title">${x.action === 'access-policy' ? 'Objects of the vPC' : 'Provisioning steps'}</h3>`
+        + `<div class="${x.action === 'access-policy' ? 'vp-steps' : ''}">${stepsTable(details.steps)}</div>`
         + `<details class="payload"><summary>JSON payload sent</summary><pre>${esc(JSON.stringify(details.payload, null, 2))}</pre></details>` : '');
-    // Already open when a linked change (Undo of / Undone by) is opened, or after an undo.
-    if (!$('#auditDialog').open) $('#auditDialog').showModal();
-    $('#auditBody').scrollTop = 0;
   },
 };
 
@@ -838,6 +849,8 @@ const Undo = {
   detailHtml(x) {
     const note = text => `<p class="undo-note">${icon('info')}<span>${text}</span></p>`;
     if (x.action === 'provisioning') return note('Provisioning changes cannot be undone here, because the portal never deletes objects.');
+    if (x.action === 'access-policy') return note('A new vPC cannot be undone here, because the portal never deletes access policies. '
+      + 'If it is not used, remove its selector and policy group on APIC (Fabric → Access Policies).');
     if (x.action === 'template') return note('A product template change never touches APIC, so there is nothing to undo there. '
       + 'Edit the template again, or reset it to the default, on Fabric → Templates.');
     if (x.action !== 'static-port' || x.status !== 'success' || x.undone_by) return '';
@@ -2610,8 +2623,9 @@ const Provision = {
       el.hidden = radioValue(name) !== value;
     });
   },
-  renderSubnets() {
-    $('#pvSubnets').innerHTML = this.subnets.map((s, i) => `<div class="subnet-row" data-i="${i}">`
+  renderSubnets() { $('#pvSubnets').innerHTML = this.subnetsHtml(this.subnets); },
+  subnetsHtml(list) {
+    return list.map((s, i) => `<div class="subnet-row" data-i="${i}">`
       + `<input class="input mono${s.ip && !SUBNET.test(s.ip) ? ' is-invalid' : ''}" data-k="ip" value="${esc(s.ip)}" placeholder="10.249.10.1/24" aria-label="Subnet ${i + 1} gateway" autocomplete="off">`
       + `<select class="input" data-k="scope" aria-label="Subnet ${i + 1} scope">${SCOPES.map(([v, l]) => `<option value="${v}"${v === s.scope ? ' selected' : ''}>${l}</option>`).join('')}</select>`
       + `<label class="check"><input type="checkbox" data-k="preferred"${s.preferred ? ' checked' : ''}> Preferred</label>`
@@ -2736,6 +2750,443 @@ const SOURCE_BADGE = Object.fromEntries(SOURCES.map(([key, , cls]) => [key, cls]
 // APIC modTs such as 2026-09-25T08:48:19.123+07:00, in the browser's time like the other times.
 const apicTime = ts => (ts && !Number.isNaN(Date.parse(ts)) ? fmtTime(ts) : ts || '');
 
+/* =========================================================================
+   Fabric interfaces: every leaf port with what uses it, read from APIC (read-only); ports go to Static Port from here
+   ========================================================================= */
+const FB_USE = {free: ['Free', 'badge-change', 'No interface policy yet'], access: ['Access', 'badge-info', 'Access port'],
+  pc: ['Port-channel', '', 'Port-channel'], vpc: ['vPC', 'badge-new', 'vPC'], uplink: ['Uplink', '', 'Fabric uplink']};
+const Fabric = {
+  data: null,
+  use: '',
+  picked: new Set(),   // "node interface" of the ticked ports
+  init() {
+    $('#fbLoad').addEventListener('click', e => run(e.currentTarget, () => this.load()));
+    $('#fbExport').addEventListener('click', () => this.download());
+    ['#fbSearch', '#fbNode', '#fbOper'].forEach(sel => $(sel).addEventListener(sel === '#fbSearch' ? 'input' : 'change', () => this.render()));
+    $('#fbKpis').addEventListener('click', e => {
+      const b = e.target.closest('[data-use]');
+      if (b) { this.use = b.dataset.use; this.render(); }
+    });
+    $('#fbTable tbody').addEventListener('change', e => {
+      const box = e.target.closest('input[data-port]');
+      if (!box) return;
+      if (box.checked) this.picked.add(box.dataset.port); else this.picked.delete(box.dataset.port);
+      this.selection();
+    });
+    $('#fbTable tbody').addEventListener('click', e => {
+      const b = e.target.closest('button[data-add]');
+      if (b) this.toStatic([this.row(b.dataset.add)]);
+    });
+    $('#fbAll').addEventListener('change', e => {
+      this.shown().filter(r => r.use).forEach(r => { if (e.target.checked) this.picked.add(this.key(r)); else this.picked.delete(this.key(r)); });
+      this.render();
+    });
+    $('#fbAddSel').addEventListener('click', () => this.toStatic([...this.picked].map(k => this.row(k)).filter(Boolean)));
+    $('#fbVpcSel').addEventListener('click', () => {
+      const v = this.vpcPick();
+      if (v) run(null, () => Vpc.start(v.pair, v.ports));
+    });
+    $('#fbPairs').addEventListener('click', e => {
+      const create = e.target.closest('[data-vpc]');
+      if (create) return run(null, () => Vpc.start(create.dataset.vpc));
+      const b = e.target.closest('[data-find]');
+      if (!b) return;
+      $('#fbSearch').value = b.dataset.find;
+      $('#fbNode').value = '';
+      this.use = '';
+      this.render();
+      $('#fbTable').scrollIntoView({block: 'start', behavior: 'smooth'});
+    });
+    this.render();
+  },
+  onSite() {
+    this.data = null;
+    this.use = '';
+    this.picked.clear();
+    $('#fbSearch').value = '';
+    this.render();
+  },
+  async load() {
+    $('#fbTable tbody').innerHTML = `<tr class="empty-row"><td colspan="9"><div class="loading">Reading the leaves of ${esc(Site.current)}…</div></td></tr>`;
+    try {
+      this.data = await api('/api/fabric');
+      this.picked.clear();
+      const node = $('#fbNode').value;
+      $('#fbNode').innerHTML = '<option value="">All leaves</option>' + this.data.nodes.map(n => `<option value="${n.id}"${String(n.id) === node ? ' selected' : ''}>`
+        + `${n.id} · ${esc(n.name)}</option>`).join('');
+    } finally {
+      this.render();
+    }
+  },
+  key: r => `${r.node} ${r.interface}`,
+  row(key) { return (this.data?.interfaces || []).find(r => this.key(r) === key); },
+  text(r) {
+    return [r.node, r.node_name, r.interface, r.oper, r.speed, r.descr, r.policy_group, r.channel, r.aaep, r.selector, FB_USE[r.status][0],
+      r.neighbor?.name, r.neighbor?.port, ...r.bindings.flatMap(b => [b.owner, b.encap, b.encap.replace('vlan-', 'vlan ')])].join(' ').toLowerCase();
+  },
+  shown() {
+    if (!this.data) return [];
+    const q = $('#fbSearch').value.trim().toLowerCase(), node = $('#fbNode').value, oper = $('#fbOper').value;
+    return this.data.interfaces.filter(r => (!this.use || r.status === this.use) && (!node || String(r.node) === node)
+      && (!oper || r.oper === oper) && (!q || q.split(/\s+/).every(w => this.text(r).includes(w))));
+  },
+  render() {
+    const d = this.data, rows = this.shown();
+    $('#fbKpis').innerHTML = this.kpisHtml(d, this.use);
+    $('#fbExport').disabled = !d;
+    $('#fbShown').textContent = d ? `Showing ${rows.length} of ${plural(d.interfaces.length, 'port')}` : '';
+    const empty = !d ? ['network', 'Not read yet', `Read from APIC reads every leaf port of ${Site.current || 'the site'}.`]
+      : ['search', 'No port matches', 'Change the search, the leaf, the state or the type.'];
+    const shown = rows.slice(0, 1000);
+    $('#fbTable tbody').innerHTML = shown.map(r => this.rowHtml(r)).join('')
+      || `<tr class="empty-row"><td colspan="9"><div class="empty">${icon(empty[0])}<div><b>${esc(empty[1])}</b><p>${esc(empty[2])}</p></div></div></td></tr>`;
+    if (rows.length > shown.length) {
+      $('#fbTable tbody').insertAdjacentHTML('beforeend', `<tr class="empty-row"><td colspan="9"><div class="empty-inline">${rows.length - shown.length} more: search or choose a leaf to see them.</div></td></tr>`);
+    }
+    const usable = shown.filter(r => r.use);
+    $('#fbAll').checked = usable.length > 0 && usable.every(r => this.picked.has(this.key(r)));
+    $('#fbAll').disabled = !usable.length;
+    this.selection();
+    this.renderPairs();
+  },
+  kpisHtml(d, current) {
+    const count = use => (d ? d.interfaces.filter(r => !use || r.status === use).length : 0);
+    return [['', 'All ports'], ['free', 'Free'], ['access', 'Access'], ['pc', 'Port-channel'], ['vpc', 'vPC'], ['uplink', 'Uplink']]
+      .map(([use, label]) => `<button type="button" class="kpi${current === use ? ' is-active' : ''}" data-use="${use}" aria-pressed="${current === use}"${d ? '' : ' disabled'}>`
+        + `<span class="kpi-value">${count(use)}</span><span class="kpi-label">${label}</span></button>`).join('');
+  },
+  rowHtml(r) {
+    const [label, cls] = FB_USE[r.status];
+    const up = r.oper === 'up';
+    const state = `<span class="badge ${up ? 'badge-new' : ''}">${up ? 'Up' : r.admin === 'down' ? 'Admin down' : 'Down'}</span>`
+      + (r.speed ? ` <span class="muted">${esc(r.speed)}</span>` : '')
+      + (!up && r.reason && r.reason !== 'none' ? `<div class="cell-note muted">${esc(r.reason)}</div>` : '');
+    const name = r.channel || r.policy_group;
+    const useText = `<span class="badge ${cls}">${label}</span>${name ? ` <span class="mono">${esc(name)}</span>` : ''}`
+      + (r.aaep ? `<div class="cell-note muted">AAEP ${esc(r.aaep)}</div>` : '');
+    const peer = r.neighbor ? `${esc(r.neighbor.name)}${r.neighbor.port ? ` <span class="muted">${esc(r.neighbor.port)}</span>` : ''}`
+      + `<div class="cell-note muted">${esc(r.neighbor.via)}${r.neighbor.ip ? ` · ${esc(r.neighbor.ip)}` : ''}</div>` : '<span class="muted">—</span>';
+    const paths = r.bindings.slice(0, 3).map(b => `<span class="badge" title="${esc(`${b.owner} · ${b.encap} · ${b.via}`)}">${esc(b.owner.split('/').pop())} · ${esc(b.encap)}</span>`).join(' ')
+      + (r.bindings.length > 3 ? ` <span class="muted">+${r.bindings.length - 3}</span>` : '') || '<span class="muted">—</span>';
+    const key = this.key(r);
+    const what = !r.use ? '' : r.use.kind === 'paths' ? `vPC ${name}` : r.status === 'pc' ? `port-channel ${name}` : r.interface;
+    return `<tr class="fb-${r.status}"><td class="fb-check">${r.use ? `<input type="checkbox" data-port="${esc(key)}"${this.picked.has(key) ? ' checked' : ''} aria-label="Tick ${esc(r.interface)} on node ${r.node}">` : ''}</td>`
+      + `<td><b>${r.node}</b><div class="cell-note muted">${esc(r.node_name)}</div></td><td class="mono">${esc(r.interface)}</td><td>${state}</td>`
+      + `<td title="${esc(r.note)}">${useText}</td><td>${peer}</td><td class="fb-paths">${paths}</td><td class="fb-descr">${esc(r.descr) || '<span class="muted">—</span>'}</td>`
+      + `<td>${r.use ? `<button type="button" class="btn btn-secondary btn-sm" data-add="${esc(key)}" title="${esc(`Add ${what} to Static Port. ${r.note}`)}">${icon('plug')}Static port</button>` : ''}</td></tr>`;
+  },
+  // Free ports ticked on the two leaves of one vPC pair: {pair, ports: {node: [interfaces]}}, else null
+  vpcPick() {
+    const rows = [...this.picked].map(k => this.row(k)).filter(Boolean);
+    if (!rows.length || rows.some(r => r.status !== 'free')) return null;
+    const nodes = [...new Set(rows.map(r => r.node))].sort((x, y) => x - y);
+    const pair = (this.data?.vpc_pairs || []).find(p => p.nodes.join() === nodes.join());
+    if (!pair) return null;
+    return {pair: pair.nodes.join('-'), ports: Object.fromEntries(nodes.map(n => [n, rows.filter(r => r.node === n).map(r => r.interface)]))};
+  },
+  selection() {
+    const n = this.picked.size;
+    $('#fbVpcSel').disabled = !this.vpcPick();
+    $('#fbAddSel').disabled = !n;
+    $('#fbSelInfo').textContent = n ? `${plural(n, 'port')} ticked.` : 'Tick ports, then add them to Static Port; a port in a vPC or port-channel adds its vPC or port-channel.';
+  },
+  renderPairs() {
+    const pairs = this.data?.vpc_pairs || [];
+    $('#fbPairsCard').hidden = !pairs.length;
+    $('#fbPairs').innerHTML = this.pairsHtml(pairs);
+  },
+  pairsHtml(pairs) {
+    return pairs.map(p => `<div class="fb-pair"><div class="fb-pair__head"><span><b>${esc(p.name)}</b> <span class="muted">leaves ${p.nodes.join(' and ')}</span></span>`
+      + `<button type="button" class="btn btn-secondary btn-sm" data-vpc="${p.nodes.join('-')}">${icon('server')}Create vPC</button></div>`
+      + `<div class="fb-pair__row"><span class="field-label">vPCs (${p.vpcs.length})</span><div class="chips">${p.vpcs.map(v => `<button type="button" class="chip${v.up ? '' : ' chip-own'}" data-find="${esc(v.name)}" title="${esc(Object.entries(v.members).map(([n, m]) => `${n}: ${m.join(', ')}`).join(' · '))}">`
+        + `${esc(v.name)}${v.up ? '' : ' (down)'}</button>`).join('') || '<span class="muted">none</span>'}</div></div>`
+      + `<div class="fb-pair__row"><span class="field-label">Free on both leaves (${p.free_both.length})</span><div class="chips">${p.free_both.slice(0, 24).map(i => `<button type="button" class="chip chip-free" data-find="${esc(i)}">${esc(i)}</button>`).join('')
+        || '<span class="muted">none</span>'}${p.free_both.length > 24 ? `<span class="muted">+${p.free_both.length - 24}</span>` : ''}</div></div></div>`).join('');
+  },
+  // To Static Port: a port, its port-channel or its vPC (once, even when both members of a vPC are ticked)
+  toStatic(rows) {
+    const physical = [], paths = [], have = new Set(['physical', 'paths'].flatMap(k => Bindings[k].map(b => Bindings.tdnOf(k, b))));
+    let free = 0;
+    for (const r of rows) {
+      if (!r?.use) continue;
+      const u = r.use;
+      const row = u.kind === 'paths' ? Bindings.newRow('paths', {tdn: u.tdn}) : Bindings.newRow('physical', {pod: String(u.pod), node: String(u.node), interface: u.interface});
+      const tdn = Bindings.tdnOf(u.kind, row);
+      if (have.has(tdn)) continue;
+      have.add(tdn);
+      (u.kind === 'paths' ? paths : physical).push(row);
+      if (r.status === 'free') free += 1;
+    }
+    if (!physical.length && !paths.length) return toast('These paths are already in the Static Port table.', 'info');
+    if (physical.length) Bindings.add('physical', physical);
+    if (paths.length) Bindings.add('paths', paths);
+    this.picked.clear();
+    Tabs.show('static');
+    Bindings.show(paths.length && !physical.length ? 'paths' : 'physical');
+    toast(`Added ${plural(physical.length + paths.length, 'path')} to Static Port: choose the EPG and enter the VLAN.`
+      + (free ? ` ${plural(free, 'port')} ${free === 1 ? 'has' : 'have'} no interface policy yet: APIC raises a fault on the binding until one is set.` : ''), free ? 'info' : 'success');
+  },
+  download() {
+    const rows = this.shown();
+    const cell = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const head = ['Node', 'Leaf', 'Interface', 'State', 'Speed', 'Use', 'Port-channel / policy group', 'AAEP', 'Connected to', 'Static paths', 'Description', 'Path for a static port'];
+    const lines = rows.map(r => [r.node, r.node_name, r.interface, r.oper, r.speed, FB_USE[r.status][0], r.channel || r.policy_group, r.aaep,
+      r.neighbor ? `${r.neighbor.name} ${r.neighbor.port}`.trim() : '', r.bindings.map(b => `${b.owner} ${b.encap}`).join('; '), r.descr,
+      r.use ? (r.use.kind === 'paths' ? r.use.tdn : `topology/pod-${r.use.pod}/paths-${r.use.node}/pathep-[${r.use.interface}]`) : ''].map(cell).join(','));
+    const blob = new Blob([[head.map(cell).join(','), ...lines].join('\r\n')], {type: 'text/csv'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `interfaces-${Site.current}.csv`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  },
+};
+
+/* =========================================================================
+   Create vPC: a vPC interface policy group and its interface selector on a pair of leaves (Fabric > Access Policies),
+   checked on APIC and recorded in History before it is sent. The portal only adds them; it never changes or deletes one.
+   ========================================================================= */
+// eth1/9 before eth1/10
+const portSort = (x, y) => {
+  const a = (x.match(/\d+/g) || []).map(Number), b = (y.match(/\d+/g) || []).map(Number);
+  for (let i = 0; i < Math.max(a.length, b.length); i += 1) if ((a[i] ?? -1) !== (b[i] ?? -1)) return (a[i] ?? -1) - (b[i] ?? -1);
+  return x.localeCompare(y);
+};
+const VP_SETTINGS = [['aaep', 'AAEP', true], ['lacp', 'Port-channel policy (LACP)', true], ['link', 'Link level', false],
+  ['cdp', 'CDP', false], ['lldp', 'LLDP', false], ['mcp', 'MCP', false]];
+const Vpc = {
+  data: null,       // /api/vpc/options of the site
+  picked: {},       // node -> Set of interfaces
+  canCreate: false,
+  init() {
+    $('#vpLoad').addEventListener('click', e => run(e.currentTarget, () => this.load()));
+    $('#vpPair').addEventListener('change', () => this.pairChanged());
+    $('#vpCopy').addEventListener('change', () => { this.copySettings(); this.update(); });
+    $('#vpOnlyFree').addEventListener('change', () => this.renderPorts());
+    $('#vpSame').addEventListener('change', () => {
+      if ($('#vpSame').checked) this.picked = {};
+      this.renderPorts();
+      this.renderProfile();
+      this.update();
+    });
+    $('#vpPorts tbody').addEventListener('change', e => {
+      const box = e.target.closest('input[data-node]');
+      if (box) this.tick(box.dataset.node, box.value, box.checked);
+    });
+    $('#tab-vpc').addEventListener('input', e => { if (e.target.matches('#vpName, #vpDescr, #vpSelector')) this.update(); });
+    $('#tab-vpc').addEventListener('change', e => { if (e.target.matches('[data-setting]')) this.update(); });
+    $('#vpReviewBtn').addEventListener('click', e => run(e.currentTarget, () => this.review()));
+    $('#vpResetBtn').addEventListener('click', () => this.reset());
+    $('#reviewBody').addEventListener('click', e => {
+      const b = e.target.closest('[data-vp-static]');
+      if (!b) return;
+      $('#reviewDialog').close();
+      this.toStatic(b.dataset.vpStatic);
+    });
+    this.render();
+  },
+  setAccess(on) { this.canCreate = on; this.update(); },
+  onSite() {
+    this.data = null;
+    this.picked = {};
+    this.render();
+  },
+  onShow() { if (!this.data && Site.info(Site.current).configured) run(null, () => this.load()); },
+  async load() {
+    $('#vpPorts tbody').innerHTML = `<tr class="empty-row"><td colspan="3"><div class="loading">Reading the leaves, policy groups and policies of ${esc(Site.current)}…</div></td></tr>`;
+    try {
+      const keep = $('#vpPair').value;
+      this.data = await api('/api/vpc/options');
+      this.canCreate = !!this.data.can_create;
+      $('#vpPair').innerHTML = '<option value="">Choose a vPC pair</option>' + this.data.pairs.map(p => `<option value="${p.nodes.join('-')}">`
+        + `${esc(p.name)} · leaves ${p.nodes.join(' and ')}</option>`).join('');
+      VP_SETTINGS.forEach(([key, label, required]) => {
+        $(`[data-setting="${key}"]`).innerHTML = (required ? `<option value="">Choose the ${esc(label)}</option>` : '<option value="">(APIC default)</option>')
+          + this.data.policies[key].map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
+      });
+      if (this.data.pairs.some(p => p.nodes.join('-') === keep)) $('#vpPair').value = keep;
+      this.pairChanged(true);
+    } finally {
+      this.render();
+    }
+  },
+  pair() { return (this.data?.pairs || []).find(p => p.nodes.join('-') === $('#vpPair').value) || null; },
+  ports(node) { return this.data?.ports[String(node)] || []; },
+  // A new pair: no ports ticked; the settings of a vPC of this pair (the operator can change them)
+  pairChanged(keepPicked = false) {
+    const p = this.pair();
+    if (!keepPicked) this.picked = {};
+    const groups = this.data?.groups || [];
+    const own = p ? groups.filter(g => g.pair === p.nodes.join('-')) : [];
+    const others = groups.filter(g => !own.includes(g));
+    const current = $('#vpCopy').value;
+    $('#vpCopy').innerHTML = '<option value="">Nothing (choose below)</option>'
+      + (own.length ? `<optgroup label="vPCs of this pair">${own.map(g => `<option value="${esc(g.name)}">${esc(g.name)}</option>`).join('')}</optgroup>` : '')
+      + (others.length ? `<optgroup label="Other vPCs of ${esc(Site.current)}">${others.map(g => `<option value="${esc(g.name)}">${esc(g.name)}</option>`).join('')}</optgroup>` : '');
+    $('#vpCopy').value = keepPicked && groups.some(g => g.name === current) ? current : (own[0] || others[0])?.name || '';
+    if (!keepPicked || !current) this.copySettings();
+    this.render();
+  },
+  copySettings() {
+    const g = (this.data?.groups || []).find(x => x.name === $('#vpCopy').value);
+    if (!g) return;
+    VP_SETTINGS.forEach(([key]) => {
+      const sel = $(`[data-setting="${key}"]`);
+      sel.value = [...sel.options].some(o => o.value === g[key]) ? g[key] : '';
+    });
+  },
+  same() { return $('#vpSame').checked; },
+  tick(node, iface, on) {
+    const p = this.pair();
+    if (!p) return;
+    for (const n of this.same() ? p.nodes : [Number(node)]) {
+      const set = this.picked[n] || (this.picked[n] = new Set());
+      if (on) set.add(iface); else set.delete(iface);
+    }
+    this.renderPorts();
+    this.update();
+  },
+  // From Fabric > Interfaces: a pair, and the ports ticked there ({node: [interfaces]})
+  async start(pairKey, ports = {}) {
+    Tabs.show('vpc');
+    if (!this.data) await this.load();
+    if (!this.data.pairs.some(p => p.nodes.join('-') === pairKey)) return toast(`Leaves ${pairKey} are no vPC pair.`, 'info');
+    $('#vpPair').value = pairKey;
+    this.pairChanged();
+    const lists = Object.values(ports).map(l => [...l].sort().join(','));
+    $('#vpSame').checked = lists.length < 2 || lists[0] === lists[1];
+    Object.entries(ports).forEach(([n, list]) => { this.picked[n] = new Set(list); });
+    this.render();
+  },
+  render() {
+    const p = this.pair();
+    $('#vpPairInfo').textContent = p ? `Pod ${p.pod} · ${plural(p.vpcs.length, 'vPC')}` : '';
+    $('#vpPairVpcs').innerHTML = p ? (p.vpcs.map(v => `<span class="chip chip-own">${esc(v)}</span>`).join('') || '<span class="muted">none yet</span>') : '<span class="muted">—</span>';
+    const examples = p ? p.vpcs.slice(0, 3) : [];
+    $('#vpNameHint').textContent = examples.length ? `On this pair: ${examples.join(', ')}${p.vpcs.length > 3 ? ' …' : ''}` : 'Letters, digits and _ . : - (max 64).';
+    $('#vpLeafA').textContent = p ? `Leaf ${p.nodes[0]}` : 'Leaf';
+    $('#vpLeafB').textContent = p ? `Leaf ${p.nodes[1]}` : 'Leaf';
+    this.renderPorts();
+    this.renderProfile();
+    this.update();
+  },
+  free(node, iface) { return this.ports(node).find(x => x.interface === iface)?.status === 'free'; },
+  renderPorts() {
+    $('#vpPorts tbody').innerHTML = this.portsHtml(this.data, this.pair(), this.picked, this.same(), $('#vpOnlyFree').checked);
+  },
+  // The ports of the two leaves, one row per interface (also drawn by the guide of this page)
+  portsHtml(data, p, picked, same, onlyFree) {
+    if (!p) {
+      return `<tr class="empty-row"><td colspan="3"><div class="empty">${icon('server')}<div><b>${data ? 'Choose a vPC pair' : 'Not read yet'}</b>`
+        + `<p>${data ? 'Its ports are listed here.' : `Read from APIC reads the vPC pairs of ${esc(Site.current || 'the site')}.`}</p></div></div></td></tr>`;
+    }
+    const [a, b] = p.nodes, of = n => data.ports[String(n)] || [];
+    const byA = Object.fromEntries(of(a).map(x => [x.interface, x])), byB = Object.fromEntries(of(b).map(x => [x.interface, x]));
+    const names = [...new Set([...Object.keys(byA), ...Object.keys(byB)])].sort((x, y) => portSort(x, y));
+    const has = (n, i) => picked[n]?.has(i);
+    const rows = names.filter(i => !onlyFree || has(a, i) || has(b, i) || (same ? byA[i]?.status === 'free' && byB[i]?.status === 'free'
+      : byA[i]?.status === 'free' || byB[i]?.status === 'free'));
+    const cell = (n, x, i) => {
+      if (!x) return '<td class="muted">—</td>';
+      const usable = x.status === 'free' && (!same || (byA[i]?.status === 'free' && byB[i]?.status === 'free'));
+      const [label, cls] = FB_USE[x.status];
+      const up = x.oper === 'up';
+      const what = x.status === 'free' ? '' : ` <span class="mono">${esc(x.policy_group || x.selector)}</span>`;
+      const peer = x.neighbor ? `<div class="cell-note">${icon('server')} ${esc(x.neighbor.name)} <span class="muted">${esc(x.neighbor.port || '')}</span></div>` : '';
+      return `<td><label class="vp-cell"><input type="checkbox" data-node="${n}" value="${esc(i)}"${has(n, i) ? ' checked' : ''}${usable ? '' : ' disabled'}`
+        + ` aria-label="${esc(i)} on leaf ${n}"><span><span class="badge ${cls}">${label}</span>${what} <span class="badge ${up ? 'badge-new' : ''}">${up ? 'Up' : 'Down'}</span>`
+        + `${x.bindings ? ` <span class="muted">${plural(x.bindings, 'static path')}</span>` : ''}${peer}</span></label></td>`;
+    };
+    return rows.map(i => `<tr${has(a, i) || has(b, i) ? ' class="is-picked"' : ''}><td class="mono"><b>${esc(i)}</b></td>${cell(a, byA[i], i)}${cell(b, byB[i], i)}</tr>`).join('')
+      || `<tr class="empty-row"><td colspan="3"><div class="empty-inline">No port is free ${same ? 'on both leaves' : 'on these leaves'}.</div></td></tr>`;
+  },
+  // Where the selector goes, as the server will decide: the profile of the pair (same ports), else one profile per leaf
+  renderProfile() {
+    const p = this.pair();
+    $('#vpProfile').innerHTML = this.profileHtml(p, !p || this.same() || this.list(p.nodes[0]).join() === this.list(p.nodes[1]).join());
+  },
+  // Where the selector goes (also drawn by the guide of this page)
+  profileHtml(p, sameNow) {
+    if (!p) return '—';
+    const [a, b] = p.nodes, pr = p.profiles;
+    return pr.pair.length && sameNow
+      ? `One selector in <b class="mono">${esc(pr.pair[0])}</b> (applies to leaves ${a} and ${b}).`
+      : pr.leaf[a].length && pr.leaf[b].length
+        ? `One selector in each: <b class="mono">${esc(pr.leaf[a][0])}</b> (leaf ${a}) and <b class="mono">${esc(pr.leaf[b][0])}</b> (leaf ${b}).`
+        : pr.pair.length ? `<span class="text-danger">Profile ${esc(pr.pair[0])} applies to both leaves: tick the same ports on both.</span>`
+          : '<span class="text-danger">No interface profile applies to these leaves: create the leaf and interface profiles on APIC first.</span>';
+  },
+  list(node) { return [...(this.picked[node] || [])].sort((x, y) => portSort(x, y)); },
+  request() {
+    const p = this.pair();
+    return {pair: p ? p.nodes.join('-') : '', name: $('#vpName').value.trim(), descr: $('#vpDescr').value.trim(), selector: $('#vpSelector').value.trim(),
+      ports: p ? Object.fromEntries(p.nodes.map(n => [String(n), this.list(n)])) : {},
+      settings: Object.fromEntries(VP_SETTINGS.map(([key]) => [key, $(`[data-setting="${key}"]`).value]).filter(([, v]) => v))};
+  },
+  update() {
+    const p = this.pair(), r = this.request();
+    const counts = p ? p.nodes.map(n => this.list(n).length) : [0, 0];
+    $('#vpPicked').textContent = p ? `${counts[0]} on leaf ${p.nodes[0]}, ${counts[1]} on leaf ${p.nodes[1]}` : '';
+    $('#vpSelector').placeholder = r.name ? r.name.replace(/-PG$/, '') : 'From the policy group name';
+    $('#vpContext').innerHTML = p ? crumbs([p.name, `${counts[0] + counts[1]} ports`, r.name || 'no name yet'])
+      : '<span class="muted">Choose a vPC pair, the ports and a policy group name</span>';
+    $('#vpNoPerm').hidden = !this.data || this.canCreate;
+    $('#vpReviewBtn').disabled = !(p && counts[0] && counts[1] && r.name && r.settings.aaep && r.settings.lacp);
+    this.renderProfile();
+  },
+  async reset() {
+    if (!await confirmDialog({title: 'Clear form?', body: 'The ports, the name and the settings of the new vPC will be cleared.', confirmLabel: 'Clear form', danger: true})) return;
+    this.picked = {};
+    ['#vpName', '#vpDescr', '#vpSelector'].forEach(id => { $(id).value = ''; });
+    $('#vpSame').checked = true;
+    $('#vpPair').value = '';
+    this.pairChanged();
+  },
+  planHtml(d) {
+    const ports = Object.entries(d.ports).map(([n, list]) => `leaf ${esc(n)} ${esc(list.join(', '))}`).join('; ');
+    return (d.applied ? `<div class="success-state"><span class="success-icon">${icon('check')}</span><div><b>vPC ${esc(d.name)} created on ${esc(d.site)}.</b>`
+        + `<div class="muted">${d.audit_id ? `Recorded in History as change #${Number(d.audit_id)}.` : 'Recorded in History.'} ${d.path_ready ? 'APIC shows its path now.' : 'APIC does not show its path yet: it usually appears within a minute.'}</div>`
+        + `<div class="success-actions"><button type="button" class="btn btn-primary btn-sm" data-vp-static="${esc(d.path)}">${icon('plug')}Bind on Static Port</button></div></div></div>` : '')
+      + siteBanner(d.site, `vPC pair <b>${esc(d.pair_name)}</b> (leaves ${d.nodes.join(' and ')}) · ${ports} · sent in a single APIC transaction`)
+      + (d.blocked.length ? alertBox('danger', `<b>Nothing can be applied.</b><ul>${d.blocked.map(t => `<li>${esc(t)}</li>`).join('')}</ul>`) : '')
+      + (!d.applied && !d.blocked.length && !this.canCreate ? alertBox('info', 'Your account can review a new vPC, but not create it. An administrator can allow it on the Users page (<b>ACI: create vPCs</b>).') : '')
+      + (d.warnings.length ? alertBox('warning', `<b>Warnings</b><ul>${d.warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul>`) : '')
+      + `<h3 class="detail-title">The path for Static Port</h3><p class="mono">${esc(d.path)}</p>`
+      + `<div class="vp-steps">${stepsTable(d.steps)}</div>`
+      + `<h3 class="detail-title">Checked on APIC</h3><ul class="vp-check">${d.checks.map(c => `<li class="${c.ok ? 'is-ok' : 'is-bad'}">${icon(c.ok ? 'check' : 'x')}<span>${esc(c.text)}</span></li>`).join('')}</ul>`
+      + (d.payload ? `<details class="payload"><summary>JSON payload for APIC</summary><pre>${esc(JSON.stringify(d.payload, null, 2))}</pre></details>` : '');
+  },
+  async review() {
+    const req = this.request();
+    const d = await api('/api/vpc/preview', req);
+    Review.open({
+      title: 'Review new vPC',
+      body: this.planHtml(d),
+      confirmLabel: `Create vPC on ${d.site}`,
+      canConfirm: !d.blocked.length && this.canCreate,
+      onConfirm: async () => {
+        const r = await api('/api/vpc/apply', req);
+        Audit.markStale();
+        toast(`vPC ${r.name} created on ${r.site}.`, 'success');
+        // The ports are used now: read them again here and on Interfaces
+        this.picked = {};
+        Fabric.data = null;
+        Fabric.render();
+        run(null, () => this.load());
+        return this.planHtml(r);
+      },
+    });
+  },
+  // The new vPC to Static Port, as a path row (the EPG and the VLAN are chosen there)
+  toStatic(tdn) {
+    const have = Bindings.paths.some(b => Bindings.tdnOf('paths', b) === tdn);
+    if (!have) Bindings.add('paths', [Bindings.newRow('paths', {tdn})]);
+    Tabs.show('static');
+    Bindings.show('paths');
+    toast('Added the vPC path to Static Port: choose the EPG and enter the VLAN.', 'success');
+  },
+};
+
 const Report = {
   target: null,
   rows: [],
@@ -2806,9 +3257,7 @@ const Report = {
     // The type cards count the rows of the selected source; the source list counts all rows.
     const bySource = this.rows.filter(r => !this.source || r.source === this.source);
     const count = type => bySource.filter(r => r['Binding Type'] === type).length;
-    $('#rpKpis').innerHTML = [['', 'Total bindings', bySource.length], ['Physical', 'Physical', count('Physical')], ['PC', 'Port-Channel', count('PC')], ['vPC', 'vPC', count('vPC')]]
-      .map(([type, label, n]) => `<button type="button" class="kpi${this.type === type ? ' is-active' : ''}" data-type="${type}" aria-pressed="${this.type === type}">`
-        + `<span class="kpi-value">${n}</span><span class="kpi-label">${label}</span></button>`).join('');
+    $('#rpKpis').innerHTML = this.kpisHtml(bySource, this.type);
     const options = `<option value="">All sources (${this.rows.length})</option>` + SOURCES.map(([k, label]) => `<option value="${k}"${this.source === k ? ' selected' : ''}>`
       + `${label} (${this.rows.filter(r => r.source === k).length})</option>`).join('');
     if ($('#rpSource').dataset.html !== options) {   // rebuilt only when a count changed
@@ -2829,11 +3278,20 @@ const Report = {
       : !this.rows.length ? ['table', 'No static bindings', `No static bindings match these filters on ${Site.current}.`]
         : ['search', 'No results found', 'Change the search terms or select another type or source.'];
     // A binding the portal set that APIC no longer has: its row shows the portal's values, muted.
-    $('#rpTable tbody').innerHTML = rows.map(r => `<tr${r.source === 'removed' ? ' class="is-removed"' : ''}><td>${esc(r.Tenant)}</td><td>${esc(r['Application Profile'])}</td><td>${esc(r.EPG)}</td><td>${esc(r.VLAN)}</td>`
+    $('#rpTable tbody').innerHTML = rows.map(r => this.rowHtml(r)).join('')
+      || `<tr class="empty-row"><td colspan="12"><div class="empty">${icon(empty[0])}<div><b>${esc(empty[1])}</b><p>${esc(empty[2])}</p></div></div></td></tr>`;
+  },
+  kpisHtml(rows, current) {
+    const count = type => rows.filter(r => r['Binding Type'] === type).length;
+    return [['', 'Total bindings', rows.length], ['Physical', 'Physical', count('Physical')], ['PC', 'Port-Channel', count('PC')], ['vPC', 'vPC', count('vPC')]]
+      .map(([type, label, n]) => `<button type="button" class="kpi${current === type ? ' is-active' : ''}" data-type="${type}" aria-pressed="${current === type}">`
+        + `<span class="kpi-value">${n}</span><span class="kpi-label">${label}</span></button>`).join('');
+  },
+  rowHtml(r) {
+    return `<tr${r.source === 'removed' ? ' class="is-removed"' : ''}><td>${esc(r.Tenant)}</td><td>${esc(r['Application Profile'])}</td><td>${esc(r.EPG)}</td><td>${esc(r.VLAN)}</td>`
       + `<td><span class="badge">${esc(r['Binding Type'])}</span></td><td>${esc(r['Node(s)'])}</td><td>${esc(r['Interface / Policy Group'])}</td>`
       + `<td>${esc(MODE_LABEL[r.Mode] || r.Mode)}</td><td>${esc(IMMEDIACY_LABEL[r['Deployment Immediacy']] || r['Deployment Immediacy'])}</td>`
-      + `<td>${this.sourceHtml(r)}</td><td>${esc(apicTime(r['Last Changed (APIC)'])) || '<span class="muted">—</span>'}</td><td class="mono">${esc(r['Path TDN'])}</td></tr>`).join('')
-      || `<tr class="empty-row"><td colspan="12"><div class="empty">${icon(empty[0])}<div><b>${esc(empty[1])}</b><p>${esc(empty[2])}</p></div></div></td></tr>`;
+      + `<td>${this.sourceHtml(r)}</td><td>${esc(apicTime(r['Last Changed (APIC)'])) || '<span class="muted">—</span>'}</td><td class="mono">${esc(r['Path TDN'])}</td></tr>`;
   },
   download(fmt) {
     return downloadFile(withSite(`/export/report.${fmt}?` + qs(this.target.values())), `report.${fmt}`);
@@ -2925,15 +3383,22 @@ const IpUsage = {
   },
   render() {
     const shown = this.visible();
-    const total = key => shown.reduce((n, {r}) => n + (Number(r[key]) || 0), 0);
-    $('#ipKpis').innerHTML = [['Subnets', shown.filter(({r}) => r.subnet).length], ['Learned IPs', total('learned')], ['Free IPs', total('free')],
-      [`Not learned now, seen in the last ${this.recentDays} days`, shown.reduce((n, {r}) => n + r.seen_recently.length, 0)]]
-      .map(([label, n]) => `<div class="kpi kpi-static"><span class="kpi-value">${n}</span><span class="kpi-label">${esc(label)}</span></div>`).join('');
+    $('#ipKpis').innerHTML = this.kpisHtml(shown.map(({r}) => r));
     $('#ipShown').textContent = this.loaded ? `Showing ${shown.length} of ${plural(this.rows.length, 'row')}` : '';
     const empty = !this.loaded ? ['globe', 'No data yet', 'Choose filters (or leave them empty for everything), then click Show.']
       : !this.rows.length ? ['globe', 'No EPG subnets', `No EPG in these filters has a subnet or a learned IP on ${Site.current}.`]
         : ['search', 'No results found', 'Change the search terms, or show all addresses and subnets without learned IPs.'];
-    $('#ipTable tbody').innerHTML = shown.map(({r, i}) => `<tr data-id="${i}" tabindex="0"><td>${esc(r.tenant)}<div class="muted cell-note">${esc(r.app)}</div></td>`
+    $('#ipTable tbody').innerHTML = shown.map(({r, i}) => this.rowHtml(r, i)).join('')
+      || `<tr class="empty-row"><td colspan="6"><div class="empty">${icon(empty[0])}<div><b>${esc(empty[1])}</b><p>${esc(empty[2])}</p></div></div></td></tr>`;
+  },
+  kpisHtml(rows) {
+    const total = key => rows.reduce((n, r) => n + (Number(r[key]) || 0), 0);
+    return [['Subnets', rows.filter(r => r.subnet).length], ['Learned IPs', total('learned')], ['Free IPs', total('free')],
+      [`Not learned now, seen in the last ${this.recentDays} days`, rows.reduce((n, r) => n + r.seen_recently.length, 0)]]
+      .map(([label, n]) => `<div class="kpi kpi-static"><span class="kpi-value">${n}</span><span class="kpi-label">${esc(label)}</span></div>`).join('');
+  },
+  rowHtml(r, i) {
+    return `<tr data-id="${i}" tabindex="0"><td>${esc(r.tenant)}<div class="muted cell-note">${esc(r.app)}</div></td>`
       + `<td><b>${esc(r.epg)}</b></td><td>${r.subnet ? `<span class="mono">${esc(r.subnet)}</span>` : '<span class="muted">No subnet on the BD</span>'}`
       + `${r.scope === 'private' ? ' <span class="badge">Private</span>' : ''}`
       + `${r.gateways.length ? `<div class="muted cell-note mono">gateway ${esc(r.gateways.join(', '))}</div>` : ''}</td>`
@@ -2941,18 +3406,22 @@ const IpUsage = {
       + `<td>${r.free === null ? '—' : `${r.free} <span class="muted">of ${r.size}</span>`}`
       + `${r.seen_recently.length ? `<div class="muted cell-note">${r.seen_recently.length} seen recently, not suggested</div>` : ''}</td>`
       + `<td class="ip-suggest">${r.suggest.length ? `<div class="chips">${this.chips(r.suggest, 2)}${r.free > 2 ? `<span class="muted">+${r.free - 2} more</span>` : ''}</div>`
-        : '<span class="muted">—</span>'}</td></tr>`).join('')
-      || `<tr class="empty-row"><td colspan="6"><div class="empty">${icon(empty[0])}<div><b>${esc(empty[1])}</b><p>${esc(empty[2])}</p></div></div></td></tr>`;
+        : '<span class="muted">—</span>'}</td></tr>`;
   },
   open(i) {
     const r = this.rows[i];
     if (!r) return;
+    $('#ipDialogTitle').textContent = `${r.epg} · ${r.subnet || 'no subnet'}`;
+    $('#ipDialogBody').innerHTML = this.dialogHtml(r);
+    if (!$('#ipDialog').open) $('#ipDialog').showModal();
+    $('#ipDialogBody').scrollTop = 0;
+  },
+  dialogHtml(r) {
     const meta = [['Tenant', r.tenant], ['Application profile', r.app], ['EPG', r.epg], ['Bridge domain', r.bd || '—'],
       ['Subnet', r.subnet || 'No subnet on the bridge domain'], ['Gateway', r.gateways.join(', ') || '—'], ['Scope', r.scope === 'public' ? 'Public' : 'Private'],
       ['Usable addresses', r.size ?? '—'], ['Learned in this EPG', r.learned], ['Learned in other EPGs', r.used_elsewhere || 0], ['Free', r.free ?? '—']];
     const learned = r.endpoints;
-    $('#ipDialogTitle').textContent = `${r.epg} · ${r.subnet || 'no subnet'}`;
-    $('#ipDialogBody').innerHTML = siteBanner(r.site, `EPG <code>${esc(r.epg_dn)}</code> · addresses of this site's fabric only`)
+    return siteBanner(r.site, `EPG <code>${esc(r.epg_dn)}</code> · addresses of this site's fabric only`)
       + `<dl class="meta-grid">${meta.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join('')}</dl>`
       + (r.suggest.length ? `<h3 class="detail-title">Suggested free IPs</h3><div class="chips">${this.chips(r.suggest)}</div>`
         + `<p class="hint">Not a gateway, not learned on any endpoint of the ${esc(r.site)} fabric, and not seen by the portal in the last ${this.recentDays} days. `
@@ -2970,8 +3439,6 @@ const IpUsage = {
         + `<details class="payload"><summary>${plural(r.free_ranges.length, 'range')}</summary><pre>${esc(r.free_ranges.join('\n'))}</pre></details>`
         + `<p><button type="button" class="btn btn-secondary btn-sm" data-copy="${esc(r.free_ranges.join('\n'))}" data-label="${plural(r.free, 'free address', 'free addresses')}">`
         + `${icon('copy')}Copy free addresses</button></p>` : '');
-    if (!$('#ipDialog').open) $('#ipDialog').showModal();
-    $('#ipDialogBody').scrollTop = 0;
   },
 };
 
@@ -2988,6 +3455,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   ProductDialog.init();
   Provision.init();
   Report.init();
+  Fabric.init();
+  Vpc.init();
   IpUsage.init();
   Activity.init();
   $('#siteSwitch').addEventListener('change', async e => {

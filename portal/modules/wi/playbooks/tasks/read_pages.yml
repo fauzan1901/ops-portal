@@ -1,0 +1,22 @@
+# The next pages of the REST lists of this phase (wi_analysis.next_pages / merge_pages): ONTAP _links.next and NSX cursor
+# one page per round, vCloud Director every announced page in the first round; each round merges what it read into the
+# list, so the next phase and the rating see the whole list. Included once per round from phase.yml.
+- name: "Next pages of the lists: what to read"
+  ansible.builtin.set_fact:
+    wi_pages: "{{ wi_data | wi_next_pages(wi_reads) }}"
+  when: not (wi_pages_done | default(false) | bool)
+
+- name: "Next pages of the lists: read"
+  ansible.builtin.include_tasks: read_rest.yml
+  loop: [ontap, nsxt, vcd]
+  loop_control:
+    loop_var: rest_source
+  vars:
+    wi_reads: "{{ wi_pages }}"   # read_rest.yml reads wi_reads[rest_source]: here the pages
+  when: not (wi_pages_done | default(false) | bool) and (wi_pages[rest_source] | default({})) | length > 0
+
+- name: "Next pages of the lists: merged"
+  ansible.builtin.set_fact:
+    wi_data: "{{ wi_data | wi_merge_pages(wi_reads) }}"
+    wi_pages_done: "{{ (wi_pages.ontap | length) + (wi_pages.nsxt | length) + (wi_pages.vcd | length) == 0 }}"
+  when: not (wi_pages_done | default(false) | bool)

@@ -73,7 +73,6 @@ def pname(names, pid):
 # One volume at a time: the next retype / migration starts only when this one finished (WI). Seconds to wait for one.
 RETYPE_WAIT = 7200
 MIGRATE_WAIT = 14400
-PER_RUN = 10   # volumes one fix handles; the check is run again for the rest
 
 
 def table_rows(text):
@@ -382,7 +381,9 @@ class VolumeTypeLegacy:
         if project and not pid:
             return {}
         scope = f" --tenant {q(pid)}" if pid else ""
-        return {"openstack": {"volumes": f"cinder list --all-tenants{scope} --fields {CINDER_FIELDS}"}}
+        # the snapshots: a volume with snapshots cannot be retyped with a migration (they are deleted first, when approved)
+        return {"openstack": {"volumes": f"cinder list --all-tenants{scope} --fields {CINDER_FIELDS}",
+                              "snapshots": "openstack volume snapshot list --all-projects --long -f json"}}
 
     @staticmethod
     def analyze(data, params, ctx):
@@ -424,35 +425,63 @@ class VolumeTypeLegacy:
                           pname(names, v["project"])] for v in vols]})
         busy = [v for v in vols if v["status"] not in ("available", "in-use")]
         ready = [v for v in vols if v["status"] in ("available", "in-use")]
+        snaps_item = source(data, "snapshots")
+        snaps_all = json_of(snaps_item) if not unavailable(snaps_item) else []
+        snaps_of = {}
+        for x in snaps_all if isinstance(snaps_all, list) else []:
+            if isinstance(x, dict) and UUID.match(str(x.get("ID") or "")):
+                snaps_of.setdefault(str(x.get("Volume") or x.get("volume_id") or ""), []).append(x)
+        snapped = lambda v: snaps_of.get(v["id"]) or (snaps_of.get(v["name"]) if v["name"] else None) or []
+        if vols and unavailable(snaps_item):
+            r.step("snapshots", "Snapshots of these volumes", "warn",
+                   f"Snapshots were not read ({unavailable(snaps_item)}): a volume with snapshots cannot be retyped; the "
+                   "operation checks them again before each volume.")
+        elif vols:
+            with_snaps = [v for v in vols if snapped(v)]
+            r.step("snapshots", "Snapshots of these volumes", "warn" if with_snaps else "ok",
+                   (f"{len(with_snaps)} volume(s) have snapshots ({sum(len(snapped(v)) for v in with_snaps)} in total): a volume "
+                    "with snapshots cannot be retyped with a migration. Their snapshots are deleted first, when their PIC "
+                    "approved it (tick the volume)." if with_snaps else "No snapshot: every volume can be retyped as it is."),
+                   {"columns": ["Volume", "Snapshot", "Name", "Size", "Status", "Created"],
+                    "rows": [[v["name"] or v["id"], str(x.get("ID")), str(x.get("Name") or "-"), f"{x.get('Size') or '-'} GiB",
+                              str(x.get("Status") or "-"), str(x.get("Created At") or x.get("created_at") or "-")[:19]]
+                             for v in with_snaps for x in snapped(v)]})
         projects = {}
         for v in ready:
             projects.setdefault(v["project"], []).append(v)
         for pid, pvols in list(projects.items())[:10]:   # one per project: each customer agrees its own time
-            cmds, act = [], []
-            for v in pvols[:25]:
+            cmds, items = [], []
+            for v in pvols[:40]:
+                snap_ids = [str(x.get("ID")) for x in snapped(v)]
+                cmds += [f"openstack volume snapshot delete {sid}   # snapshot of {v['name'] or 'no name'} (approved by the PIC)"
+                         for sid in snap_ids]
                 cmds += [f"cinder retype --migration-policy on-demand {v['id']} {q(legacy[v['type']])}   "
                          f"# {v['name'] or 'no name'}, {v['size']:.0f} GiB, {v['status']}",
                          f"openstack volume show {v['id']} -c volume_type -c status -c migration_status   "
                          f"# until status is {v['status']} again and migration_status success, before the next volume"]
-            for v in pvols[:PER_RUN]:   # one after the other: the next retype starts when this one finished
-                act += [f"require volume {v['id']} status available,in-use",
-                        f"cinder retype --migration-policy on-demand {v['id']} {q(legacy[v['type']])}", "sleep 5",
-                        f"wait volume {v['id']} status available,in-use,error {RETYPE_WAIT}",
-                        f"require volume {v['id']} status available,in-use", f"require volume {v['id']} migration_status success,None",
-                        f"openstack volume show {v['id']} -c volume_type -c status -c migration_status"]
+                items.append({"label": f"{v['name'] or v['id']} ({v['size']:.0f} GiB, {v['status']})"
+                                       + (f" + delete {len(snap_ids)} snapshot(s)" if snap_ids else ""),
+                              "commands": [f"retype-volume {v['id']} to {legacy[v['type']]} timeout {RETYPE_WAIT} "
+                                           f"snapshots {','.join(snap_ids[:50]) or '-'}"],
+                              "default": not snap_ids,
+                              "disabled": f"{len(snap_ids)} snapshots: more than 50, delete them first" if len(snap_ids) > 50 else ""})
+            with_snaps = [v for v in pvols[:40] if snapped(v)]
             r.recommend(f"Change the volume type of {len(pvols)} volume(s) of project {pname(names, pid)}, one at a time. "
                         "Agree a time with the customer: the retype copies the data to the new pool; the next volume starts when the "
-                        "previous one is back to its status with migration_status success. In Horizon: Project → Volumes → Change "
-                        "Volume Type, migration policy On Demand (not possible in the Service Portal). Then retry the snapshot / "
-                        "resize / backup."
-                        + (f" The portal changes the first {PER_RUN} per run; run the check again for the rest." if len(pvols) > PER_RUN else ""),
+                        "previous one is back to its status with the new type. A volume with snapshots is retyped only after its "
+                        "snapshots are deleted: tick it only when the PIC approved deleting them (Volume snapshots column; they are "
+                        "deleted right before its retype). In Horizon: Project → Volumes → Change Volume Type, migration policy On "
+                        "Demand (not possible in the Service Portal). Then retry the snapshot / resize / backup.",
                         cmds, where=director(ctx),
-                        items={"columns": ["Volume", "ID", "Type", "Change to", "Size", "Status", "Changes"],
+                        items={"columns": ["Volume", "ID", "Type", "Change to", "Size", "Status", "Volume snapshots"],
                                "rows": [[v["name"] or "(no name)", v["id"], v["type"], legacy[v["type"]], f"{v['size']:.0f} GiB", v["status"],
-                                         "in this run" if i < PER_RUN else "next run"] for i, v in enumerate(pvols[:25])]},
-                        warning="If a retype stops with the volume reserved or retyping, run the check \"Instances or volumes "
-                                "stuck\": it gives the rollback commands of the WI \"Rollback Volume Type\" for that volume.",
-                        action=os_fix(act, f"volume types of project {pname(names, pid)}", label="Change the volume types"))
+                                         len(snapped(v)) or "-"] for v in pvols[:40]]},
+                        warning=((f"{len(with_snaps)} volume(s) have snapshots: deleting them cannot be undone (Backup Scheduler "
+                                  "snapshots too). " if with_snaps else "")
+                                 + "If a retype stops with the volume reserved or retyping, run the check \"Instances or volumes "
+                                   "stuck\": it gives the rollback commands of the WI \"Rollback Volume Type\" for that volume."),
+                        action=os_select(items, f"volume types of project {pname(names, pid)}", "Change the type of the ticked volumes",
+                                         "volumes", lock="volume-migration", stop_on_failure=False, item_timeout=RETYPE_WAIT + 1800))
         if len(projects) > 10:
             r.recommend(f"{len(projects) - 10} more project(s) have volumes on an old type: run the check again per project.")
         if busy:

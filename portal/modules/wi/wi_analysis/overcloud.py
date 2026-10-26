@@ -105,7 +105,80 @@ COMMANDS = {
     # real CPU (over 2 seconds) and memory use of a compute (Live migrate: destinations under a usage limit); the same
     # command as wi_ops.USAGE_COMMAND, read just before each migration
     "usage": lambda a: USAGE_COMMAND,
+    # OVN Southbound DB, read through the ovn_controller container of a compute (as the WI "FDB Learning Issue"):
+    # --no-leader-only reads from any member of the cluster; JSON for the analysis
+    "ovn_dp": lambda a: f"{OVN_SB} --format=json --columns=_uuid,tunnel_key,external_ids find datapath_binding external_ids:name=neutron-{a[0]}",
+    "ovn_pb": lambda a: (f"{OVN_SB} --format=json --columns=_uuid,logical_port,mac,port_security,tunnel_key,type,chassis,up "
+                         f"find port_binding datapath={a[0]}"),
+    "ovn_fdb": lambda a: f"{OVN_SB} --format=json --columns=_uuid,mac,dp_key,port_key find fdb dp_key={a[0]}",
+    # every FDB entry per datapath, and the ports that accept any MAC ("unknown": port security disabled)
+    "ovn_fdb_count": lambda a: f"{OVN_SB} --bare --columns=dp_key list fdb | grep . | sort | uniq -c | sort -rn | head -n 50",
+    "ovn_unknown": lambda a: (f"{OVN_SB} --bare --columns=logical_port,mac,type list port_binding"
+                              " | awk 'BEGIN{RS=\"\";FS=\"\\n\"} $2 ~ /(^| )unknown( |$)/ {print $1\"|\"$3}' | head -n 1000"),
+    "ovn_version": lambda a: "sudo -n podman exec ovn_controller ovn-controller --version 2>&1 | head -n 2",
+    # whether this node can read the OVN Southbound DB (the FDB check tries several nodes, uses the first that answers)
+    "ovn_sb": lambda a: f"{OVN_SB} --bare --columns=_uuid list SB_Global",
+    # OVN NB / SB databases of the controllers (check OVN database cluster): the model from the file itself (CLUSTER =
+    # RAFT, RHOSP 17.x; JSON = active / backup in the Pacemaker bundle ovn-dbs-bundle, 16.2), the RAFT state of each
+    # member, northd, the replication of 16.2, the size of the DBs and of MAC_Binding
+    # the header of the NB database file: "OVSDB CLUSTER ..." (RAFT, 17.x) or "OVSDB JSON ..." (standalone, 16.2)
+    "ovn_model": lambda a: "sudo -n head -c 13 /var/lib/openvswitch/ovn/ovnnb_db.db 2>/dev/null; echo",
+    "ovn_nb_raft": lambda a: ("sudo -n podman exec ovn_cluster_north_db_server ovs-appctl -t /var/run/ovn/ovnnb_db.ctl "
+                              "cluster/status OVN_Northbound"),
+    "ovn_sb_raft": lambda a: ("sudo -n podman exec ovn_cluster_south_db_server ovs-appctl -t /var/run/ovn/ovnsb_db.ctl "
+                              "cluster/status OVN_Southbound"),
+    "ovn_northd": lambda a: ("c=$(sudo -n podman ps --format '{{.Names}}' | grep -E '^ovn_cluster_northd$|^ovn-dbs-bundle' | head -n 1); "
+                             "[ -n \"$c\" ] && sudo -n podman exec \"$c\" ovn-appctl -t ovn-northd status"),
+    "ovn_sync": lambda a: ("c=$(sudo -n podman ps -q --filter name=ovn-dbs-bundle | head -n 1); [ -n \"$c\" ] || exit 3; "
+                           "for d in nb sb; do for s in /var/run/ovn/ovn${d}_db.ctl /var/run/openvswitch/ovn${d}_db.ctl; do "
+                           "if sudo -n podman exec \"$c\" test -S \"$s\"; then echo \"== $d\"; "
+                           "sudo -n podman exec \"$c\" ovs-appctl -t \"$s\" ovsdb-server/sync-status; break; fi; done; done"),
+    "ovn_dbsize": lambda a: "sudo -n ls -l /var/lib/openvswitch/ovn/ 2>/dev/null | grep -E 'ovn(nb|sb)_db.db$'",
+    "ovn_macb": lambda a: f"{OVN_SB} --bare --columns=_uuid list MAC_Binding | grep -c .",
+    # RabbitMQ (check RabbitMQ queues): the queues of the cluster with their messages and consumers, and the file
+    # descriptors / sockets of the node
+    "rabbit_queues": lambda a: ("sudo -n podman exec $(sudo -n podman ps -q --filter name=rabbitmq-bundle | head -n 1) "
+                                "rabbitmqctl -q list_queues name messages consumers"),
+    "rabbit_status": lambda a: ("sudo -n podman exec $(sudo -n podman ps -q --filter name=rabbitmq-bundle | head -n 1) "
+                                "rabbitmqctl -q status"),
+    # Galera (check Galera replication): wsrep state and connections of the node, with the root option file of the
+    # galera container (no password passes through the portal)
+    "galera_status": lambda a: ("sudo -n podman exec $(sudo -n podman ps -q --filter name=galera-bundle | head -n 1) mysql -B -N -e "
+                                "\"SHOW GLOBAL STATUS WHERE Variable_name IN ('wsrep_cluster_size','wsrep_cluster_status',"
+                                "'wsrep_local_state_comment','wsrep_ready','wsrep_flow_control_paused','wsrep_local_recv_queue_avg',"
+                                "'Threads_connected','Max_used_connections'); SHOW GLOBAL VARIABLES LIKE 'max_connections';\""),
+    # certmonger (check certmonger certificates): every certificate it tracks (TLS everywhere), only the lines the check
+    # rates (a controller tracks dozens: the full output is thousands of lines)
+    "getcert": lambda a: (f"command -v getcert >/dev/null || {{ echo '{NO_CERTMONGER}'; exit 0; }}; sudo -n getcert list | grep -E "
+                          "'^(Number of|Request ID)|^[[:space:]]+(status|stuck|ca-error|CA|subject|expires|certificate|auto-renew):'"),
+    # frames the instance sends with a MAC that is not its own (what fills the FDB), a few seconds on its tap device
+    "ovn_capture": lambda a: (f"command -v tcpdump >/dev/null || {{ echo 'tcpdump is not installed on this compute'; exit 0; }}; "
+                              f"sudo -n timeout {int(a[1])} tcpdump -nnei {a[0]} -c 200 -Q in 'not ether src {mac_text(a[2])}' 2>&1; true"),
 }
+OVN_SB = "sudo -n podman exec ovn_controller ovn-sbctl --no-leader-only"
+NO_CERTMONGER = "certmonger is not installed on this node"
+TAP_RE = re.compile(r"^tap[0-9a-f]{8}-[0-9a-f]{2}$")
+MAC_ARG = re.compile(r"^[0-9a-f]{12}$")   # a MAC without its colons (":" separates the arguments of a read)
+
+
+def mac_text(value):
+    """fa163e0bcc31 -> fa:16:3e:0b:cc:31"""
+    value = str(value).lower()
+    if not MAC_ARG.match(value):
+        raise ValueError("invalid MAC")
+    return ":".join(value[i:i + 2] for i in range(0, 12, 2))
+
+
+def mac_arg(mac):
+    """fa:16:3e:0b:cc:31 -> fa163e0bcc31 (the form of a read argument)"""
+    value = str(mac or "").lower().replace(":", "")
+    if not MAC_ARG.match(value):
+        raise ValueError("invalid MAC")
+    return value
+
+
+# the arguments of the reads that take some, each validated: a UUID, a number, a tap device, a MAC
+ARGS = {"ovn_dp": ("uuid",), "ovn_pb": ("uuid",), "ovn_fdb": ("int",), "ovn_capture": ("tap", "seconds", "mac")}
 USAGE_COMMAND = "head -n 1 /proc/stat; grep -E '^(MemTotal|MemAvailable):' /proc/meminfo; sleep 2; head -n 1 /proc/stat"
 PARALLEL = ("use_",)   # reads whose keys start so run on all their nodes at once (each node once, short reads)
 READ_RE = re.compile(r"^(?P<node>[A-Za-z0-9][A-Za-z0-9_.-]{0,62})\|(?P<ip>[0-9.]{7,15})\|(?P<user>[a-z-]{5,20})\|"
@@ -140,6 +213,14 @@ def parse(value):
             raise ValueError(f"invalid log read {value!r}")
         if any(not (UUID_RE.match(a) or REQ_RE.match(a)) for a in args[2:]):
             raise ValueError(f"invalid log filter in {value!r}")
+    elif cmd in ARGS:
+        kinds = ARGS[cmd]
+        ok = len(args) == len(kinds) and all(
+            UUID_RE.match(v) if k == "uuid" else v.isdigit() and int(v) < 10 ** 9 if k == "int" else TAP_RE.match(v) if k == "tap"
+            else v.isdigit() and 1 <= int(v) <= 30 if k == "seconds" else MAC_ARG.match(v) if k == "mac" else False
+            for k, v in zip(kinds, args))
+        if not ok:
+            raise ValueError(f"invalid arguments of {cmd}: {value!r}")
     elif args:
         raise ValueError(f"{cmd} takes no argument")
     return node, ip, user, COMMANDS[cmd](args)

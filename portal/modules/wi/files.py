@@ -118,6 +118,19 @@ def progress_path(action_id):
     return os.path.join(_dir("raw"), f"progress-{int(action_id)}.json")
 
 
+def live_path(action_id):
+    """The output of the item of a fix that runs now (playbooks/tasks/live_director.yml), the last lines."""
+    return os.path.join(_dir("raw"), f"live-{int(action_id)}.txt")
+
+
+def live(action_id, limit=400):
+    try:
+        with open(live_path(action_id), encoding="utf-8", errors="replace") as f:   # without the markers of the script
+            return [l for l in f.read().splitlines() if not l.startswith("@@WI@@")][-limit:]
+    except OSError:
+        return []
+
+
 def progress(action_id):
     try:
         with open(progress_path(action_id), encoding="utf-8") as f:

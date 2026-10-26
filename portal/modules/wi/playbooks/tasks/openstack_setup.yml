@@ -18,7 +18,8 @@
     # Director = management host (same IP): the commands run on that host, without a second ssh.
     director_prefix: >-
       {{ cfg.director.command | default('bash -c' if cfg.director.host == cfg.mgmt.host else
-         'ssh -o BatchMode=yes -o ConnectTimeout=15 -p ' ~ (cfg.director.port | default(22)) ~ ' '
+         'ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -p '
+         ~ (cfg.director.port | default(22)) ~ ' '
          ~ ((cfg.director.user ~ '@' ~ cfg.director.host) | quote)) }}
 
 - name: Register the OpenStack management host
@@ -30,5 +31,5 @@
     ansible_ssh_private_key_file: "{{ cfg.mgmt.private_key | default(omit) }}"
     ansible_connection: "{{ cfg.mgmt.connection | default('ssh') }}"
     ansible_ssh_use_tty: false
-    ansible_ssh_common_args: "{{ cfg.mgmt.ssh_args | default('-o StrictHostKeyChecking=accept-new') }}"
+    ansible_ssh_common_args: "{{ cfg.mgmt.ssh_args | default('-o StrictHostKeyChecking=accept-new -o ServerAliveInterval=15 -o ServerAliveCountMax=4') }}"
   changed_when: false

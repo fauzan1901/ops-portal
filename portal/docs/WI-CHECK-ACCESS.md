@@ -8,7 +8,7 @@ accounts; the history (Runs and Activity) records who ran each check.
 |---|---|---|---|
 | ONTAP (per site) | existing ONTAP Restore account (`ontap:<site>`) | Operation Automation only sends GET (and ONTAP fixes run by an authorized operator); there is no separate ONTAP account | Administration → Credentials → `ontap:<site>` |
 | vCenter (per site) | e.g. `wi-readonly@vsphere.local` | built-in **Read-only** role, set at the vCenter root, *Propagate to children*. Used for the REST API and for the host / VM / resource pool / cluster inventory (pyVmomi, PropertyCollector only) | `ro-vcenter:<site>` (the vCenter address is entered in the same dialog) |
-| vCloud Director (**one for all sites**: one vCloud serves DCB, DCA, DCC) | e.g. `wi-readonly@System` (provider account, written as `user@System`) | a new provider role that contains only **View** rights (VM, vApp, task, Org VDC, network, edge gateway, IPsec, NAT, firewall, cell). Do not use *System Administrator* | `ro-vcd` (the vCloud Director address is entered in the same dialog) |
+| vCloud Director (**one for all sites**: one vCloud serves DCB, DCA, DCC) | e.g. `wi-readonly@System` (provider account, written as `user@System`) | a new provider role that contains only **View** rights (VM, vApp, task, Org VDC, network, edge gateway, IPsec, NAT, firewall, cell, Certificate Library, Trusted Certificates). Do not use *System Administrator* | `ro-vcd` (the vCloud Director address is entered in the same dialog) |
 | NSX-T Manager (per site) | e.g. `wi-readonly` | **Auditor** role | `ro-nsxt:<site>` (the NSX Manager address is entered in the same dialog) |
 | OpenStack | same path as ONTAP Restore (management host → director → `overcloudrc`) | the portal only allows the commands `list` / `show` / `get-pools` / `quota show` / `limits show` (other commands are rejected before they are sent) | `sites.yml` (`mgmt`, `director`) |
 | Linux hosts (CDN, DNS, repo, VM, collector, GB200) | `wi-ro` with an SSH key | regular user + the limited sudoers below | `sites.yml` → `hosts.<group>` |
@@ -47,6 +47,35 @@ hosts behind a jump host are reached by their jump host. Squid must allow CONNEC
 
 The vCenter check "Host high CPU / memory, VM resource pool" needs the `pyvmomi` package in the portal venv
 (`requirements.txt`). Without it the step fails with a clear message; other checks are not affected.
+
+The Acme Flex check "OVN FDB learning" reads the OVN Southbound DB through the `ovn_controller` container of the compute
+the instances run on, or of the next node when that compute does not answer SSH from the director (the compute of another
+instance, then a controller; the node used and the ones that did not answer are in the step "OVN Southbound DB") (from the director, user `heat-admin` / `tripleo-admin`, passwordless sudo: the same access as the
+overcloud checks): only `ovn-sbctl --no-leader-only find/list` (datapaths, port bindings, FDB) and, when asked, a few
+seconds of `tcpdump` on the tap of the instances (the `tcpdump` package must be on the compute; without it the capture step
+says so). The fix "Clear the ticked FDB entries" writes to the Southbound DB (`ovn-sbctl destroy fdb <uuid>`, without
+`--no-leader-only`) and needs the permission **run OpenStack fixes**. The fix "Turn port security on for the ticked ports" (the
+same permission, type the number of ports) uses the overcloudrc admin account on the director: it makes the security group
+`port-security-allow-all` in the project of the port when it is missing (every protocol in and out), runs
+`openstack port set --enable-port-security` with the VIPs of the form as allowed address pairs, then on that node reads
+the port binding (`unknown` must be gone) and clears the FDB entries recorded on that port. The port binding is also read
+before the change: when the node does not answer, the port is not changed at all.
+
+The check "Internal certificates" uses the read-only accounts that exist already. The vCenter certificate API
+(`certificate-management/vcenter/...`) needs only `System.Read` (the Read-only role), and the ESXi host certificates are
+read from vCenter (no SSH to the hosts). NSX uses the Auditor role, ONTAP the `ontap:<site>` account, and vCloud Director
+the provider account with the right to view the Certificate Library and the Trusted Certificates. Without that right the
+step is skipped with HTTP 403. A system without an account is skipped; the check still runs. The Solution User
+certificates of vCenter are not in the API (only `vecs-cli` through root SSH on the VCSA, which the portal does not use);
+the recommendation gives that command to an engineer. The check "certmonger certificates" runs `sudo -n getcert list` as
+`stack` on the director and `getcert list` on the overcloud nodes (sudo without a password, the same access as the
+overcloud checks). The fix "Resubmit the ticked certificates" (permission **run OpenStack fixes**, a plain confirmation
+since it deletes nothing) runs, for each ticked request and one at a time: `getcert list -i <id>` (the request read
+again; a node that does not answer or a request that is gone = nothing changed), `getcert resubmit -i <id>`, then
+`getcert list -i <id>` every 10 seconds until it is MONITORING with a new expiry (5 minutes at most). A request that stays
+CA_UNREACHABLE / CA_REJECTED / stuck counts as failed, its old certificate stays in place, and the next item still runs.
+Requests with a CA problem are not ticked by default (fix the reach to IdM first). The director's own requests stay
+commands for an engineer.
 
 ONTAP example:
 
@@ -99,7 +128,7 @@ never run.
 | High risk | Delete files/logs, kill/restart/stop a service, reboot, mkfs, VyOS commit, bounce a link: the operator must type the host name |
 | After the fix | The same check is run again automatically; its result is linked under the fix. Everything is recorded in Runs and Activity (`wi.fix`, `wi.fix_ok`, `wi.fix_failed`) |
 | OpenStack | Separate permission **Operation Automation: run OpenStack fixes**. Only changes from the allowlist `wi_analysis.OPENSTACK_FIX`, run on the director as admin (`overcloudrc`); the condition is re-checked right before changing. Deleting: type the ID/name |
-| Checked items | Fixes with a checkbox table (live/cold migration of instances from one compute node, delete images, migrate Cinder volumes): only the checked items run, each with its own command from the stored result (the browser only sends the row numbers). One at a time, never in parallel; one migration / volume migration / image clean-up job per site. Items that delete: type the count and the kind ("3 images"). Job timeout = number of items × timeout per item (max. 24 hours) |
+| Checked items | Fixes with a checkbox table (live/cold migration of instances from one compute node, delete images, migrate Cinder volumes, resubmit certmonger certificates): only the checked items run, each with its own command from the stored result (the browser only sends the row numbers). One at a time, never in parallel; one migration / volume migration / image clean-up job per site. Items that delete: type the count and the kind ("3 images"). Job timeout = number of items × timeout per item (max. 24 hours) |
 | No fix | Acme Prime (VMware/vCloud) stays read-only (needs a human check); Huawei uses a change request |
 
 ## Log collection (*collect logs* permission)

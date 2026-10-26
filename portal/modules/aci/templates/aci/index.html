@@ -8,6 +8,7 @@
 <title>ACI Web UI</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='3' fill='%230066cc'/%3E%3Cpath d='M16 7v7M9 21v-3h14v3M16 14v4' stroke='white' stroke-width='2.5' fill='none' stroke-linecap='round'/%3E%3Ccircle cx='16' cy='7' r='2.5' fill='white'/%3E%3Ccircle cx='9' cy='23' r='2.5' fill='white'/%3E%3Ccircle cx='23' cy='23' r='2.5' fill='white'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="{{ url_for('aci.static', filename='app.css', v=ui_version) }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='guide.css', v=ui_version) }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='switcher.css') }}">
 </head>
 <body>
@@ -77,6 +78,8 @@
       <div class="pf-nav__section">Fabric</div>
       <ul>
         <li><a class="pf-nav__link" href="#static" data-tab="static"><svg class="icon" aria-hidden="true"><use href="#i-plug"></use></svg>Static Port</a></li>
+        <li><a class="pf-nav__link" href="#fabric" data-tab="fabric"><svg class="icon" aria-hidden="true"><use href="#i-network"></use></svg>Interfaces</a></li>
+        <li><a class="pf-nav__link" href="#vpc" data-tab="vpc"><svg class="icon" aria-hidden="true"><use href="#i-server"></use></svg>Create vPC</a></li>
         <li><a class="pf-nav__link" href="#templates" data-tab="templates"><svg class="icon" aria-hidden="true"><use href="#i-template"></use></svg>Templates</a></li>
         <li><a class="pf-nav__link" href="#provision" data-tab="provision"><svg class="icon" aria-hidden="true"><use href="#i-layers"></use></svg>Provisioning</a></li>
         <li><a class="pf-nav__link" href="#report" data-tab="report"><svg class="icon" aria-hidden="true"><use href="#i-table"></use></svg>Report</a></li>
@@ -239,6 +242,135 @@
       </div>
       <div class="actionbar-buttons">
         <button type="button" class="btn btn-primary btn-lg" id="spReviewBtn" disabled>Review &amp; apply</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ---------- Fabric interfaces ---------- -->
+  <section id="tab-fabric" class="tabpanel" aria-labelledby="h-fabric" data-site-page hidden>
+    <div class="pf-page__section pf-m-light">
+      <div class="page-head">
+        <div>
+          <h1 id="h-fabric">Fabric interfaces</h1>
+          <p>Every port of every leaf on site <b class="site-name-current"></b>: what uses it (vPC, port-channel, interface policy, static
+            paths) and what is connected. Pick ports for a static port or a new vPC. Read-only: nothing is changed on APIC.</p>
+        </div>
+        <div class="page-actions">
+          <button type="button" class="btn btn-secondary" id="fbExport" disabled><svg class="icon" aria-hidden="true"><use href="#i-download"></use></svg>Export CSV</button>
+          <button type="button" class="btn btn-primary" id="fbLoad"><svg class="icon" aria-hidden="true"><use href="#i-refresh"></use></svg>Read from APIC</button>
+        </div>
+      </div>
+    </div>
+    <div class="pf-page__section site-blocked"></div>
+    <div class="pf-page__section">
+      <section class="card">
+        <div class="kpis fb-kpis" id="fbKpis" role="group" aria-label="Filter by use"></div>
+        <div class="report-tools">
+          <div class="input-affix grow"><svg class="icon affix-icon" aria-hidden="true"><use href="#i-search"></use></svg><input class="input" id="fbSearch" placeholder="eth1/23, a server, a policy group, an EPG or a VLAN…" aria-label="Search interfaces"></div>
+          <select class="input input-auto" id="fbNode" aria-label="Leaf"><option value="">All leaves</option></select>
+          <select class="input input-auto" id="fbOper" aria-label="State"><option value="">Up and down</option><option value="up">Up</option><option value="down">Down</option></select>
+          <span class="muted" id="fbShown" aria-live="polite"></span>
+        </div>
+        <div class="table-wrap table-scroll">
+          <table class="table table-data fb-table" id="fbTable">
+            <thead><tr><th class="fb-check"><input type="checkbox" id="fbAll" aria-label="Tick every port shown that can be bound"></th><th>Node</th><th>Interface</th>
+              <th>State</th><th>Use</th><th>Connected to</th><th>Static paths</th><th>Description</th><th><span class="sr-only">Actions</span></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="card-foot">
+          <span class="muted" id="fbSelInfo">Tick ports, then add them to Static Port; a port in a vPC or port-channel adds its vPC or port-channel.</span>
+          <span class="card-foot-buttons">
+            <button type="button" class="btn btn-secondary btn-sm" id="fbVpcSel" disabled title="Free ports ticked on the two leaves of one vPC pair"><svg class="icon" aria-hidden="true"><use href="#i-server"></use></svg>Create vPC</button>
+            <button type="button" class="btn btn-primary btn-sm" id="fbAddSel" disabled><svg class="icon" aria-hidden="true"><use href="#i-plug"></use></svg>Add to Static Port</button>
+          </span>
+        </div>
+      </section>
+      <section class="card" id="fbPairsCard" hidden>
+        <div class="card-head"><h2>vPC pairs</h2><span class="muted">The vPCs of each pair of leaves, and the ports free on both leaves: candidates for a new vPC.</span></div>
+        <div class="fb-pairs" id="fbPairs"></div>
+      </section>
+    </div>
+  </section>
+
+  <!-- ---------- Create vPC (Fabric > Access Policies) ---------- -->
+  <section id="tab-vpc" class="tabpanel" aria-labelledby="h-vpc" data-site-page hidden>
+    <div class="pf-page__section pf-m-light">
+      <div class="page-head">
+        <div>
+          <h1 id="h-vpc">Create vPC</h1>
+          <p>A new vPC on a pair of leaves of site <b class="site-name-current"></b>: a vPC interface policy group and its interface
+            selector, as in Fabric &gt; Access Policies on APIC. Then the vPC path can be bound to EPGs on Static Port.</p>
+        </div>
+        <div class="page-actions">
+          <button type="button" class="btn btn-secondary" id="vpLoad"><svg class="icon" aria-hidden="true"><use href="#i-refresh"></use></svg>Read from APIC</button>
+        </div>
+      </div>
+    </div>
+    <div class="pf-page__section site-blocked"></div>
+    <div class="pf-page__section">
+      <div class="alert alert-warning"><svg class="icon" aria-hidden="true"><use href="#i-alert"></use></svg><div><b>This changes the access policies of the fabric.</b>
+        The portal only adds a policy group and a selector; it never changes or deletes one that exists. Everything is shown on the Review screen and checked on APIC again before it is sent.</div></div>
+      <div class="alert alert-info" id="vpNoPerm" hidden><svg class="icon" aria-hidden="true"><use href="#i-info"></use></svg><div>Your account can review a new vPC, but not create it.
+        An administrator can allow it on the Users page (<b>ACI: create vPCs</b>).</div></div>
+      <section class="card">
+        <div class="card-head"><h2><span class="step">1</span>Leaf pair</h2><span class="muted" id="vpPairInfo"></span></div>
+        <div class="grid-3">
+          <div class="field"><label for="vpPair">vPC pair</label><select class="input" id="vpPair"><option value="">Read from APIC first</option></select></div>
+          <div class="field span-2"><span class="field-label">Its vPCs</span><div class="chips" id="vpPairVpcs"><span class="muted">—</span></div></div>
+        </div>
+      </section>
+      <section class="card">
+        <div class="card-head">
+          <h2><span class="step">2</span>Ports</h2>
+          <div class="vp-port-tools">
+            <label class="check"><input type="checkbox" id="vpSame" checked> Same ports on both leaves</label>
+            <label class="check"><input type="checkbox" id="vpOnlyFree" checked> Only free ports</label>
+            <span class="muted" id="vpPicked" aria-live="polite"></span>
+          </div>
+        </div>
+        <div class="table-wrap table-scroll vp-ports-wrap">
+          <table class="table table-data vp-ports" id="vpPorts">
+            <thead><tr><th>Interface</th><th id="vpLeafA">Leaf</th><th id="vpLeafB">Leaf</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="hint">A port can be ticked when it is in no interface selector (Free). A port that is up or has a neighbour is the server of this vPC, usually: check its name.</p>
+      </section>
+      <section class="card">
+        <div class="card-head"><h2><span class="step">3</span>Policy group</h2>
+          <div class="field field-inline"><label for="vpCopy">Copy settings from</label><select class="input input-auto" id="vpCopy"></select></div></div>
+        <div class="grid-3">
+          <div class="field"><label for="vpName">Policy group name</label><input class="input mono" id="vpName" maxlength="64" placeholder="e.g. RHOSO-TRAFFIC-H-PG" autocomplete="off" spellcheck="false">
+            <span class="hint" id="vpNameHint"></span></div>
+          <div class="field"><label for="vpDescr">Description <span class="optional">optional</span></label><input class="input" id="vpDescr" maxlength="128" placeholder="e.g. the server" autocomplete="off"></div>
+          <div class="field"><label for="vpAaep">AAEP</label><select class="input" id="vpAaep" data-setting="aaep"></select></div>
+        </div>
+        <div class="grid-3">
+          <div class="field"><label for="vpLacp">Port-channel policy (LACP)</label><select class="input" id="vpLacp" data-setting="lacp"></select></div>
+          <div class="field"><label for="vpLink">Link level</label><select class="input" id="vpLink" data-setting="link"></select></div>
+          <div class="field"><label for="vpCdp">CDP</label><select class="input" id="vpCdp" data-setting="cdp"></select></div>
+          <div class="field"><label for="vpLldp">LLDP</label><select class="input" id="vpLldp" data-setting="lldp"></select></div>
+          <div class="field"><label for="vpMcp">MCP</label><select class="input" id="vpMcp" data-setting="mcp"></select></div>
+        </div>
+      </section>
+      <section class="card">
+        <div class="card-head"><h2><span class="step">4</span>Interface selector</h2></div>
+        <div class="grid-3">
+          <div class="field"><label for="vpSelector">Selector name</label><input class="input mono" id="vpSelector" maxlength="64" autocomplete="off" spellcheck="false">
+            <span class="hint">Empty: the policy group name without -PG.</span></div>
+          <div class="field span-2"><span class="field-label">Interface profile</span><div id="vpProfile" class="muted">—</div></div>
+        </div>
+      </section>
+    </div>
+    <div class="actionbar">
+      <div class="actionbar-context">
+        <span class="site-tag"><span class="site-dot"></span><span class="site-name-current"></span></span>
+        <span class="context" id="vpContext"></span>
+      </div>
+      <div class="actionbar-buttons">
+        <button type="button" class="btn btn-ghost" id="vpResetBtn">Clear form</button>
+        <button type="button" class="btn btn-primary btn-lg" id="vpReviewBtn" disabled>Review &amp; apply</button>
       </div>
     </div>
   </section>
@@ -640,7 +772,7 @@
         <div class="audit-filters">
           <div class="field"><label for="auUser">User</label><select id="auUser"></select></div>
           <div class="field"><label for="auSite">Site</label><select class="input" id="auSite"></select></div>
-          <div class="field"><label for="auAction">Action</label><select class="input" id="auAction"><option value="">All actions</option><option value="static-port">Static Port</option><option value="provisioning">Provisioning</option><option value="template">Product template</option></select></div>
+          <div class="field"><label for="auAction">Action</label><select class="input" id="auAction"><option value="">All actions</option><option value="static-port">Static Port</option><option value="provisioning">Provisioning</option><option value="template">Product template</option><option value="access-policy">vPC (access policy)</option></select></div>
           <div class="field"><label for="auStatus">Status</label><select class="input" id="auStatus"><option value="">All statuses</option><option value="success">Successful</option><option value="failed">Failed</option><option value="unknown">Unknown</option><option value="pending">Incomplete</option></select></div>
           <div class="field"><label for="auSince">From date</label><input class="input" type="date" id="auSince"></div>
           <div class="field"><label for="auUntil">To date</label><input class="input" type="date" id="auUntil"></div>
@@ -746,5 +878,7 @@
 <div class="toasts" id="toasts" aria-live="polite"></div>
 <script src="{{ url_for('static', filename='switcher.js') }}"></script>
 <script src="{{ url_for('aci.static', filename='app.js', v=ui_version) }}"></script>
+<script src="{{ url_for('static', filename='guide.js', v=ui_version) }}"></script>
+<script src="{{ url_for('aci.static', filename='guides.js', v=ui_version) }}"></script>
 </body>
 </html>

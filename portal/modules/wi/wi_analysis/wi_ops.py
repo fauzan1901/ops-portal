@@ -11,7 +11,12 @@ was validated by wi_analysis.OPENSTACK_FIX before it got here and is validated a
                [under <percent> ram <MB>]
   cold-migrate <server> from <host> to <host|auto> try <hosts|-> timeout <s> [nodes <host=ip,..|-> user <user|-> under <percent> ram <MB>]
   migrate-volume <volume> to <host@backend#pool> try <pools|-> timeout <s> snapshots <snapshot ids|->
+  retype-volume <volume> to <volume type> timeout <s> snapshots <snapshot ids|->
   delete-image <image> expect <size0|any> snapshots <snapshot ids|->
+  clear-fdb <fdb entry> dp <datapath key> mac <mac, 12 hex> port <port key> node <host=ip> user <user>
+  port-security <port> project <project id> sg port-security-allow-all allow <addresses|-> dp <datapath key> pkey <port key>
+               node <host=ip> user <user>
+  getcert-resubmit <certmonger request id> node <host=ip> user <user>
 
 Exit code: 0 done (or nothing left to do); 5 not done, but the item is healthy where it was, so the next item may run;
 6 a person must look (the item is not in a clean state, or the platform itself fails): the fix stops there; 7 skipped
@@ -43,10 +48,27 @@ What is fixed automatically:
                   a new snapshot stops it; a snapshot left in error_deleting is reset to available and deleted once more;
                   migration error: the temporary copy (migration_status target:<volume>) is reset and deleted, then the
                   next pool is tried (no other pool: the same one once more)
+  volume type     (retype, migration policy on-demand) the approved snapshots are deleted first (a volume with snapshots
+                  cannot be retyped with a migration); a new snapshot stops it; a failed retype: its temporary copy is
+                  reset and deleted (WI Rollback Volume Type), the volume keeps its type
   image           checked again (not protected, not used by an instance, still empty), deleted, then the volume
                   snapshots of a snapshot image (block_device_mapping) are deleted
+  FDB entry       (OVN Southbound, WI "FDB Learning Issue") read again on the node: gone already = done; another MAC,
+                  datapath or port than the check saw = nothing changed; else destroyed and read once more
+  port security   (WI "FDB Learning Issue", stage 9) the port read again (another project = nothing changed); the security
+                  group port-security-allow-all of the project found or made, with its rules (all traffic in and out:
+                  the traffic of the application stays as it was, only MAC / IP anti-spoofing starts); port security on
+                  with that group and the allowed addresses (VIPs) in one call; read again; the address "unknown" of
+                  its OVN port binding gone; the FDB entries recorded on the port cleared (OVN no longer learns there)
+  certificate     (certmonger, TLS everywhere) the request read again on the node (no longer tracked = nothing changed);
+                  resubmitted to its CA (IdM), then read every few seconds until it is MONITORING with a new expiry; still
+                  CA_UNREACHABLE / CA_REJECTED / stuck, or no new certificate in time = not done (the certificate it has
+                  stays in place, the next item runs). The post-save command of the request reloads the service that
+                  uses it (Red Hat: TLS everywhere, getcert resubmit)
 """
+import ipaddress
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -59,6 +81,7 @@ UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
 POOL_RE = re.compile(r"^[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+#[A-Za-z0-9_.-]+$")
 IP_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
+REQUEST_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")   # a certmonger request ID (a timestamp, or a nickname)
 INSTANCE_RE = re.compile(r"^instance-[0-9a-f]{8}$")
 USERS = ("heat-admin", "tripleo-admin")
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=no",
@@ -110,6 +133,15 @@ def last_error(text):
         if re.search(r"(Error|Exception|error|refused|failed|Failed)", line) and not line.startswith(("File ", "Traceback")):
             return line[:400]
     return (lines[-1] if lines else "")[:400]
+
+
+def gone(out, kind):
+    """The client says this object does not exist; not when the API itself is missing or failing ("public endpoint for
+    volumev3 ... not found", a timeout), which must never read as "already deleted"."""
+    text = str(out or "")
+    if re.search(r"endpoint|service catalog|unable to establish|timed out|connection|HTTP 5\d\d", text, re.I):
+        return False
+    return bool(re.search(r"No %s with a name or ID|No %s found|could not be found|\(HTTP 404\)|NotFound" % (kind, kind), text, re.I))
 
 
 def minutes(seconds):
@@ -222,10 +254,57 @@ def _pool(value):
     return value
 
 
+def _int(value):
+    if not re.match(r"^\d{1,9}$", str(value)):
+        raise ValueError(f"invalid number {value!r}")
+    return int(value)
+
+
+def _mac(value):
+    if not re.match(r"^[0-9a-f]{12}$", str(value)):
+        raise ValueError(f"invalid MAC {value!r}")
+    return ":".join(str(value)[i:i + 2] for i in range(0, 12, 2))
+
+
+def _node(value):
+    host, _, ip = str(value).partition("=")
+    if not HOST_RE.match(host) or not IP_RE.match(ip):
+        raise ValueError(f"invalid node {value!r}")
+    return {"host": host, "ip": ip}
+
+
 def _user(value):
     if value != "-" and value not in USERS:
         raise ValueError(f"invalid overcloud user {value!r}")
     return "" if value == "-" else value
+
+
+def _volume_type(value):
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$", str(value)):
+        raise ValueError(f"invalid volume type {value!r}")
+    return str(value)
+
+
+def _project(value):
+    if not re.match(r"^[0-9a-f]{32}$", str(value)):
+        raise ValueError(f"invalid project ID {value!r}")
+    return str(value)
+
+
+def _addresses(value):
+    """Allowed address pairs: IPv4 / IPv6 addresses or networks, comma separated (16 at most), or -."""
+    if value == "-":
+        return []
+    out = []
+    for x in str(value).split(","):
+        try:
+            ipaddress.ip_network(x, strict=False)
+        except ValueError:
+            raise ValueError(f"invalid address {x!r}") from None
+        out.append(x)
+    if not out or len(out) > 16:
+        raise ValueError(f"invalid addresses {value!r}")
+    return out
 
 
 def _percent(value):
@@ -249,8 +328,14 @@ GRAMMAR = {
     "cold-migrate": [("from", _host), ("to", _host_or_auto), ("try", _hosts), ("timeout", _seconds), ("nodes", _nodes),
                      ("user", _user), ("under", _percent), ("ram", _mb)],
     "migrate-volume": [("to", _pool), ("try", _pools), ("timeout", _seconds), ("snapshots", _ids)],
+    "retype-volume": [("to", _volume_type), ("timeout", _seconds), ("snapshots", _ids)],
     "delete-image": [("expect", _one_of("size0", "any")), ("snapshots", _ids)],
+    "clear-fdb": [("dp", _int), ("mac", _mac), ("port", _int), ("node", _node), ("user", _user)],
+    "port-security": [("project", _project), ("sg", _one_of("port-security-allow-all")), ("allow", _addresses), ("dp", _int),
+                      ("pkey", _int), ("node", _node), ("user", _user)],
+    "getcert-resubmit": [("node", _node), ("user", _user)],
 }
+ID_OF = {"getcert-resubmit": REQUEST_RE}   # what the item is when it is not an OpenStack UUID
 
 
 def parse(argv):
@@ -258,7 +343,7 @@ def parse(argv):
     argv = list(argv)
     if len(argv) < 2 or argv[0] not in GRAMMAR:
         raise ValueError("unknown operation " + " ".join(argv[:1]))
-    if not UUID_RE.match(argv[1]):
+    if not ID_OF.get(argv[0], UUID_RE).match(argv[1]):
         raise ValueError(f"invalid ID {argv[1]!r}")
     spec = GRAMMAR[argv[0]]
     given = (len(argv) - 2) // 2
@@ -283,13 +368,21 @@ class Director:
     """Runs the OpenStack clients (and ssh to the overcloud nodes) on the director. runner(argv, timeout) -> (rc, output);
     clock() -> seconds; sleep(seconds); write(line)."""
 
-    def __init__(self, runner=None, clock=None, sleep=None, write=None):
+    def __init__(self, runner=None, clock=None, sleep=None, write=None, until=None):
         self.runner = runner or self._subprocess
         self.clock = clock or time.time
         self.sleep = sleep or time.sleep
         self.write = write or self._print
         self._modern = None
         self.names = {}
+        # the end of the time of this item (epoch seconds, from the fix script: WI_ITEM_UNTIL): no wait runs past it and no
+        # new change starts after it, so the portal always gets the result before it gives up on the item
+        if until is None:
+            until = os.environ.get("WI_ITEM_UNTIL", "")
+        self.until = int(until) if str(until).isdigit() else 0
+
+    def time_left(self):
+        return max(0, self.until - self.clock()) if self.until else None
 
     @staticmethod
     def _print(line):
@@ -311,7 +404,9 @@ class Director:
         return proc.returncode, out
 
     def say(self, text):
-        self.write(str(text))
+        """One line of the log: names read from OpenStack (volumes, images) may hold line breaks or control characters,
+        which must never make a line of their own (a forged RESULT or end marker)."""
+        self.write(re.sub(r"[\x00-\x1f\x7f]", " ", str(text)))
 
     def run(self, argv, show=True, lines=6, timeout=900):
         """Run one command; show: print it ("$ ...") with the first lines of its output (and its exit code if not 0)."""
@@ -353,7 +448,7 @@ class Director:
         """The instance as Nova sees it now, None when it does not exist, {"unknown": reason} when the API failed."""
         value, rc, out = self.read(["openstack", "server", "show", sid], show=show)
         if rc != 0 or not isinstance(value, dict):
-            if re.search(r"no server|could not be found|not found", out or "", re.I):
+            if gone(out, "server"):
                 return None
             return {"unknown": first_line(out) or f"exit {rc}"}
         fault = value.get("fault")
@@ -501,7 +596,7 @@ class Director:
     def volume(self, vid, show=False):
         value, rc, out = self.read(["openstack", "volume", "show", vid], show=show)
         if rc != 0 or not isinstance(value, dict):
-            if re.search(r"no volume|could not be found|not found", out or "", re.I):
+            if gone(out, "volume"):
                 return None
             return {"unknown": first_line(out) or f"exit {rc}"}
         return {"name": str(value.get("name") or vid), "status": str(value.get("status") or "").lower(),
@@ -510,6 +605,7 @@ class Director:
                 "attachments": value.get("attachments") or [],
                 "multiattach": str(value.get("multiattach")).lower() == "true",
                 "group": str(field(value, "group_id", "consistencygroup_id")),
+                "type": str(field(value, "volume_type", "type")),
                 "replication": str(field(value, "replication_status")).lower()}
 
     def snapshots_of(self, vid):
@@ -523,12 +619,13 @@ class Director:
     def snapshot(self, sid):
         value, rc, out = self.read(["openstack", "volume", "snapshot", "show", sid])
         if rc != 0 or not isinstance(value, dict):
-            return None if re.search(r"no snapshot|could not be found|not found", out or "", re.I) else {"status": "unknown"}
+            return None if gone(out, "snapshot") else {"status": "unknown"}
         return {"status": str(value.get("status") or "").lower(), "name": str(value.get("name") or "")}
 
     def wait(self, check, timeout, every=15):
-        """Poll check() (True: done) every `every` seconds up to timeout; True when done."""
-        end = self.clock() + timeout
+        """Poll check() (True: done) every `every` seconds up to timeout (and not past the end of the item); True when done."""
+        left = self.time_left()
+        end = self.clock() + (min(timeout, left) if left is not None else timeout)
         while True:
             if check():
                 return True
@@ -896,20 +993,30 @@ def migrate_volume(d, a):
         left = delete_snapshots(d, [s["id"] for s in snaps], name)
         if left:
             raise Done(ATTENTION, f"snapshot(s) {', '.join(left)} of {name} could not be deleted: the volume was not migrated")
+    gone = f" Its {len(snaps)} approved snapshot(s) were deleted." if snaps else ""
     targets = [a["to"]] + [p for p in a["try"] if p != a["to"]]
     if len(targets) == 1:   # no other pool: after a failure (temporary copy cleaned up) the same pool once more
         targets.append(a["to"])
     last = ""
     for n, target in enumerate(targets[:MAX_ATTEMPTS], 1):
+        if n > 1 and d.time_left() is not None and d.time_left() < 900:   # never a new migration the portal cannot follow
+            raise Done(FAILED, f"{name} could not be migrated: {last}; no time left in this fix for attempt {n}. It stays in "
+                               f"{v['host']}." + gone)
         d.say(f"Attempt {n}: migrate {name} to {target}")
         started = d.clock()
         rc, out = d.run(["cinder", "migrate", vid, target])
         if rc != 0:
             last = last_error(out) or f"exit {rc}"
-            if DESTINATION.search(out or "") and n < len(targets):
-                d.say(f"Automatic fix: {target} refused it ({last}); the next pool is tried")
-                continue
-            raise Done(FAILED, f"cinder migrate was refused: {last}. Nothing changed: {name} stays in {v['host']}")
+            now = d.volume(vid)   # the API may have taken it all the same (a proxy timeout)
+            if now is None or now.get("unknown"):
+                raise Done(ATTENTION, f"cinder migrate failed ({last}) and {name} could not be read again: look at it "
+                                      "before running the fix again." + gone)
+            if now["migstat"] not in ("migrating", "starting", "completing"):
+                if DESTINATION.search(out or "") and n < len(targets):
+                    d.say(f"Automatic fix: {target} refused it ({last}); the next pool is tried")
+                    continue
+                raise Done(FAILED, f"cinder migrate was refused: {last}. {name} stays in {v['host']}." + gone)
+            d.say(f"cinder migrate gave an error ({last}), but {name} is migrating: it is followed")
         state = {}
 
         def ended():
@@ -922,9 +1029,9 @@ def migrate_volume(d, a):
             # Some clients clear migration_status at the end: the host tells.
             return v2["migstat"] in ("", "none") and d.clock() - started > 120
         if not d.wait(ended, a["timeout"], 30):
-            raise Done(ATTENTION, f"{name} is still migrating after {minutes(a['timeout'])} (migration_status "
+            raise Done(ATTENTION, f"{name} is still migrating after {minutes(d.clock() - started)} (migration_status "
                                   f"{(state.get('v') or {}).get('migstat')}): a Cinder migration cannot be stopped safely. "
-                                  "Leave it and follow it with Stuck instances and volumes")
+                                  "Leave it and follow it with Stuck instances and volumes." + gone)
         v2 = state["v"]
         if v2 is None:
             raise Done(OK, f"{name} was deleted during the migration")
@@ -932,14 +1039,96 @@ def migrate_volume(d, a):
             raise Done(OK, f"{name} is in {v2['host']} (migration took {minutes(d.clock() - started)})")
         last = f"migration_status {v2['migstat'] or 'cleared'}, still in {v2['host']}"
         d.say(f"The migration of {name} failed ({last})")
-        cleanup_replica(d, vid)
+        copies = cleanup_replica(d, vid)
+        if copies:   # a copy that could not be removed: no other attempt over it
+            raise Done(ATTENTION, f"the migration of {name} failed ({last}) and a temporary copy is left: "
+                                  f"{', '.join(copies)}. Follow it with Stuck instances and volumes." + gone)
         why = cinder_messages(d, vid)
         if why:
             last += f": {why}"
         if n < min(len(targets), MAX_ATTEMPTS):
             d.say("Automatic fix: the temporary copy was cleaned up; " + (
                 "the same pool is tried once more" if targets[n] == target else f"{targets[n]} is tried next"))
-    raise Done(FAILED, f"{name} could not be migrated: {last}. It stays in {v['host']}")
+    raise Done(FAILED, f"{name} could not be migrated: {last}. It stays in {v['host']}." + gone)
+
+
+def retype_volume(d, a):
+    """The volume type of one volume (WIs "Volume Snapshot Error on the Backend", "VM Fails to Resize Root Disk", "Backup
+    Scheduler Tidak Menjalankan Snapshot"), migration policy on-demand: checked again, its approved snapshots deleted
+    first, cinder retype, followed until it is back to its status with the new type."""
+    vid = a["id"]
+    v = d.volume(vid, show=True)
+    if v is None:
+        raise Done(OK, "the volume no longer exists: nothing to do")
+    if v.get("unknown"):
+        raise Done(ATTENTION, f"the volume could not be read ({v['unknown']}): nothing was changed")
+    name = v["name"]
+    d.say(f"{name}: {v['status']}, type {v['type'] or '-'}, migration_status {v['migstat'] or '-'}")
+    if v["type"] == a["to"]:
+        raise Done(OK, f"{name} has the type {a['to']} already: nothing to do")
+    if v["status"] not in ("available", "in-use"):
+        raise Done(FAILED, f"{name} is {v['status']}: only available or in-use volumes are retyped; nothing was changed")
+    if v["migstat"] in ("migrating", "starting", "completing") or v["migstat"].startswith("target:"):
+        raise Done(FAILED, f"{name} has migration_status {v['migstat']}: a migration runs already; nothing was changed")
+    if v["multiattach"] and len(v["attachments"]) > 1:
+        raise Done(FAILED, f"{name} is attached to {len(v['attachments'])} instances: nothing was changed")
+    if v["group"]:   # refused by Cinder: checked before any snapshot is deleted
+        raise Done(FAILED, f"{name} belongs to a group ({v['group']}): it cannot be retyped with a migration; nothing was changed")
+    if v["replication"] == "enabled":
+        raise Done(FAILED, f"{name} is replicated: it cannot be retyped with a migration; nothing was changed")
+    snaps = d.snapshots_of(vid)
+    extra = [s for s in snaps if s["id"] not in a["snapshots"]]
+    if extra:
+        raise Done(FAILED, f"{name} has snapshot(s) that were not approved in the check ({', '.join(s['name'] or s['id'] for s in extra[:5])}): "
+                           "a volume with snapshots cannot be retyped. Run the check again; nothing was changed")
+    gone = ""   # said in every result after the snapshots were deleted: they are not "nothing changed"
+    if snaps:
+        if d.time_left() is not None and d.time_left() < 600:
+            raise Done(FAILED, f"not enough time left for {name} in this fix: nothing was changed")
+        d.say(f"{name} has {len(snaps)} approved snapshot(s): delete them first (a volume with snapshots cannot be retyped)")
+        left = delete_snapshots(d, [s["id"] for s in snaps], name)
+        if left:
+            raise Done(ATTENTION, f"snapshot(s) {', '.join(left)} of {name} could not be deleted: the type was not changed")
+        gone = f" Its {len(snaps)} approved snapshot(s) were deleted."
+    started = d.clock()
+    rc, out = d.run(["cinder", "retype", "--migration-policy", "on-demand", vid, a["to"]])
+    if rc != 0:   # the API may have taken it all the same (a proxy timeout): the volume tells
+        now = d.volume(vid)
+        if now is None or now.get("unknown"):
+            raise Done(ATTENTION, f"cinder retype failed ({last_error(out) or f'exit {rc}'}) and {name} could not be read "
+                                  "again: look at it before running the fix again." + gone)
+        if now["status"] != "retyping" and now["migstat"] not in ("migrating", "starting", "completing") and now["type"] != a["to"]:
+            raise Done(FAILED, f"cinder retype was refused: {last_error(out) or f'exit {rc}'}. {name} keeps the type "
+                               f"{v['type']}." + gone)
+        d.say(f"cinder retype gave an error ({last_error(out)}), but {name} is being retyped: it is followed")
+    state = {}
+
+    def ended():
+        v2 = d.volume(vid)
+        state["v"] = v2
+        if v2 is None or v2.get("unknown"):
+            return v2 is None
+        if v2["status"] == "retyping" or v2["migstat"] in ("migrating", "starting", "completing"):
+            return False
+        return v2["type"] == a["to"] or d.clock() - started > 60
+    if not d.wait(ended, a["timeout"], 30):
+        raise Done(ATTENTION, f"{name} is still being retyped after {minutes(d.clock() - started)} (status "
+                              f"{(state.get('v') or {}).get('status')}, migration_status {(state.get('v') or {}).get('migstat')}): "
+                              "a running retype cannot be stopped safely. Follow it with Stuck instances and volumes." + gone)
+    v2 = state["v"]
+    if v2 is None:
+        raise Done(OK, f"{name} was deleted during the retype")
+    if v2["type"] == a["to"] and v2["status"] in ("available", "in-use"):
+        raise Done(OK, f"{name} has the type {a['to']} (took {minutes(d.clock() - started)})")
+    d.say(f"The retype of {name} failed (status {v2['status']}, migration_status {v2['migstat'] or '-'}, type {v2['type']})")
+    left = cleanup_replica(d, vid)
+    why = cinder_messages(d, vid)
+    copies = f" Temporary copy left (not removed): {', '.join(left)}." if left else ""
+    if v2["status"] not in ("available", "in-use") or left:
+        raise Done(ATTENTION, f"the retype of {name} failed and the volume is {v2['status']}" + (f": {why}" if why else "")
+                              + ". Follow it with Stuck instances and volumes (WI Rollback Volume Type)." + copies + gone)
+    raise Done(FAILED, f"the retype of {name} failed" + (f": {why}" if why else "") + f"; it keeps the type "
+                       f"{v2['type'] or v['type']}." + gone)
 
 
 def cleanup_replica(d, vid):
@@ -948,19 +1137,27 @@ def cleanup_replica(d, vid):
     rc, out = d.run(["cinder", "list", "--all-tenants", "--fields", "id,name,status,os-vol-mig-status-attr:migstat"],
                     show=True, lines=0)
     rows = table(out)[0] if rc == 0 else []
+    left = []   # copies found but not removed: the caller says so
     for r in rows:
         mig = str(r.get("os-vol-mig-status-attr:migstat") or r.get("migstat") or "").lower()
         rid = str(r.get("id") or "")
         if mig != f"target:{vid}" or not UUID_RE.match(rid):
             continue
-        rep = d.volume(rid) or {}
-        if rep.get("attachments"):
-            d.say(f"The temporary copy {rid} is attached: not touched")
+        rep = d.volume(rid)
+        if rep is None:
+            continue
+        # only a copy that was read, is attached nowhere and is not being worked on by Cinder itself
+        if rep.get("unknown") or rep.get("attachments") or rep.get("status") not in ("available", "error", "error_deleting"):
+            d.say(f"The temporary copy {rid} is " + ("not readable" if rep.get("unknown") else "attached" if rep.get("attachments")
+                                                    else str(rep.get("status"))) + ": not touched")
+            left.append(rid)
             continue
         d.say(f"Automatic fix: remove the temporary copy {rid} of the failed migration (WI Rollback Volume Type)")
         d.run(["cinder", "reset-state", "--state", "available", "--attach-status", "detached", "--reset-migration-status", rid])
         d.run(["cinder", "delete", rid])
-        d.wait(lambda: d.volume(rid) is None, 600, 15)
+        if not d.wait(lambda: d.volume(rid) is None, 600, 15):
+            left.append(rid)
+    return left
 
 
 def cinder_messages(d, vid):
@@ -976,7 +1173,7 @@ def delete_image(d, a):
     iid = a["id"]
     img, rc, out = d.read(["openstack", "image", "show", iid], show=True)
     if rc != 0 or not isinstance(img, dict):
-        if re.search(r"no image|could not be found|not found", out or "", re.I):
+        if gone(out, "image"):
             img = None
         else:
             raise Done(ATTENTION, f"the image could not be read ({first_line(out)}): nothing was changed")
@@ -1016,7 +1213,299 @@ def delete_image(d, a):
     raise Done(OK if not bad else FAILED, f"image {name} and {len(todo)} volume snapshot(s) deleted{note}")
 
 
-OPS = {"live-migrate": live_migrate, "cold-migrate": cold_migrate, "migrate-volume": migrate_volume, "delete-image": delete_image}
+def clear_fdb(d, a):
+    """One OVN FDB entry (WI "FDB Learning Issue", stage 8), on the node through the director: read again, destroyed only
+    when it is still the entry the check saw, read once more."""
+    uid, node, user = a["id"], a["node"], a["user"]
+    if user not in USERS:
+        raise Done(ATTENTION, "no overcloud user (heat-admin / tripleo-admin): nothing was changed")
+    sb = OVN_SB
+
+    def read():
+        rc, out = d.run(SSH + [f"{user}@{node['ip']}", f"{sb} --no-leader-only --format=json --columns=mac,dp_key,port_key list fdb {uid}"],
+                        show=False, timeout=60)
+        if rc != 0:
+            if re.search(r"no row|not found|does not exist", out or "", re.I):
+                return None
+            raise Done(ATTENTION, f"the FDB entry could not be read on {node['host']} ({first_line(out)}): nothing was changed")
+        try:
+            doc = json.loads(out)
+            row = dict(zip(doc.get("headings") or [], (doc.get("data") or [[]])[0]))
+        except (ValueError, IndexError, TypeError):
+            raise Done(ATTENTION, f"unexpected answer of ovn-sbctl ({first_line(out)}): nothing was changed")
+        return row or None
+
+    d.say(f"$ ssh {user}@{node['ip']} {sb} --no-leader-only list fdb {uid}")
+    row = read()
+    if row is None:
+        raise Done(OK, f"the FDB entry {a['mac']} is already gone (relearned or cleared): nothing to do")
+    now = (str(row.get("mac") or "").lower(), str(row.get("dp_key")), str(row.get("port_key")))
+    if now != (a["mac"], str(a["dp"]), str(a["port"])):
+        raise Done(FAILED, f"the entry is now MAC {now[0]} on datapath {now[1]} port {now[2]}, not what the check saw: nothing was changed")
+    d.say(f"$ ssh {user}@{node['ip']} {sb} destroy fdb {uid}")
+    rc, out = d.run(SSH + [f"{user}@{node['ip']}", f"{sb} destroy fdb {uid}"], show=False, timeout=60)
+    if rc != 0:
+        raise Done(FAILED, f"ovn-sbctl destroy failed: {last_error(out)}")
+    if read() is not None:
+        raise Done(ATTENTION, f"the FDB entry {a['mac']} is still there after the destroy")
+    raise Done(OK, f"FDB entry {a['mac']} (port key {a['port']}) removed from datapath {a['dp']}")
+
+
+ALLOW_ALL = "port-security-allow-all"
+OVN_SB = "sudo -n podman exec ovn_controller ovn-sbctl"   # as the checks read it (overcloud.py)
+ALLOW_ALL_RULES = [(direction, eth, prefix) for direction in ("ingress", "egress")
+                   for eth, prefix in (("IPv4", "0.0.0.0/0"), ("IPv6", "::/0"))]
+
+
+def _group_ids(value):
+    """A list of IDs as the clients print it: a JSON list, or "a, b" / "['a', 'b']" text."""
+    if isinstance(value, list):
+        return [str(x.get("id") if isinstance(x, dict) else x) for x in value]
+    return re.findall(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", str(value or ""))
+
+
+def _pairs(value):
+    """The IP addresses of allowed_address_pairs (a list of {"ip_address", "mac_address"}, or text)."""
+    if isinstance(value, list):
+        return [str(x.get("ip_address")) for x in value if isinstance(x, dict) and x.get("ip_address")]
+    return re.findall(r"ip_address='([^']+)'", str(value or ""))
+
+
+def _same_address(a, b):
+    try:
+        return ipaddress.ip_network(a, strict=False) == ipaddress.ip_network(b, strict=False)
+    except ValueError:
+        return a == b
+
+
+def binding_macs(text):
+    """The mac column of `ovn-sbctl --format=json --columns=mac find port_binding ...` (one row): a list of strings,
+    None when there is no row or the answer is not JSON."""
+    try:
+        rows = json.loads(text or "").get("data") or []
+    except (ValueError, AttributeError):
+        return None
+    if not rows or not isinstance(rows[0], list) or not rows[0]:
+        return None
+    cell = rows[0][0]
+    if isinstance(cell, list) and len(cell) == 2 and cell[0] == "set":
+        return [str(x) for x in cell[1]]
+    return [str(cell)] if cell not in (None, "") else []
+
+
+def allow_all_group(d, project):
+    """The ID of the security group port-security-allow-all of the project, made when missing, with its four rules (all
+    protocols in and out, IPv4 and IPv6; a rule that exists already is fine)."""
+    groups, rc, out = d.read(["openstack", "security", "group", "list", "--project", project], show=True)
+    if rc != 0 or not isinstance(groups, list):
+        raise Done(ATTENTION, f"the security groups of the project could not be read ({first_line(out)}): nothing was changed")
+    found = [g for g in groups if isinstance(g, dict) and str(field(g, "Name", "name")) == ALLOW_ALL]
+    if found:
+        sg = str(field(found[0], "ID", "id"))
+        d.say(f"Security group {ALLOW_ALL} exists already ({sg}).")
+    else:
+        made, rc, out = d.read(["openstack", "security", "group", "create", ALLOW_ALL, "--project", project, "--description",
+                                "All traffic in and out: port security on (MAC/IP anti-spoofing) without filtering. "
+                                "Operation Automation, WI FDB Learning Issue"], show=True)
+        if rc != 0 or not isinstance(made, dict):
+            raise Done(ATTENTION, f"the security group could not be made ({last_error(out)}): nothing was changed")
+        sg = str(field(made, "id", "ID"))
+    if not UUID_RE.match(sg):
+        raise Done(ATTENTION, f"unexpected security group ID {sg!r}: nothing was changed")
+    for direction, eth, prefix in ALLOW_ALL_RULES:
+        cmd = ["openstack", "security", "group", "rule", "create", f"--{direction}", "--ethertype", eth, "--protocol", "any",
+               "--remote-ip", prefix, sg]
+        rc, out = d.run(cmd, show=False)
+        # only a duplicate is fine; a 409 for the quota ("Quota exceeded") is not: the group would block all traffic in
+        exists = rc != 0 and re.search(r"already exists|SecurityGroupRuleExists", out or "", re.I)
+        d.say("$ " + " ".join(cmd) + ("   (exists already)" if exists else ""))
+        if rc != 0 and not exists:
+            raise Done(ATTENTION, f"the rule {direction} {eth} of {ALLOW_ALL} could not be made ({last_error(out)}): "
+                                  "the port was not changed")
+    return sg
+
+
+def port_security(d, a):
+    """Port security on for one port of an instance (WI "FDB Learning Issue", stage 9), with the security group
+    port-security-allow-all and the allowed addresses (VIPs) given in the check; checked again before and after, then the
+    address "unknown" of its OVN port binding is gone and the FDB entries recorded on it are cleared."""
+    pid = a["id"]
+    port, rc, out = d.read(["openstack", "port", "show", pid], show=True)
+    if rc != 0 or not isinstance(port, dict):
+        if gone(out, "port"):
+            raise Done(FAILED, "the port does not exist any more: nothing was changed")
+        raise Done(ATTENTION, f"the port could not be read ({first_line(out)}): nothing was changed")
+    project = str(field(port, "project_id", "tenant_id"))
+    if project != a["project"]:
+        raise Done(FAILED, f"the port belongs to project {project or '-'} now, not {a['project']}: nothing was changed")
+    enabled = str(field(port, "port_security_enabled")).lower() in ("true", "1")
+    have = _pairs(field(port, "allowed_address_pairs"))
+    missing = [x for x in a["allow"] if not any(_same_address(x, h) for h in have)]
+    node, user = a["node"], a["user"]
+    if user not in USERS:
+        raise Done(ATTENTION, "no overcloud user (heat-admin / tripleo-admin) to check OVN: nothing was changed")
+    ssh = SSH + [f"{user}@{node['ip']}"]
+
+    def binding():
+        rc, out = d.run(ssh + [f"{OVN_SB} --no-leader-only --format=json --columns=mac find port_binding logical_port={pid}"],
+                        show=False, timeout=60)
+        return rc, out, (binding_macs(out) if rc == 0 else None)
+    # OVN must answer before anything changes: without it the port could not be checked nor its FDB cleared afterwards
+    d.say(f"$ ssh {user}@{node['ip']} {OVN_SB} --no-leader-only find port_binding logical_port={pid}")
+    rc, out, macs = binding()
+    if rc != 0:
+        raise Done(ATTENTION, f"the OVN port binding cannot be read on {node['host']} ({last_error(out)}): nothing was changed")
+    if macs is None:
+        raise Done(ATTENTION, f"no OVN port binding of the port on {node['host']}: nothing was changed")
+    d.say(f"  mac: {', '.join(macs) or '-'}")
+    sg = allow_all_group(d, a["project"])
+    if enabled and not missing:
+        d.say("Port security is on already, with every allowed address.")
+    else:
+        cmd = ["openstack", "port", "set"] + ([] if enabled else ["--enable-port-security", "--security-group", sg])
+        for x in missing:
+            cmd += ["--allowed-address", f"ip-address={x}"]
+        rc, out = d.run(cmd + [pid])
+        if rc != 0:   # the API may have done it all the same (a proxy timeout): the port tells
+            now, rc2, _o = d.read(["openstack", "port", "show", pid], show=True)
+            if rc2 != 0 or not isinstance(now, dict):
+                raise Done(ATTENTION, f"openstack port set failed ({last_error(out)}) and the port could not be read again: "
+                                      "look at it before running the fix again")
+            if (str(field(now, "port_security_enabled")).lower() in ("true", "1")) == enabled:
+                raise Done(FAILED, f"openstack port set failed ({last_error(out)}): the port is as it was")
+            d.say(f"openstack port set gave an error ({last_error(out)}), but port security changed: the result is checked")
+    port, rc, out = d.read(["openstack", "port", "show", pid], show=True)
+    if rc != 0 or not isinstance(port, dict):
+        raise Done(ATTENTION, f"the port could not be read after the change ({first_line(out)})")
+    on = str(field(port, "port_security_enabled")).lower() in ("true", "1")
+    groups = _group_ids(field(port, "security_group_ids", "security_groups"))
+    pairs = _pairs(field(port, "allowed_address_pairs"))
+    lost = [x for x in a["allow"] if not any(_same_address(x, h) for h in pairs)]
+    if not on or (not enabled and sg not in groups) or lost:
+        raise Done(ATTENTION, "the port is not as expected after the change: port security "
+                              f"{'on' if on else 'off'}, security groups {', '.join(groups) or '-'}, allowed addresses "
+                              f"{', '.join(pairs) or '-'}" + (f" (missing {', '.join(lost)})" if lost else ""))
+    d.say(f"Port security on, security group{'s' if len(groups) != 1 else ''} {', '.join(groups)}, allowed addresses "
+          f"{', '.join(pairs) or '-'}.")
+    macs, rc, out = None, 1, ""
+    for _ in range(10):   # ovn-northd writes the new addresses of the port binding within seconds
+        rc, out, macs = binding()
+        if macs is not None and "unknown" not in macs:
+            break
+        d.sleep(3)
+    d.say(f"$ ssh {user}@{node['ip']} {OVN_SB} --no-leader-only find port_binding logical_port={pid}")
+    if rc != 0:
+        raise Done(ATTENTION, f"port security is on; the OVN port binding could not be read on {node['host']} "
+                              f"({last_error(out)}): run the fix again for this port to check OVN and clear its FDB")
+    if macs is None:
+        raise Done(ATTENTION, f"port security is on; no OVN port binding of the port on {node['host']} "
+                              f"({first_line(out) or 'no row'})")
+    d.say(f"  mac: {', '.join(macs) or '-'}")
+    if "unknown" in macs:
+        raise Done(ATTENTION, "port security is on, but the OVN port binding still has the address \"unknown\" after 30 s "
+                              f"(mac: {', '.join(macs)}): Neutron did not update OVN; compare the Logical_Switch_Port in the "
+                              f"OVN NB (ovn-nbctl lsp-get-addresses {pid}, on a controller) before clearing the FDB")
+    d.say("  the address \"unknown\" is gone: OVN no longer learns MAC addresses on this port")
+    cleared = 0
+    if a["dp"] and a["pkey"]:
+        rc, out = d.run(ssh + [f"{OVN_SB} --no-leader-only --bare --columns=_uuid find fdb dp_key={a['dp']} port_key={a['pkey']}"],
+                        show=False, timeout=60)
+        d.say(f"$ ssh {user}@{node['ip']} {OVN_SB} --no-leader-only find fdb dp_key={a['dp']} port_key={a['pkey']}")
+        if rc != 0:
+            raise Done(ATTENTION, f"port security is on; the FDB of the port could not be read ({last_error(out)}): run the "
+                                  "fix again for this port to clear it")
+        for uid in [x for x in (out or "").split() if UUID_RE.match(x)]:
+            rc2, out2 = d.run(ssh + [f"{OVN_SB} destroy fdb {uid}"], show=False, timeout=60)
+            if rc2 != 0:
+                raise Done(ATTENTION, f"port security is on; the FDB entry {uid} could not be cleared ({last_error(out2)})")
+            cleared += 1
+        d.say(f"  {cleared} FDB entr{'y' if cleared == 1 else 'ies'} recorded on the port cleared")
+    raise Done(OK, f"port security on (security group {ALLOW_ALL}"
+                   + (f", allowed addresses {', '.join(a['allow'])}" if a["allow"] else "")
+                   + f"); the address \"unknown\" is gone; {cleared} FDB entr{'y' if cleared == 1 else 'ies'} cleared")
+
+
+# ---------------------------------------------------------------- certmonger (TLS everywhere)
+GETCERT_WAIT, GETCERT_POLL = 300, 10   # seconds for certmonger to get the new certificate from IdM, and between reads
+GETCERT_BAD = ("CA_UNREACHABLE", "CA_REJECTED", "NEED_GUIDANCE", "CA_UNCONFIGURED", "NEED_CA")
+
+
+def getcert_request(text, rid):
+    """The fields of request rid in `getcert list -i <rid>`: {"status", "stuck", "expires", "ca-error", "certificate", "CA"}
+    ({} when the output does not list it)."""
+    out, inside = {}, False
+    for line in str(text or "").splitlines():
+        m = re.match(r"^Request ID '([^']*)':", line)
+        if m:
+            inside = m.group(1) == rid
+            continue
+        m = re.match(r"^\s+(status|stuck|ca-error|issued|expires|certificate|CA):\s?(.*)$", line)
+        if inside and m:
+            out[m.group(1)] = m.group(2).strip()
+    return out
+
+
+def getcert_resubmit(d, a):
+    """One certmonger request on an overcloud node (through the director): read again, resubmitted to its CA, followed
+    until certmonger monitors a new certificate."""
+    rid, node, user = a["id"], a["node"], a["user"]
+    if user not in USERS:
+        raise Done(ATTENTION, "no overcloud user (heat-admin / tripleo-admin): nothing was changed")
+    login = f"{user}@{node['ip']}"
+
+    def read(changed=True):
+        rc, out = d.run(SSH + [login, f"sudo -n getcert list -i {rid}"], show=False, timeout=60)
+        if rc != 0 and not re.search(r"no request", out or "", re.I):
+            # before the resubmit nothing was changed (the next item may run); after it, a person must look
+            raise Done(ATTENTION if changed else FAILED, f"certmonger could not be read on {node['host']} ({first_line(out)})"
+                       + ("" if changed else ": nothing was changed"))
+        return getcert_request(out, rid) if rc == 0 else {}
+
+    d.say(f"$ ssh {login} sudo getcert list -i {rid}")
+    before = read(changed=False)
+    if not before:
+        raise Done(FAILED, f"certmonger on {node['host']} no longer tracks request {rid}: nothing was changed")
+    where = re.search(r"location='([^']*)'", before.get("certificate", ""))
+    d.say(f"  certificate {where.group(1) if where else before.get('certificate') or '?'}")
+    d.say(f"  status {before.get('status') or '?'}, expires {before.get('expires') or '?'}"
+          + (f", ca-error: {before['ca-error'][:200]}" if before.get("ca-error") else ""))
+    d.say(f"$ ssh {login} sudo getcert resubmit -i {rid}")
+    rc, out = d.run(SSH + [login, f"sudo -n getcert resubmit -i {rid}"], show=False, timeout=120)
+    if out:
+        d.say("  " + first_line(out))
+    if rc in (124, 255):   # no answer: the resubmit may have reached certmonger all the same
+        raise Done(ATTENTION, f"getcert resubmit did not answer on {node['host']} ({first_line(out)}): read the request "
+                              f"there before running it again (sudo getcert list -i {rid})")
+    if rc != 0:
+        raise Done(FAILED, f"getcert resubmit failed on {node['host']}: {last_error(out)} (nothing was changed)")
+    end, seen = d.clock() + GETCERT_WAIT, before.get("status")
+    while True:
+        d.sleep(GETCERT_POLL)
+        now = read()
+        if not now:
+            raise Done(ATTENTION, f"request {rid} is no longer listed on {node['host']} after the resubmit")
+        status = str(now.get("status") or "").upper()
+        if status != seen:
+            d.say(f"  status {status}")
+            seen = status
+        # a new certificate: a new expiry, or a new issue date (a CA that caps the expiry at its own gives the same one)
+        if status == "MONITORING" and (now.get("expires") != before.get("expires") or now.get("issued") != before.get("issued")):
+            raise Done(OK, f"request {rid} on {node['host']} renewed: expires {now.get('expires')} (was {before.get('expires')}); "
+                           "the post-save command of the request reloads the service that uses it")
+        if status in GETCERT_BAD or now.get("stuck") == "yes":
+            raise Done(FAILED, f"certmonger could not renew request {rid} on {node['host']}: {status}"
+                               + (" (stuck)" if now.get("stuck") == "yes" else "")
+                               + (f", {now['ca-error'][:200]}" if now.get("ca-error") else "")
+                               + ". The certificate it has stays in place: check that the node reaches IdM and its host keytab "
+                                 "(kinit -k), then run it again")
+        if d.clock() >= end:
+            raise Done(FAILED, f"no new certificate for request {rid} on {node['host']} after {minutes(GETCERT_WAIT)} "
+                               f"(status {status}, expires {now.get('expires')}): certmonger keeps trying, read it again later")
+
+
+OPS = {"live-migrate": live_migrate, "cold-migrate": cold_migrate, "migrate-volume": migrate_volume, "retype-volume": retype_volume,
+       "delete-image": delete_image,
+       "clear-fdb": clear_fdb, "port-security": port_security, "getcert-resubmit": getcert_resubmit}
 
 
 def main(argv, director=None):

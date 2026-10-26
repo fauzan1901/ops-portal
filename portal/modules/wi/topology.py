@@ -46,6 +46,8 @@ def build(check, site, cfg, params=None, result=None):
     except ValueError:
         return {}
     sources = list(cls.sources)
+    if check.get("basis") == "template":   # one host of the group: a device (one command per SSH exec) or a shell host
+        sources = ["device" if (check.get("template") or {}).get("group") == "huawei" else "host"]
     at = getattr(cls, "at", {})
     by_source = {}
     for s in result.get("steps") or []:

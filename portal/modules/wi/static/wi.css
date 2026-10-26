@@ -11,14 +11,66 @@
 #lnNotice:not(:empty), #runOutcome:not(:empty) { margin-bottom: var(--pf-space-lg); }
 .pf-grid > div > .pf-card + .pf-card { margin-top: var(--pf-space-lg); }
 
-/* Catalog table: title with summary, WI links, access labels */
-.ck-title { font-weight: 500; }
-.ck-summary { display: block; max-width: 560px; margin-top: 2px; color: var(--pf-text-secondary); font-size: var(--pf-font-xs); }
-.ck-wi { display: grid; gap: 2px; min-width: 220px; max-width: 320px; font-size: var(--pf-font-xs); }
-.ck-wi a { overflow-wrap: anywhere; }
-.ck-wi .pf-icon, .wi-link .pf-icon { width: 12px; height: 12px; margin-left: 3px; vertical-align: -1px; }
-.ck-reads { display: flex; flex-wrap: wrap; gap: 4px; max-width: 260px; }
-.ck-reads .pf-label + .pf-label { margin-left: 0; }
+/* Checks as a table like the Templates list of AWX (ansible-ui, PatternFly Table, expandable and sortable): one row per check,
+   its details (description, activity of the last runs, WI, what it reads) in the expanded row. */
+#ckList, #ovList { padding: 0; }
+#ckList > .pf-empty-state, #ovList > .pf-empty-state { padding: var(--pf-space-xl) var(--pf-space-lg); }
+.ck-table thead td { border-bottom: 1px solid var(--pf-border); }
+.ck-table tbody + tbody { border-top: 0; }
+.ck-table td.ck-toggle-col { width: 1%; padding-right: 0; }
+.ck-table td.ck-col-action { width: 1%; text-align: right; white-space: nowrap; }
+.ck-table td.ck-col-action .pf-btn { min-height: 32px; }
+.ck-table .ck-name a { font-weight: 500; overflow-wrap: break-word; }
+.ck-table .ck-does { display: block; margin-top: 2px; color: var(--pf-text-secondary); font-size: var(--pf-font-sm); line-height: 1.4; }
+.ck-table .ck-can .pf-icon { width: 12px; height: 12px; }
+.ck-table td.ck-col-type .pf-label + .pf-label { margin-left: var(--pf-space-xs); }
+.ck-table td.ck-col-type, .ck-table td.ck-col-last, .ck-table td.ck-col-activity { white-space: nowrap; }
+.ck-table td.ck-col-type .pf-label { margin-left: var(--pf-space-xs); }
+.ck-table tr.ck-row { cursor: pointer; }
+.ck-table tr.ck-row:hover td { background: var(--pf-bg-hover); }
+.ck-table tr.ck-row.is-expanded td { border-bottom: 0; }
+.ck-table tr.ck-detail td { padding-top: 0; padding-bottom: var(--pf-space-lg); }
+.ck-table tr.ck-detail .pf-dl { font-size: var(--pf-font-sm); }
+.ck-table tr.ck-detail .wi-link { margin-bottom: 2px; }
+.pf-table__toggle { display: inline-grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: var(--pf-radius); background: none; color: var(--pf-text-secondary); cursor: pointer; }
+.pf-table__toggle:hover { color: var(--pf-text); }
+.pf-table__toggle:focus-visible { outline: 2px solid var(--pf-primary); outline-offset: -2px; }
+.pf-table__toggle .pf-icon { transition: transform 150ms ease-in-out; }
+.pf-table__toggle[aria-expanded="true"] .pf-icon { transform: rotate(90deg); }
+.ck-sort { display: inline-flex; align-items: center; gap: var(--pf-space-xs); padding: 0; border: 0; background: none; color: inherit; font: inherit; font-weight: 700; cursor: pointer; white-space: nowrap; }
+.ck-sort .pf-icon { width: 12px; height: 12px; opacity: 0; }
+.ck-sort:hover .pf-icon, .ck-sort:focus-visible .pf-icon { opacity: .5; }
+.ck-sort:focus-visible { outline: 2px solid var(--pf-primary); outline-offset: 2px; }
+th[aria-sort] .ck-sort { color: var(--pf-primary); }
+th[aria-sort] .ck-sort .pf-icon { opacity: 1; }
+th[aria-sort="ascending"] .ck-sort .pf-icon { transform: rotate(180deg); }
+.ck-muted { color: var(--pf-text-secondary); }
+.ck-last { display: inline-flex; align-items: center; gap: 6px; color: var(--pf-text); }
+.ck-st { display: inline-grid; color: var(--pf-text-disabled); }
+.ck-st .pf-icon { width: 14px; height: 14px; }
+.ck-st.is-ok { color: var(--pf-success); }
+.ck-st.is-warn, .ck-st.is-unknown { color: var(--pf-warning); }
+.ck-st.is-fail, .ck-st.is-error { color: var(--pf-danger); }
+.ck-st.is-running { color: var(--pf-info); }
+/* Activity: the last runs as bars (AWX Sparkline), oldest left */
+.ck-spark { display: inline-flex; align-items: center; gap: 3px; vertical-align: middle; }
+.ck-spark a { display: block; width: 10px; height: 18px; border-radius: 1px; background: var(--pf-text-disabled); }
+.ck-spark a:hover { outline: 2px solid var(--pf-text); outline-offset: 1px; }
+.ck-spark a.is-ok { background: var(--pf-success); }
+.ck-spark a.is-warn, .ck-spark a.is-unknown { background: var(--pf-warning); }
+.ck-spark a.is-fail, .ck-spark a.is-error { background: var(--pf-danger); }
+.ck-spark a.is-running { background: var(--pf-info); }
+.ck-runnable { white-space: nowrap; }
+.wi-link .pf-icon { width: 12px; height: 12px; margin-left: 3px; vertical-align: -1px; }
+#ckFilter { max-width: 100%; }
+@media (prefers-reduced-motion: reduce) { .pf-table__toggle .pf-icon { transition: none; } }
+@media (max-width: 767px) {
+  #ckFilter .pf-toggle-group { flex-wrap: wrap; row-gap: var(--pf-space-xs); }
+  .ck-table .ck-opt, .ck-table .ck-col-last { display: none; }
+  .ck-table th, .ck-table td { padding-left: var(--pf-space-sm); padding-right: var(--pf-space-sm); }
+  .ck-table tr.ck-detail .pf-dl.pf-m-horizontal { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .ck-table tr.ck-detail .pf-dl dd { margin-bottom: var(--pf-space-sm); }
+}
 
 /* Result per step (vertical list in the style of the progress stepper) */
 .wi-steps { list-style: none; padding: 0; display: grid; gap: 0; }
@@ -39,7 +91,9 @@
 .wi-step__more[open] > summary { margin-bottom: var(--pf-space-sm); }
 .wi-step__more .pf-table { border: 1px solid var(--pf-border-light); }
 .wi-step__more .pf-table th:first-child, .wi-step__more .pf-table td:first-child { padding-left: var(--pf-space-md); }
-.wi-step__more .pf-table td { font-size: var(--pf-font-xs); vertical-align: top; overflow-wrap: anywhere; }
+/* words break only when one is longer than its column (anywhere broke "node-01" into "nod e-01"); a wide table scrolls */
+.wi-step__more .pf-table td { font-size: var(--pf-font-xs); vertical-align: top; overflow-wrap: break-word; }
+.wi-step__more .pf-table td:first-child { white-space: nowrap; }   /* the name of the row (a node, a volume) on one line */
 .wi-step__more .pf-code-block { max-height: 320px; overflow: auto; }
 
 /* How to fix it: numbered fixes, where to run them, the commands (full width, between the outcome and the steps) */
@@ -70,31 +124,36 @@
 .wi-about ol { padding-left: 20px; display: grid; gap: 4px; }
 .wi-link { display: block; }
 
-/* Left menu: one expandable group per product with its problems (PatternFly Nav, expandable) */
+/* Left menu: activities, then products, each with its number of checks (PatternFly Nav) */
 #sidebar { overflow-y: auto; }
 .pf-nav__list { margin-bottom: var(--pf-space-xs); }
-.pf-nav__toggle-link { width: 100%; border: 0; background: none; font: inherit; text-align: left; cursor: pointer; }
 .pf-nav__text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .pf-nav__count { flex: none; min-width: 22px; padding: 0 6px; border-radius: var(--pf-radius-pill); background: #3c3f42; color: #d2d2d2; font-size: var(--pf-font-xs); line-height: 18px; text-align: center; }
-.pf-nav__toggle { flex: none; display: inline-grid; place-items: center; width: 16px; transition: transform .15s ease-in-out; }
-.pf-nav__toggle .pf-icon { width: 12px; height: 12px; }
-.pf-nav__item.pf-m-expanded > .pf-nav__toggle-link .pf-nav__toggle { transform: rotate(90deg); }
-.pf-nav__item.pf-m-current > .pf-nav__toggle-link { color: #fff; font-weight: 700; }
-.pf-nav__item.pf-m-current > .pf-nav__toggle-link .pf-icon { color: var(--pf-nav-accent); }
-.pf-nav__subnav ul { padding-bottom: var(--pf-space-sm); }
-.pf-nav__subnav .pf-nav__link { align-items: flex-start; gap: var(--pf-space-sm); padding: 6px var(--pf-space-lg) 6px 50px; font-size: var(--pf-font-sm); }
+/* Status dot of a check (used in the check lists) */
 .pf-nav__dot { flex: none; width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; background: #8a8d90; }
 .pf-nav__dot.is-ready { background: #5ba352; }
 .pf-nav__dot.is-planned { background: #f0ab00; }
 .pf-nav__dot.is-blocked { background: transparent; box-shadow: inset 0 0 0 1.5px #b8bbbe; }
-.pf-nav__dot.is-module { background: #73bcf7; }
-@media (prefers-reduced-motion: reduce) { .pf-nav__toggle { transition: none; } }
+.pf-nav__dot.is-module, .pf-nav__dot.is-manual { background: #73bcf7; }
 
-/* All products: search across products, one card per product; product page title with its icon */
+/* All checks: one search, what to do (a card per activity), the products; list pages have the icon in the title */
 .ov-search { max-width: 640px; margin-top: var(--pf-space-md); }
 #ovResults { margin-bottom: var(--pf-space-lg); }
-.ov-problems { margin: var(--pf-space-sm) 0 0; padding-left: 18px; color: var(--pf-text-secondary); font-size: var(--pf-font-sm); display: grid; gap: 2px; }
+.ov-heading { margin: 0 0 var(--pf-space-md); font-family: var(--pf-font-heading); font-size: var(--pf-font-lg); font-weight: 500; }
+.ov-heading ~ .ov-heading { margin-top: var(--pf-space-xl); }
+.ov-activities { grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr)); }
+/* What is the problem? one tile per symptom with the checks to run for it */
+.ov-symptoms { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr)); gap: var(--pf-space-md); margin-bottom: var(--pf-space-xl); }
+.ov-symptoms > .pf-card + .pf-card { margin-top: 0; }
+.ov-symptom { padding: var(--pf-space-md); }
+.ov-symptom__title { display: flex; align-items: flex-start; gap: var(--pf-space-sm); margin-bottom: var(--pf-space-sm); }
+.ov-symptom__title .pf-icon { flex: none; width: 18px; height: 18px; margin-top: 2px; color: var(--pf-primary); }
+.ov-symptom__title h3 { margin: 0; font-size: var(--pf-font-md); font-weight: 500; }
+.ov-symptom__checks { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; font-size: var(--pf-font-sm); }
+.ov-symptom__checks a { display: inline-flex; align-items: flex-start; gap: 4px; }
+.ov-symptom__checks .pf-icon { flex: none; width: 12px; height: 12px; margin-top: 4px; }
 .pf-title-row > .pf-card__icon { width: 36px; height: 36px; }
+@media (max-width: 1000px) and (min-width: 768px) { .pf-l-gallery { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
 /* Where it reads / where it was checked: topology diagram (PatternFly Topology: node, status decorator, edge, label) */
 #lnTopoCard, #runTopoCard { margin-bottom: var(--pf-space-lg); }
@@ -353,3 +412,107 @@ tr.is-marked.ws-tone--info td:first-child { box-shadow: inset 3px 0 var(--pf-inf
 .wi-running__list { list-style: none; margin: 0 0 var(--pf-space-xs); padding: 0; display: grid; gap: var(--pf-space-xs); }
 .wi-running__list li { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: var(--pf-space-sm); align-items: start; }
 #runElsewhere .pf-alert { margin-bottom: var(--pf-space-md); }
+
+/* A list of IDs (parameter type uuid_list): one row per ID with its remove button, "Add instance" below — the
+   PatternFly form pattern for a field with several values */
+.wi-idlist { display: grid; gap: var(--pf-space-xs); }
+.wi-idlist__row { display: flex; align-items: center; gap: var(--pf-space-xs); }
+.wi-idlist__row .pf-form-control { flex: 1; }
+.wi-idlist__add { justify-self: start; display: inline-flex; align-items: center; gap: 6px; }
+.wi-idlist__count { margin-left: 6px; font-weight: normal; }
+
+/* Templates (administrators): the form of Create template, one card per step (PatternFly form, field groups) */
+.tp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 0 var(--pf-space-lg); }
+.tp-grid .pf-form-group, .tp-wide { max-width: none; align-content: start; }
+.tp-grid--2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.tp-grid--3 { grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); }
+.tp-heading { margin: var(--pf-space-sm) 0 var(--pf-space-xs); font-family: var(--pf-font-heading); font-size: var(--pf-font-lg); font-weight: 500; }
+.tp-intro { display: block; margin-bottom: var(--pf-space-md); }
+.tp-steps { display: grid; gap: var(--pf-space-md); margin: 0 0 var(--pf-space-md); padding: 0; list-style: none; }
+.tp-step { padding: var(--pf-space-md) var(--pf-space-lg); border: 1px solid var(--pf-border); border-radius: var(--pf-radius); }
+.tp-step__head { display: flex; align-items: center; gap: var(--pf-space-sm); margin-bottom: var(--pf-space-md); }
+.tp-step__n { margin: 0; font-size: var(--pf-font-md); font-weight: 700; }
+.tp-step__tools { display: inline-flex; margin-left: auto; }
+.tp-step__tools .pf-btn:disabled { opacity: .4; cursor: default; }
+.tp-step .pf-form-group { margin-bottom: var(--pf-space-md); }
+.tp-command { grid-column: span 2; }
+.tp-rules { margin: 0; padding: var(--pf-space-md); border: 0; border-radius: var(--pf-radius); background: var(--pf-bg-muted); }
+.tp-rules legend { float: left; width: 100%; margin-bottom: var(--pf-space-sm); padding: 0; font-weight: 500; }
+.tp-rules legend + * { clear: both; }
+.tp-rules .pf-form-group { margin-bottom: var(--pf-space-sm); }
+.tp-rules .pf-check { margin: var(--pf-space-xs) 0 var(--pf-space-sm); }
+.tp-change .pf-alert { margin: 0; }
+.tp-wait { margin: var(--pf-space-md) 0 0; }
+.tp-step .tp-wait { margin-bottom: 0; }
+.tp-wait .pf-input-group { max-width: 260px; }
+.tp-wait .pf-input-group input { width: 100px; flex: none; }
+.tp-actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--pf-space-md); padding-top: var(--pf-space-md); border-top: 1px solid var(--pf-border-light); }
+.tp-actions .tp-delete { margin-left: auto; }
+.ck-tsteps { display: grid; gap: var(--pf-space-xs); margin: 0; padding-left: 20px; }
+.ck-tsteps code { display: block; margin-top: 2px; color: var(--pf-text-secondary); font-size: 12px; overflow-wrap: anywhere; }
+.ck-tsteps .pf-label { margin-left: var(--pf-space-xs); }
+@media (max-width: 767px) {
+  .tp-grid--2 { grid-template-columns: minmax(0, 1fr); }
+  .tp-command { grid-column: auto; }
+  .tp-step { padding: var(--pf-space-md); }
+}
+
+/* Progress of a running check or fix (PatternFly Progress, with the task running now and the last tasks) */
+.wi-progress { padding: var(--pf-space-md) var(--pf-space-lg); border: 1px solid var(--pf-border); border-radius: var(--pf-radius); background: var(--pf-bg); }
+#runOutcome .wi-progress { margin-bottom: 0; }
+.wi-progress__head { display: flex; align-items: center; justify-content: space-between; gap: var(--pf-space-md); }
+.wi-progress__now { display: inline-flex; align-items: center; gap: var(--pf-space-sm); min-width: 0; font-weight: 500; overflow-wrap: anywhere; }
+.wi-progress__pct { flex: none; font-family: var(--pf-font-heading); font-size: var(--pf-font-lg); font-weight: 500; }
+.wi-progress__track { height: 8px; margin: var(--pf-space-sm) 0 var(--pf-space-xs); border-radius: 4px; background: var(--pf-bg-muted); overflow: hidden; }
+.wi-progress__fill { display: block; width: 2%; height: 100%; border-radius: 4px; background-color: var(--pf-primary);
+  background-image: linear-gradient(45deg, rgba(255, 255, 255, .22) 25%, transparent 25%, transparent 50%, rgba(255, 255, 255, .22) 50%, rgba(255, 255, 255, .22) 75%, transparent 75%);
+  background-size: 16px 16px; transition: width 600ms ease-out; animation: wi-progress-stripes 1s linear infinite; }
+@keyframes wi-progress-stripes { from { background-position: 0 0; } to { background-position: 16px 0; } }
+.wi-progress__meta { color: var(--pf-text-secondary); font-size: var(--pf-font-sm); }
+.wi-progress__steps { display: grid; gap: 2px; margin: var(--pf-space-sm) 0 0; padding: 0; list-style: none; font-size: var(--pf-font-sm); }
+.wi-progress__steps:empty { display: none; }
+.wi-progress__steps li { display: flex; align-items: flex-start; gap: 6px; color: var(--pf-text-secondary); }
+.wi-progress__steps li .pf-icon { flex: none; width: 14px; height: 14px; margin-top: 2px; }
+.wi-progress__steps li.is-ok .pf-icon { color: var(--pf-success); }
+.wi-progress__steps li.is-fail { color: var(--pf-danger); }
+.wi-progress__steps li.is-running { color: var(--pf-text); font-weight: 500; }
+.wi-progress__steps li.is-running .pf-icon { color: var(--pf-primary); }
+.wi-fix__live { display: grid; gap: var(--pf-space-sm); margin-top: var(--pf-space-sm); }
+.wi-live pre { max-height: 320px; margin-top: var(--pf-space-xs); overflow: auto; white-space: pre-wrap; }
+@media (prefers-reduced-motion: reduce) { .wi-progress__fill { transition: none; animation: none; } }
+
+/* ------------------------------------------------------------------ run page: details under the title, findings, export menu */
+.wi-run-meta { margin-top: var(--pf-space-md); }
+.wi-run-meta .pf-dl { grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), max-content)); gap: var(--pf-space-sm) var(--pf-space-xl); font-size: var(--pf-font-sm); }
+.wi-run-meta dt { color: var(--pf-text-secondary); font-weight: 400; }
+.wi-findings__count { margin-right: var(--pf-space-sm); }
+.wi-findings { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--pf-space-xs) var(--pf-space-sm); vertical-align: middle; }
+.wi-findings .pf-label + .pf-label { margin-left: 0; }
+.wi-jump { border: 0; font-family: inherit; cursor: pointer; }
+.wi-jump:hover, .wi-jump:focus-visible { text-decoration: underline; }
+.wi-jump-fix { font-size: var(--pf-font-sm); }
+.wi-step, #runRecsCard { scroll-margin-top: 80px; }   /* below the masthead when a finding jumps to it */
+.wi-menu { position: relative; display: inline-flex; }
+.wi-menu .pf-menu { min-width: 240px; padding-top: var(--pf-space-sm); }
+/* a card that opens and closes (the diagram of a run): its header is the summary */
+details.wi-fold > summary { list-style: none; cursor: pointer; }
+details.wi-fold > summary::-webkit-details-marker { display: none; }
+details.wi-fold > summary .pf-card__title::before { content: ""; display: inline-block; width: 6px; height: 6px; margin: 0 10px 3px 2px;
+  border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(-45deg); transition: transform .15s; }
+details.wi-fold[open] > summary .pf-card__title::before { transform: rotate(45deg); }
+details.wi-fold:not([open]) > summary { border-bottom: 0; }
+
+/* labels of what a check can do: one meaning per color (PatternFly label colors cyan and orange) */
+.pf-label.pf-m-cyan { background: #f2f9f9; color: #003737; box-shadow: inset 0 0 0 1px #a2d9d9; }
+.pf-label.pf-m-cyan .pf-icon { color: #009596; }
+.pf-label.pf-m-orange { background: #fff6ec; color: #8f4700; box-shadow: inset 0 0 0 1px #f4b678; }
+.pf-label.pf-m-orange .pf-icon { color: #ec7a08; }
+@media (prefers-color-scheme: dark) {
+  .pf-label.pf-m-cyan { background: #0f2c2c; color: #a2d9d9; box-shadow: inset 0 0 0 1px var(--pf-border); }
+  .pf-label.pf-m-cyan .pf-icon { color: #73c5c5; }
+  .pf-label.pf-m-orange { background: #3a2410; color: #f4b678; box-shadow: inset 0 0 0 1px var(--pf-border); }
+  .pf-label.pf-m-orange .pf-icon { color: #f4b678; }
+}
+
+/* home: the recent problems of the site, above the symptoms */
+.ov-recent { margin-bottom: var(--pf-space-xl); }

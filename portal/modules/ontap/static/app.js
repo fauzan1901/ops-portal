@@ -566,10 +566,16 @@ const Wizard = {
     $('#projectId').classList.toggle('is-invalid', badProject);
     $('#projectHelp').className = `pf-helper-text${badProject ? ' pf-m-error' : ''}`;
     $('#projectHelp').textContent = badProject ? 'Project ID: letters, digits, - and _ only (8-64 characters).' : 'Leave empty to use the original volume\'s project.';
+    $('#wizHint').textContent = this.hint();
+    Site.lock(this.planRunning);
+    window.PortalGuide?.refresh();   // the guide of the Review step, or the one of the other steps
+  },
+  // What the user does next, under the wizard (also shown by the guide)
+  hint() {
     const r = this.plan?.result;
     const chosen = this.data?.snapshots.find(s => s.name === this.snapshot);
     const group = this.groupMode() && this.plans;
-    $('#wizHint').textContent = [
+    return [
       !this.data ? 'Find the volume LUN first.' : this.extra.some(x => x.status === 'loading') ? 'Reading the other volumes…'
         : this.extra.some(x => this.extraProblem(x)) ? 'Untick or fix the volumes marked in red.' : '',
       chosen ? `Selected: ${chosen.local_time}` : 'Select a snapshot.',
@@ -577,7 +583,6 @@ const Wizard = {
       this.planRunning ? 'Checking prerequisites…' : group ? this.groupHint() : !r ? '' : !r.ready ? 'Fix the failed prerequisites, then check again.'
         : !this.selectedPool() ? 'Select a Cinder pool.' : this.actionProblem() || 'Review, then tick the confirmation.',
     ][this.step];
-    Site.lock(this.planRunning);
   },
 
   // ---------- step 1: volume ----------
@@ -612,43 +617,44 @@ const Wizard = {
     this.renderFilter();
     this.renderSnapshots();
   },
-  renderInfo() {
-    const {lun, flexvol} = this.data;
+  renderInfo() { $('#volumeInfo').innerHTML = this.infoHtml(this.data); },
+  // What ONTAP has for the volume: its LUN, FlexVol and snapshots (also drawn by the guide of this page)
+  infoHtml(data) {
+    const {lun, flexvol} = data;
     const alerts = [];
-    if (this.data.restore_path_exists) {
+    if (data.restore_path_exists) {
       alerts.push(alertBox('warning', 'A LUN from an earlier restore still exists',
-        `<span class="mono">${esc(this.data.restore_path)}</span> already exists. Delete or manage that LUN before restoring this volume again.`));
+        `<span class="mono">${esc(data.restore_path)}</span> already exists. Delete or manage that LUN before restoring this volume again.`));
     }
     if (flexvol.state !== 'online') alerts.push(alertBox('danger', `FlexVol ${esc(flexvol.name)} is ${esc(flexvol.state)}`));
-    if (!this.spaceOk()) {
+    if (Number(flexvol.available) < Number(lun.used)) {
       alerts.push(alertBox('danger', 'Not enough free space in the FlexVol',
         `Free ${bytes(flexvol.available)}, LUN data ${bytes(lun.used)}. Add capacity to FlexVol ${esc(flexvol.name)}, then find the LUN again.`));
     }
-    if (!this.data.snapshots.length) {
+    if (!data.snapshots.length) {
       alerts.push(alertBox('warning', `FlexVol ${esc(flexvol.name)} has no snapshots`,
         'Volumes in this Cinder pool cannot be restored from ONTAP snapshots. Check the snapshot policy of the FlexVol.'));
     }
-    const viaNameId = this.data.name_id ? alertBox('info', 'LUN found by name_id',
-      `LUN <span class="mono">volume-${esc(this.data.volume_id)}</span> does not exist in ONTAP. According to <span class="mono">openstack volume show</span>, `
-      + `this volume uses name_id <span class="mono">${esc(this.data.name_id)}</span> (usually after a migrate or retype), `
+    const viaNameId = data.name_id ? alertBox('info', 'LUN found by name_id',
+      `LUN <span class="mono">volume-${esc(data.volume_id)}</span> does not exist in ONTAP. According to <span class="mono">openstack volume show</span>, `
+      + `this volume uses name_id <span class="mono">${esc(data.name_id)}</span> (usually after a migrate or retype), `
       + 'so that LUN is used for the restore.') : '';
-    $('#volumeInfo').innerHTML = `<div class="pf-mt-md">${alerts.length ? alerts.join('') : alertBox('success', 'LUN found')}${viaNameId}</div>`
+    return `<div class="pf-mt-md">${alerts.length ? alerts.join('') : alertBox('success', 'LUN found')}${viaNameId}</div>`
       + '<h3 class="review-section pf-mt-lg">ONTAP</h3>' + dl([
         ['LUN', `<span class="mono">${esc(lun.name)}</span>`],
-        this.data.name_id && ['name_id', `<span class="mono">${esc(this.data.name_id)}</span>`],
+        data.name_id && ['name_id', `<span class="mono">${esc(data.name_id)}</span>`],
         ['SVM', esc(lun.svm)],
         ['FlexVol', `${esc(lun.flexvol)} <span class="pf-text-secondary">(${esc(flexvol.state)})</span>`],
         ['LUN size', `${bytes(lun.size)} · ${bytes(lun.used)} used`],
         ['FlexVol free', `${bytes(flexvol.available)} of ${bytes(flexvol.size)}`],
-        ['Snapshots', `${this.data.snapshots.length} available`],
+        ['Snapshots', `${data.snapshots.length} available`],
       ]);
   },
   // volume show -> instance (job volume_info.yml with_instance, read-only)
   async loadOpenStack(id) {
     const token = ++this.osToken;
     this.os = {status: 'running'};
-    $('#osInfo').innerHTML = '<h3 class="review-section pf-mt-lg">OpenStack</h3><p class="pf-text-secondary" id="osStatus"><span class="pf-spinner"></span> '
-      + 'Reading the volume and the instance it is attached to (flavor, network interfaces, volumes) from OpenStack…</p>';
+    $('#osInfo').innerHTML = this.osHtml();
     try {
       const {job_id: jobId} = await api(`${BASE}/api/volume_info`, {site: Site.current, volume_id: id});
       let since = 0, data;
@@ -667,15 +673,20 @@ const Wizard = {
     }
     this.renderOpenStack();
   },
-  renderOpenStack() {
-    const box = $('#osInfo');
-    if (this.os?.status === 'failed') {
-      box.innerHTML = '<h3 class="review-section pf-mt-lg">OpenStack</h3>'
+  renderOpenStack() { $('#osInfo').innerHTML = this.osHtml(); },
+  // What OpenStack has for the volume: the volume, its instance and the other disks of that instance (also drawn by the
+  // guide of this page)
+  osHtml() {
+    if (!this.os || this.os.status === 'running') {
+      return '<h3 class="review-section pf-mt-lg">OpenStack</h3><p class="pf-text-secondary" id="osStatus"><span class="pf-spinner"></span> '
+        + 'Reading the volume and the instance it is attached to (flavor, network interfaces, volumes) from OpenStack…</p>';
+    }
+    if (this.os.status === 'failed') {
+      return '<h3 class="review-section pf-mt-lg">OpenStack</h3>'
         + alertBox('warning', 'The OpenStack volume could not be read', `${esc(this.os.error)}<br>The Review step checks OpenStack again.`);
-      return;
     }
     const {volume: v, instance, role, instance_error: instErr} = this.os.result;
-    box.innerHTML = '<h3 class="review-section pf-mt-lg">OpenStack volume</h3>' + dl([
+    return '<h3 class="review-section pf-mt-lg">OpenStack volume</h3>' + dl([
       ['Volume', `${esc(v.name || '(no name)')} <span class="mono pf-text-secondary">${esc(v.id)}</span>`],
       ['Details', `${esc(v.size_gb)} GB · ${esc(v.status)} · type ${esc(v.type || '-')}${v.bootable ? ' · bootable' : ''}`],
       ['Cinder pool', `<span class="mono">${esc(v.host)}</span>`],
@@ -753,28 +764,42 @@ const Wizard = {
   // ---------- step 2: snapshot ----------
   renderFilter() {
     if (!this.data) return;
+    $('#snapFilter').innerHTML = this.filterHtml();
+  },
+  filterHtml() {
     const kinds = [...new Set(this.commonSnapshots().map(s => s.schedule))];
-    $('#snapFilter').innerHTML = [['', 'All'], ...kinds.map(k => [k, k])]
+    return [['', 'All'], ...kinds.map(k => [k, k])]
       .map(([v, label]) => `<label><input type="radio" name="snapFilter" value="${esc(v)}"${v === this.filter ? ' checked' : ''}><span>${esc(label)}</span></label>`).join('');
   },
   renderSnapshots() {
     if (!this.data) return;
+    const view = this.snapshotsView();
+    $('#snapCount').textContent = view.count;
+    $('#snapList').innerHTML = view.rows;
+  },
+  // The count and rows of the snapshot list, with the filter and the volumes of a group (also drawn by the guide).
+  // limit: at most that many snapshots, the chosen one always among them.
+  snapshotsView(limit = Infinity) {
     const snaps = this.commonSnapshots(), volumes = this.extra.length + 1;
     const shown = snaps.filter(s => !this.filter || s.schedule === this.filter);
-    $('#snapCount').textContent = `${shown.length} of ${snaps.length} snapshots${volumes > 1 ? ` that exist for all ${volumes} volumes` : ''}`;
+    const count = `${shown.length} of ${snaps.length} snapshots${volumes > 1 ? ` that exist for all ${volumes} volumes` : ''}`;
     if (!shown.length) {
       const text = volumes > 1 && !snaps.length ? `No snapshot with the same name exists for all ${volumes} volumes. Restore them one by one.`
         : 'No snapshots with this schedule.';
-      $('#snapList').innerHTML = `<tr><td colspan="4"><div class="pf-empty-state">${icon('info')}<span>${esc(text)}</span></div></td></tr>`;
-      return;
+      return {count, rows: `<tr><td colspan="4"><div class="pf-empty-state">${icon('info')}<span>${esc(text)}</span></div></td></tr>`};
     }
+    const some = shown.slice(0, limit), chosen = shown.find(x => x.name === this.snapshot);
+    if (chosen && !some.includes(chosen)) some.splice(-1, 1, chosen);
+    return {count, rows: this.snapRowsHtml(some, this.snapshot)};
+  },
+  snapRowsHtml(shown, chosen) {
     let lastDay = '';
-    $('#snapList').innerHTML = shown.map(s => {
+    return shown.map(s => {
       const day = s.local_time.slice(0, 10);
       const group = day !== lastDay
         ? `<tr class="pf-table__group"><td colspan="4">${esc(new Date(`${day}T00:00:00`).toLocaleDateString('en-GB', {weekday: 'long', day: 'numeric', month: 'long', year: 'numeric'}))}</td></tr>` : '';
       lastDay = day;
-      const selected = s.name === this.snapshot;
+      const selected = s.name === chosen;
       return group + `<tr class="is-clickable${selected ? ' is-selected' : ''}" data-snap="${esc(s.name)}">`
         + `<td><input type="radio" name="snapshot" value="${esc(s.name)}"${selected ? ' checked' : ''} aria-label="${esc(s.local_time)} ${esc(s.name)}"></td>`
         + `<td><b>${esc(s.local_time.slice(11))}</b></td><td class="mono">${esc(s.name)}</td>`
@@ -806,8 +831,7 @@ const Wizard = {
     this.planRunning = true;
     this.render();
     const box = $('#reviewBody');
-    box.innerHTML = '<div class="pf-empty-state"><span class="pf-spinner pf-m-lg"></span><h3 class="pf-title">Checking restore prerequisites</h3>'
-      + '<span id="planTask">Running playbook plan.yml…</span></div>';
+    box.innerHTML = this.checkingHtml('Running playbook plan.yml…');
     const recheck = '<div class="pf-mt-md"><button type="button" class="pf-btn pf-m-secondary" id="recheckBtn">Check again</button></div>';
     try {
       const key = this.planKey();
@@ -826,14 +850,7 @@ const Wizard = {
           + `<details class="pf-mt-lg"><summary>Ansible output (${lines.length} lines)</summary><div class="pf-log pf-mt-md">${LogView.html(lines)}</div></details>`;
         return;
       }
-      const r = data.result, ni = r.after_restore?.new_instance || {};
-      const kept = (r.type_options || []).find(o => o.name === keep.type)?.pools || r.pools;
-      const pool = (kept?.pools || []).find(p => p.host === keep.pool && p.selectable) ? keep.pool : '';
-      const action = keep.action === 'instance' && !ni.possible ? 'none' : (keep.action || 'none');
-      const type = (r.type_options || []).some(o => o.name === keep.type) ? keep.type : (r.volume.type || '');
-      this.plan = {jobId, key, result: r, at: Date.now(), type, name: keep.key === key && keep.name ? keep.name : r.default_new_name, pool, action,
-                   attachId: keep.attachId || '', instanceName: keep.instanceName || ni.default_name || '',
-                   portNets: this.keptPortNets(keep.portNets, ni), scheduleDelete: keep.scheduleDelete ?? true};
+      this.plan = this.planFrom(jobId, key, data.result, keep);
       this.renderReview();
     } catch (e) {
       box.innerHTML = alertBox('danger', 'Check failed', esc(e.message)) + recheck;
@@ -841,6 +858,22 @@ const Wizard = {
       this.planRunning = false;
       this.render();
     }
+  },
+
+  checkingHtml(task) {
+    return '<div class="pf-empty-state"><span class="pf-spinner pf-m-lg"></span><h3 class="pf-title">Checking restore prerequisites</h3>'
+      + `<span id="planTask">${esc(task)}</span></div>`;
+  },
+  // The plan of the Review step from the result of plan.yml; keep: the choices of the plan before (Check again).
+  planFrom(jobId, key, r, keep = {}) {
+    const ni = r.after_restore?.new_instance || {};
+    const kept = (r.type_options || []).find(o => o.name === keep.type)?.pools || r.pools;
+    const pool = (kept?.pools || []).find(p => p.host === keep.pool && p.selectable) ? keep.pool : '';
+    const action = keep.action === 'instance' && !ni.possible ? 'none' : (keep.action || 'none');
+    const type = (r.type_options || []).some(o => o.name === keep.type) ? keep.type : (r.volume.type || '');
+    return {jobId, key, result: r, at: Date.now(), type, name: keep.key === key && keep.name ? keep.name : r.default_new_name, pool, action,
+            attachId: keep.attachId || '', instanceName: keep.instanceName || ni.default_name || '',
+            portNets: this.keptPortNets(keep.portNets, ni), scheduleDelete: keep.scheduleDelete ?? true};
   },
 
   // ---- Volume type and Cinder pool: chosen by the operator; the pool follows the chosen type (default: original type) ----
@@ -1181,8 +1214,9 @@ const Wizard = {
   },
   renderCommands() {
     if (!$('#reviewCmds')) return;
-    $('#reviewCmds').innerHTML = this.commands().map(c => `<pre class="pf-code-block">${esc(c)}</pre>`).join('');
+    $('#reviewCmds').innerHTML = this.commandsHtml();
   },
+  commandsHtml() { return this.commands().map(c => `<pre class="pf-code-block">${esc(c)}</pre>`).join(''); },
   nameChanged() {
     const input = $('#newName');
     this.plan.name = input.value.trim();
@@ -1193,9 +1227,14 @@ const Wizard = {
   },
   renderReview() {
     if (this.groupMode()) return this.renderGroupReview();
+    $('#reviewBody').innerHTML = this.reviewHtml();
+    this.renderCommands();
+  },
+  // The Review step of one volume, from its plan (also drawn by the guide of the Review step)
+  reviewHtml() {
     const r = this.plan.result, v = r.volume, p = r.project, t = r.transfer;
     const failed = r.checks.filter(c => !c.ok);
-    $('#reviewBody').innerHTML = (failed.length ? alertBox('danger', 'The restore cannot run yet', failed.map(c => esc(c.detail)).join('<br>'))
+    return (failed.length ? alertBox('danger', 'The restore cannot run yet', failed.map(c => esc(c.detail)).join('<br>'))
         + '<div class="pf-mt-md pf-mb-lg"><button type="button" class="pf-btn pf-m-secondary" id="recheckBtn">Check again</button></div>' : '')
       + '<h3 class="review-section">Source</h3>' + dl([
         ['Site', `${esc(r.site)} · ${esc(r.cluster)}`],
@@ -1230,7 +1269,6 @@ const Wizard = {
         + 'The deletion is refused while the original volume is attached to an instance or has snapshots.</span></span></label></div>'
         + '<div class="pf-confirm"><label class="pf-check"><input type="checkbox" id="reviewAck"><span>I have checked the volume, snapshot, Cinder pool, target project and the action after the restore. '
         + 'The original volume is not overwritten; the restore creates a new LUN and a new volume.</span></label></div>');
-    this.renderCommands();
   },
   // ---------- Review of a group: one plan per volume, one action after the restore for all ----------
   deviceOf(plan) { return String(plan.result.role?.device || '').replace('/dev/', '') || '-'; },
@@ -1262,8 +1300,7 @@ const Wizard = {
     this.render();
     const ids = [this.data.volume_id, ...this.extra.map(x => x.id)], tasks = {};
     const box = $('#reviewBody');
-    box.innerHTML = '<div class="pf-empty-state"><span class="pf-spinner pf-m-lg"></span><h3 class="pf-title">Checking restore prerequisites</h3>'
-      + `<span id="planTask">Running playbook plan.yml for ${ids.length} volumes…</span></div>`;
+    box.innerHTML = this.checkingHtml(`Running playbook plan.yml for ${ids.length} volumes…`);
     const recheck = '<div class="pf-mt-md"><button type="button" class="pf-btn pf-m-secondary" id="recheckBtn">Check again</button></div>';
     try {
       const key = this.planKey();
@@ -1341,6 +1378,11 @@ const Wizard = {
     return list;
   },
   renderGroupReview() {
+    $('#reviewBody').innerHTML = this.groupReviewHtml();
+    this.renderCommands();
+  },
+  // The Review step of a group (also drawn by the guide of the Review step)
+  groupReviewHtml() {
     const plans = this.plans, base = this.plan.result, p = base.project, t = base.transfer, order = this.runOrder();
     const notReady = plans.filter(pl => !pl.result.ready);
     const failedText = pl => pl.result.checks.filter(c => !c.ok).map(c => esc(c.detail)).join('; ');
@@ -1366,7 +1408,7 @@ const Wizard = {
         + (r.ready ? `<h4 class="review-subsection">Volume type and Cinder pool <span class="pf-required" aria-hidden="true">*</span></h4>${this.typeField(pl, i)}${this.poolTable(pl, i)}` : '')
         + '</details>';
     }).join('');
-    $('#reviewBody').innerHTML = (notReady.length ? alertBox('danger', 'The restore cannot run yet',
+    return (notReady.length ? alertBox('danger', 'The restore cannot run yet',
         notReady.map(pl => `<b>${esc(this.planLabel(pl))}</b>: ${failedText(pl)}`).join('<br>'))
         + '<div class="pf-mt-md pf-mb-lg"><button type="button" class="pf-btn pf-m-secondary" id="recheckBtn">Check again</button></div>' : '')
       + `<h3 class="review-section">${plans.length} volumes of ${esc(base.instance?.name || 'the instance')}${notReady.length ? ''
@@ -1388,7 +1430,6 @@ const Wizard = {
         + '<span class="pf-helper-text">Nothing is deleted without that approval (menu Approvals). The deletion is refused while an original volume is attached to an instance or has snapshots.</span></span></label></div>'
         + `<div class="pf-confirm"><label class="pf-check"><input type="checkbox" id="reviewAck"><span>I have checked the ${plans.length} volumes, the snapshot, the Cinder pools, the target project and the action after the restore. `
         + 'The original volumes are not overwritten; each restore creates a new LUN and a new volume.</span></label></div>');
-    this.renderCommands();
   },
   async launch() {
     if (this.groupMode()) return this.launchGroup();
@@ -1796,29 +1837,30 @@ const Approvals = {
     $('#apNotice').innerHTML = admin ? '' : `<div class="pf-mb-lg">${alertBox('info', 'Only administrators decide',
       'You can check a volume; an administrator approves the deletion, keeps the volume, or postpones it.')}</div>`;
     $('#apShown').textContent = this.items.length ? `${this.items.length} volume${this.items.length === 1 ? '' : 's'}` : '';
-    $('#apList').innerHTML = this.items.map(d => {
-      const open = ['scheduled', 'awaiting', 'failed'].includes(d.state);
-      const actions = d.state === 'deleted' || d.state === 'deleting' ? []
-        : [`<button type="button" class="pf-btn pf-m-secondary pf-m-small" data-act="check" data-id="${d.id}">Check</button>`];
-      if (admin && open) {
-        if (d.state !== 'scheduled') actions.push(`<button type="button" class="pf-btn pf-m-danger pf-m-small" data-act="approve" data-id="${d.id}">Approve…</button>`);
-        actions.push(`<select class="pf-form-control" id="apHours${d.id}" aria-label="Postpone by"><option value="24">1 day</option><option value="72">3 days</option><option value="168">7 days</option></select>`
-          + `<button type="button" class="pf-btn pf-m-secondary pf-m-small" data-act="postpone" data-id="${d.id}">Postpone</button>`);
-        actions.push(`<button type="button" class="pf-btn pf-m-link pf-m-small" data-act="keep" data-id="${d.id}">Keep volume</button>`);
-      }
-      const check = ['deleted', 'deleting'].includes(d.state) ? null
-        : this.checks[d.id] || (d.check_result ? {result: safeJson(d.check_result), at: d.checked_at} : null);
-      return `<tr><td class="pf-nowrap">${esc(fmtTime(d.due))}${d.state === 'scheduled' ? `<span class="pf-table__sub">${esc(untilText(d.due))}</span>` : ''}</td>`
-        + `<td>${esc(d.volume_name || '(no name)')}<span class="pf-table__sub mono">${esc(d.volume_id)}</span>`
-        + `<span class="pf-table__sub">project <span class="mono">${esc(d.project_name || d.project_id)}</span></span>${checkText(check)}</td>`
-        + `<td class="pf-nowrap"><span class="site-dot" style="--site-color:${Site.info(d.site).color}"></span> ${esc(d.site)}</td>`
-        + `<td><a href="#/jobs/${d.restore_id}">Restore #${d.restore_id}</a><span class="pf-table__sub">by ${esc(d.restored_by)} · new volume</span>`
-        + `<span class="pf-table__sub mono">${esc(d.new_volume_id)}</span></td>`
-        + `<td>${deletionLabel(d.state)}${d.decided_by ? `<span class="pf-table__sub">${esc(d.decided_by)} · ${esc(fmtTime(d.decided_at))}</span>` : ''}`
-        + `${d.error ? `<span class="pf-table__sub pf-text-danger">${esc(d.error)}</span>` : ''}${d.note ? `<span class="pf-table__sub">${esc(d.note)}</span>` : ''}</td>`
-        + `<td class="pf-table__actions"><div class="ap-actions">${actions.join('')}</div></td></tr>`;
-    }).join('') || `<tr><td colspan="6"><div class="pf-empty-state">${icon('check-circle')}<h2 class="pf-title">Nothing here</h2>`
+    $('#apList').innerHTML = this.items.map(d => this.rowHtml(d, admin)).join('') || `<tr><td colspan="6"><div class="pf-empty-state">${icon('check-circle')}<h2 class="pf-title">Nothing here</h2>`
       + '<span>Original volumes appear here when a restore schedules them for deletion (Review step).</span></div></td></tr>';
+  },
+  rowHtml(d, admin) {
+    const open = ['scheduled', 'awaiting', 'failed'].includes(d.state);
+    const actions = d.state === 'deleted' || d.state === 'deleting' ? []
+      : [`<button type="button" class="pf-btn pf-m-secondary pf-m-small" data-act="check" data-id="${d.id}">Check</button>`];
+    if (admin && open) {
+      if (d.state !== 'scheduled') actions.push(`<button type="button" class="pf-btn pf-m-danger pf-m-small" data-act="approve" data-id="${d.id}">Approve…</button>`);
+      actions.push(`<select class="pf-form-control" id="apHours${d.id}" aria-label="Postpone by"><option value="24">1 day</option><option value="72">3 days</option><option value="168">7 days</option></select>`
+        + `<button type="button" class="pf-btn pf-m-secondary pf-m-small" data-act="postpone" data-id="${d.id}">Postpone</button>`);
+      actions.push(`<button type="button" class="pf-btn pf-m-link pf-m-small" data-act="keep" data-id="${d.id}">Keep volume</button>`);
+    }
+    const check = ['deleted', 'deleting'].includes(d.state) ? null
+      : this.checks[d.id] || (d.check_result ? {result: safeJson(d.check_result), at: d.checked_at} : null);
+    return `<tr><td class="pf-nowrap">${esc(fmtTime(d.due))}${d.state === 'scheduled' ? `<span class="pf-table__sub">${esc(untilText(d.due))}</span>` : ''}</td>`
+      + `<td>${esc(d.volume_name || '(no name)')}<span class="pf-table__sub mono">${esc(d.volume_id)}</span>`
+      + `<span class="pf-table__sub">project <span class="mono">${esc(d.project_name || d.project_id)}</span></span>${checkText(check)}</td>`
+      + `<td class="pf-nowrap"><span class="site-dot" style="--site-color:${Site.info(d.site).color}"></span> ${esc(d.site)}</td>`
+      + `<td><a href="#/jobs/${d.restore_id}">Restore #${d.restore_id}</a><span class="pf-table__sub">by ${esc(d.restored_by)} · new volume</span>`
+      + `<span class="pf-table__sub mono">${esc(d.new_volume_id)}</span></td>`
+      + `<td>${deletionLabel(d.state)}${d.decided_by ? `<span class="pf-table__sub">${esc(d.decided_by)} · ${esc(fmtTime(d.decided_at))}</span>` : ''}`
+      + `${d.error ? `<span class="pf-table__sub pf-text-danger">${esc(d.error)}</span>` : ''}${d.note ? `<span class="pf-table__sub">${esc(d.note)}</span>` : ''}</td>`
+      + `<td class="pf-table__actions"><div class="ap-actions">${actions.join('')}</div></td></tr>`;
   },
   async waitJob(jobId) {
     for (;;) {
@@ -1856,7 +1898,8 @@ const Approvals = {
     if (!dialog.open) return this.render();
     $('#approveBody').innerHTML = approveBody(d, result);
     const buttons = [];
-    if (result.can_delete) buttons.push('<button type="submit" class="pf-btn pf-m-danger" value="delete">Delete volume</button>');
+    const snaps = (result.snapshots || []).length;
+    if (result.can_delete) buttons.push(`<button type="submit" class="pf-btn pf-m-danger" value="delete">${snaps ? `Delete ${snaps} snapshot${snaps > 1 ? 's' : ''} and the volume` : 'Delete volume'}</button>`);
     if (result.can_detach) buttons.push('<button type="submit" class="pf-btn pf-m-danger" value="detach">Detach and delete</button>');
     const inst = result.can_delete_instance ? (result.attachments || [])[0] : null;
     if (inst) buttons.push('<button type="submit" class="pf-btn pf-m-danger" value="instance" id="apInstanceBtn" disabled>Delete instance and volume</button>');
@@ -1870,14 +1913,14 @@ const Approvals = {
     const choice = await closed;
     this.render();
     if (!['delete', 'detach', 'gone', 'instance'].includes(choice)) return;
-    const body = {confirm: true};
+    const body = {confirm: true, snapshots: (result.snapshots || []).map(x => x.id)};
     if (choice === 'detach') Object.assign(body, {detach: true, detach_servers: result.attachments.map(a => a.server_id)});
     if (choice === 'instance') Object.assign(body, {delete_instance: true, delete_server: inst.server_id,
                                                    delete_server_name: $('#apInstanceName').value.trim()});
     const {job_id: jobId} = await api(`${BASE}/api/deletions/${d.id}/approve`, body);
     toast(choice === 'gone' ? 'Recording the volume as already deleted…' : choice === 'instance'
       ? `Deleting instance ${inst.server_name || inst.server_id}, then volume ${d.volume_id}…`
-      : `${choice === 'detach' ? 'Detaching and deleting' : 'Deleting'} volume ${d.volume_id}…`, 'info');
+      : `${choice === 'detach' ? 'Detaching and deleting' : 'Deleting'} ${(result.snapshots || []).length ? 'the snapshots, then ' : ''}volume ${d.volume_id}…`, 'info');
     await this.load();
     const data = await this.waitJob(jobId);
     if (data.status === 'success') toast(data.result?.summary || 'The volume was deleted.', 'success');
@@ -1925,15 +1968,22 @@ function approveBody(d, r) {
     + ` as <span class="mono">${esc(a.device || '?')}</span>${a.reason ? ` <span class="${a.instance_deletable ? 'pf-text-secondary' : 'pf-text-danger'}">— ${esc(a.reason)}</span>` : ''}`).join('<br>');
   const luns = (r.luns || []).map(l => `<span class="mono">${esc(l.name)}</span><br><span class="pf-text-secondary">SVM ${esc(l.svm)} · `
     + `${bytes(l.size)} · ${bytes(l.used)} used · ${esc(l.state || '?')} · ${l.mapped ? 'mapped' : 'not mapped'}</span>`).join('<br>');
+  const snaps = r.snapshots || [];
+  const snapList = snaps.map(x => `${esc(x.name || '(no name)')} <span class="mono pf-text-secondary">${esc(x.id)}</span>`
+    + `<br><span class="${['available', 'error'].includes(x.status) ? 'pf-text-secondary' : 'pf-text-danger'}">${esc(x.size_gb)} GB · ${esc(x.status || '?')}`
+    + `${x.created ? ` · created ${esc(fmtTime(x.created))}` : ''}</span>`).join('<br>');
+  const snapFirst = snaps.length ? `Its ${snaps.length} Cinder snapshot${snaps.length > 1 ? 's are' : ' is'} deleted first (Cinder does not delete a volume `
+    + 'that has snapshots); the volume only once they are gone. ' : '';
   let verdict;
   if (r.can_delete) {
     verdict = alertBox('warning', 'The volume can be deleted',
-      `Delete volume removes <span class="mono">${esc(d.volume_id)}</span> from OpenStack; Cinder also removes its LUN in NetApp. `
+      `${snaps.length ? `Delete ${snaps.length} snapshot${snaps.length > 1 ? 's' : ''} and the volume` : 'Delete volume'} removes `
+      + `<span class="mono">${esc(d.volume_id)}</span> from OpenStack; Cinder also removes its LUN in NetApp. ${snapFirst}`
       + 'This cannot be undone (the data stays in the FlexVol snapshots until they expire).');
   } else if (r.can_detach) {
     verdict = alertBox('warning', 'Still attached: detach first',
       `Detach and delete removes the disk from ${(r.attachments || []).map(a => `${esc(a.server_name || a.server_id)} (${esc(a.device)})`).join(', ')} `
-      + 'first, then deletes the volume. Make sure it is no longer mounted or used inside the operating system.');
+      + `first, then deletes the volume. ${snapFirst}Make sure it is no longer mounted or used inside the operating system.`);
   } else if (r.can_delete_instance) {
     const a = r.attachments[0];
     const name = a.server_name || a.server_id;
@@ -1943,6 +1993,7 @@ function approveBody(d, r) {
       + (a.delete_on_termination
         ? 'The volume is set to <b>delete on termination</b>: Nova deletes it together with the instance; the portal then checks that the volume and its LUN are gone. '
         : 'Then the volume (no longer attached) is deleted; Cinder also removes its LUN in NetApp. ')
+      + snapFirst
       + ((a.other_volumes || []).length ? `Its other disks (${a.other_volumes.map(esc).join(', ')}) are only detached and stay. ` : '')
       + 'This cannot be undone.'
       + `<div class="pf-form__group pf-mt-md"><label class="pf-form__label" for="apInstanceName">Type the instance name <b>${esc(name)}</b> to confirm</label>`
@@ -1959,7 +2010,7 @@ function approveBody(d, r) {
       + `<br><span class="pf-text-secondary">${esc(r.volume?.size_gb)} GB · ${esc(r.volume?.status)}</span>`],
     byKey.project && ['Project', line(byKey.project)],
     byKey.detached && ['Attached', atts || line(byKey.detached)],
-    byKey.snapshots && ['Snapshots', line(byKey.snapshots)],
+    byKey.snapshots && ['Snapshots', snapList ? `${line(byKey.snapshots)}<br>${snapList}` : line(byKey.snapshots)],
   ]) + '<h3 class="review-section">NetApp</h3>' + dl([
     ['LUN', luns || line(byKey.netapp)],
     (r.warnings || []).length && ['Note', esc(r.warnings.join(' '))],
@@ -2043,7 +2094,14 @@ const History = {
   },
   filtered() { return ['#hiQ', '#hiUser', '#hiSite', '#hiStatus'].some(sel => $(sel).value.trim()); },
   render() {
-    $('#hiList').innerHTML = this.items.map(x => `<tr class="is-clickable" data-id="${x.id}" tabindex="0">`
+    $('#hiList').innerHTML = this.items.map(x => this.rowHtml(x)).join('')
+      || `<tr><td colspan="8"><div class="pf-empty-state">${this.filtered()
+        ? `${icon('search')}<h2 class="pf-title">No results found</h2><span>Change the search or filters.</span>`
+        : `${icon('cubes')}<h2 class="pf-title">No restores yet</h2><span>Restores launched from this app are listed here.</span>`}</div></td></tr>`;
+    this.after();
+  },
+  rowHtml(x) {
+    return `<tr class="is-clickable" data-id="${x.id}" tabindex="0">`
       + `<td>${x.id}${x.group_id ? `<a class="pf-table__sub pf-nowrap" href="#/groups/${x.group_id}">group #${esc(x.group_id)}</a>` : ''}</td>`
       + `<td><a href="#/jobs/${x.id}">${esc(x.volume_name || '(no name)')}</a><span class="pf-table__sub mono pf-nowrap">${esc(x.volume_id)}</span></td>`
       + `<td>${statusLabel(x.status)}${String(x.post_result || '').startsWith('failed') ? ` <span class="pf-label pf-m-gold pf-m-compact" title="${esc(x.post_result)}">${icon('alert')}action failed</span>` : ''}</td>`
@@ -2052,10 +2110,9 @@ const History = {
       + `<td>${esc(x.project_name || x.project_id || '')}<span class="pf-table__sub">${esc(afterSummary(x))}</span>`
       + `${x.cinder_pool ? `<span class="pf-table__sub mono" title="${esc(x.cinder_pool)}">${esc(poolName(x.cinder_pool))}</span>` : ''}</td>`
       + `<td class="pf-nowrap">${esc(x.username)}</td>`
-      + `<td class="pf-nowrap" title="${esc(fmtTime(x.ts))}">${esc(shortTime(x.ts))}</td></tr>`).join('')
-      || `<tr><td colspan="8"><div class="pf-empty-state">${this.filtered()
-        ? `${icon('search')}<h2 class="pf-title">No results found</h2><span>Change the search or filters.</span>`
-        : `${icon('cubes')}<h2 class="pf-title">No restores yet</h2><span>Restores launched from this app are listed here.</span>`}</div></td></tr>`;
+      + `<td class="pf-nowrap" title="${esc(fmtTime(x.ts))}">${esc(shortTime(x.ts))}</td></tr>`;
+  },
+  after() {
     $('#hiShown').textContent = this.total ? `${this.items.length} of ${this.total}` : '';
     $('#hiMore').hidden = this.items.length >= this.total;
     // Like the Jobs list in AWX: the status of a restore that is still running updates by itself.

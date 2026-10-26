@@ -18,14 +18,26 @@ Used by the Ansible filter plugin (playbooks/filter_plugins/wi_filters.py) and b
   collect    an archive from an overcloud node (log files of a time window, or a sos report) streamed through the director
              and the management host into the bundle folder of the run (see logs.py, wi_collect.py)
 """
+import base64
+import gzip
 import os
 import re
 import shlex
+import urllib.parse
 
-from . import (capacity, certs, exports, hardware, linux, logs, network, ontap, openstack, openstack_health, openstack_ops,
-               overcloud, overcloud_checks, screens, vcloud, vmware, vyos_upgrade)
+from . import (capacity, cert_inventory, certs, control_plane, exports, hardware, linux, logs, network, ontap, openstack, openstack_health, openstack_ops,
+               ontap_health, overcloud, overcloud_checks, ovn, prime_platform, screens, template, vcloud, vmware, vyos_upgrade)
+from .common import unavailable
 
 CHECKS = {
+    "nsxt-gateway-routing": prime_platform.NsxtGatewayRouting,
+    "vcd-platform": prime_platform.VcdPlatform,
+    "vcenter-appliance": prime_platform.VcenterAppliance,
+    "ontap-volume-lun-state": ontap_health.OntapVolumeLunState,
+    "ontap-ha-redundancy": ontap_health.OntapHaRedundancy,
+    "ovn-db-cluster": control_plane.OvnDbCluster,
+    "rabbitmq-queues": control_plane.RabbitmqQueues,
+    "galera-wsrep": control_plane.GaleraWsrep,
     "cinder-pool-usage": openstack.CinderPoolUsage,
     "volume-type-legacy": openstack.VolumeTypeLegacy,
     "project-quota": openstack.ProjectQuota,
@@ -33,6 +45,7 @@ CHECKS = {
     "volume-attach": openstack.VolumeAttach,
     "instance-network": openstack.InstanceNetwork,
     "custom-port-tcp": openstack.InstanceNetwork,
+    "ovn-fdb-learning": ovn.OvnFdbLearning,
     "openstack-services": openstack_health.OpenstackServices,
     "ironic-nodes": openstack_health.IronicNodes,
     "bmc-health": hardware.BmcHealth,
@@ -50,6 +63,8 @@ CHECKS = {
     "linux-resources": capacity.LinuxResources,
     "ontap-capacity": capacity.OntapCapacity,
     "cert-expiry": certs.CertExpiry,
+    "cert-inventory": cert_inventory.CertInventory,
+    "certmonger-status": cert_inventory.CertmongerStatus,
     "ontap-cluster-health": ontap.OntapClusterHealth,
     "cdn-disk-run": linux.CdnDiskRun,
     "cdn-root-disk": linux.CdnRootDisk,
@@ -79,7 +94,7 @@ CHECKS = {
 }
 SOURCES = ("openstack", "ontap", "vcenter", "nsxt", "vcd", "vsphere", "host", "device", "tcp", "undercloud", "redfish", "overcloud", "tls",
            "collect")
-VSPHERE_SETS = ("hosts", "vms", "pools", "clusters", "alarms", "events", "hosthealth", "vmhealth", "datastores")
+VSPHERE_SETS = ("hosts", "vms", "pools", "clusters", "alarms", "events", "hosthealth", "vmhealth", "datastores", "hostcerts")
 
 
 def vsphere_set_ok(name):
@@ -98,11 +113,27 @@ OPENSTACK_READ = re.compile(
     r"|openstack (quota|limits) show( |$)|openstack --version$"
     r"|cinder (get-pools|list|show|snapshot-list|type-list|service-list)( |$)"
     r"|date -u \+%Y-%m-%dT%H:%M:%SZ$)")
-# The undercloud (stackrc): the bare metal nodes as ironic sees them through their BMC, nothing else.
+# The undercloud (stackrc): the bare metal nodes as ironic sees them through their BMC, and the certificates certmonger
+# tracks on the director (getcert list), nothing else.
 UNDERCLOUD_READ = re.compile(r"^(openstack baremetal node (list|show)( |$)|openstack server list -f json$|metalsmith -f json list$"
-                             r"|cat /etc/rhosp-release$|date -u \+%Y-%m-%dT%H:%M:%SZ$|"
+                             r"|cat /etc/rhosp-release$|date -u \+%Y-%m-%dT%H:%M:%SZ$|sudo -n getcert list$|"
                              + re.escape(overcloud.INVENTORY_GREP) + "$|" + re.escape(overcloud.PORTS_READ) + "$)")
-SHELL_META = re.compile(r"[;&|`$<>(){}\\\n]")
+SHELL_META = re.compile(r"[;&|`$<>(){}\\\n\"]|(^|\s)#")   # outside '...': no shell syntax, no "...", no comment
+# options of the clients themselves: another Keystone (the admin password would go there), a log file, debug output
+CLIENT_OPTION = re.compile(r"(^|\s)(--os-[A-Za-z-]+|--log-file|--debug)(=|\s|$)")
+
+
+def shell_problem(text):
+    """Why a command line is not safe to paste into the script of the director ("" when it is): every quote paired, and
+    outside the '...' strings no shell syntax and no option that redirects the client."""
+    if text.count("'") % 2:
+        return "an unpaired quote"
+    bare = re.sub(r"'[^']*'", "''", text)
+    if SHELL_META.search(bare):
+        return "shell syntax"
+    if CLIENT_OPTION.search(bare):
+        return "an option of the client itself (--os-*, --log-file, --debug)"
+    return ""
 # Changes a fix may make on OpenStack (Run this fix, permission wi-fix-openstack), each with strict arguments: only the
 # commands the analysis generated from what it read, never text from the browser.
 _U = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"   # UUID
@@ -116,6 +147,7 @@ _IP4 = r"\d{1,3}(\.\d{1,3}){3}"
 _NM = rf"(-|{_HN}={_IP4}(,{_HN}={_IP4}){{0,63}})"                         # ctlplane address of the computes
 _PH = r"[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+#[A-Za-z0-9_.-]+"                 # cinder pool, unquoted
 _UL = rf"(-|{_U}(,{_U}){{0,49}})"                                       # IDs (snapshots)
+_AD = r"[0-9a-fA-F.:]{2,39}(/\d{1,3})?"                                 # IPv4 / IPv6 address or network
 OPENSTACK_FIX = [re.compile("^" + x + "$") for x in (
     rf"cinder migrate {_U} {_H}",   # as the Red Hat OpenStack Platform storage guide: cinder migrate <volume> <host@backend#pool>
     # cinder retype: the same syntax on every client version (openstack volume set renamed --retype-policy in 2024)
@@ -140,7 +172,16 @@ OPENSTACK_FIX = [re.compile("^" + x + "$") for x in (
     rf"cold-migrate {_U} from {_HN} to ({_HN}|auto) try {_HL} timeout \d{{2,5}}"
     rf"( nodes {_NM} user (heat-admin|tripleo-admin|-) under \d{{2}} ram \d{{1,8}})?",
     rf"migrate-volume {_U} to {_PH} try (-|{_PH}(,{_PH}){{0,3}}) timeout \d{{2,5}} snapshots {_UL}",
+    # the volume type of one volume (on-demand migration), its approved snapshots deleted first
+    rf"retype-volume {_U} to [A-Za-z0-9][A-Za-z0-9_.:-]{{0,127}} timeout \d{{2,5}} snapshots {_UL}",
     rf"delete-image {_U} expect (size0|any) snapshots {_UL}",
+    # one OVN FDB entry (its UUID), checked again on the node before and after the destroy (WI "FDB Learning Issue")
+    rf"clear-fdb {_U} dp \d{{1,9}} mac [0-9a-f]{{12}} port \d{{1,9}} node {_HN}={_IP4} user (heat-admin|tripleo-admin)",
+    # port security on for one port, with the allow-all security group of its project and the VIPs of the check (stage 9)
+    rf"port-security {_U} project {_P} sg port-security-allow-all allow (-|{_AD}(,{_AD}){{0,15}}) dp \d{{1,9}} pkey \d{{1,9}} "
+    rf"node {_HN}={_IP4} user (heat-admin|tripleo-admin)",
+    # one certmonger request of an overcloud node resubmitted to its CA, followed until it monitors a new certificate
+    rf"getcert-resubmit [A-Za-z0-9_.-]{{1,64}} node {_HN}={_IP4} user (heat-admin|tripleo-admin)",
     # The scheduler stops / starts placing instances on a compute (before and after it is emptied).
     rf"openstack compute service set --disable --disable-reason '[A-Za-z0-9 _.:,-]{{1,80}}' {_HN} nova-compute",
     rf"openstack compute service set --enable {_HN} nova-compute",
@@ -174,15 +215,18 @@ wi_wait() {
 }"""
 # What deletes on OpenStack (the operator types the ID, the name or the number of items): also an image clean-up and a
 # volume migration that deletes the volume's snapshots first.
-OPENSTACK_DELETE = re.compile(r"^(openstack (volume snapshot|server|image) delete|cinder delete|delete-image) "
-                              r"|^migrate-volume .* snapshots [0-9a-f]")
-OPS = ("live-migrate", "cold-migrate", "migrate-volume", "delete-image")
+OPENSTACK_DELETE = re.compile(r"^(openstack (volume snapshot|server|image) delete|cinder delete|delete-image|clear-fdb|port-security) "
+                              r"|^(migrate|retype)-volume .* snapshots [0-9a-f]")
+OPS = ("live-migrate", "cold-migrate", "migrate-volume", "retype-volume", "delete-image", "clear-fdb", "port-security",
+       "getcert-resubmit")
 OPS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wi_ops.py")
 REST_PATH = re.compile(r"^/[A-Za-z0-9_\-./:]*(\?[A-Za-z0-9_\-.,=&|%:;]*)?$")
 MARK = "@@WI@@"
 
 
 def check(check_id):
+    if str(check_id).startswith("tpl-"):   # a template made on the portal: its steps come with the run (ctx["template"])
+        return template.Template
     try:
         return CHECKS[check_id]
     except KeyError:
@@ -235,8 +279,8 @@ def assert_openstack_read(command):
     text = str(command or "")
     if not OPENSTACK_READ.match(text):
         raise ValueError(f"Refused: not a read-only OpenStack command: {text[:120]}")
-    if SHELL_META.search(re.sub(r"'[^']*'", "", text)) and not text.startswith("date -u "):
-        raise ValueError(f"Refused: shell syntax in an OpenStack command: {text[:120]}")
+    if shell_problem(text) and not text.startswith("date -u "):
+        raise ValueError(f"Refused: {shell_problem(text)} in an OpenStack command: {text[:120]}")
     return text
 
 
@@ -245,8 +289,8 @@ def assert_undercloud_read(command):
     text = str(command or "")
     if not UNDERCLOUD_READ.match(text):
         raise ValueError(f"Refused: not a read-only undercloud command: {text[:120]}")
-    if SHELL_META.search(re.sub(r"'[^']*'", "", text)) and not text.startswith("date -u "):
-        raise ValueError(f"Refused: shell syntax in an undercloud command: {text[:120]}")
+    if shell_problem(text) and not text.startswith("date -u ") and text not in (overcloud.INVENTORY_GREP, overcloud.PORTS_READ):
+        raise ValueError(f"Refused: {shell_problem(text)} in an undercloud command: {text[:120]}")
     return text
 
 
@@ -254,19 +298,93 @@ def openstack_fix_command(command):
     """The command of an OpenStack fix without its trailing comment ("   # ..."); ValueError unless it is an allowed
     change (OPENSTACK_FIX) or an allowed read (to show the result), without shell syntax."""
     text = re.sub(r"\s{2,}#\s.*$", "", str(command or "")).strip()
-    if SHELL_META.search(re.sub(r"'[^']*'", "", text)):
-        raise ValueError(f"Refused: shell syntax in an OpenStack fix: {text[:120]}")
+    if shell_problem(text):
+        raise ValueError(f"Refused: {shell_problem(text)} in an OpenStack fix: {text[:120]}")
     if not any(p.match(text) for p in OPENSTACK_FIX):
         assert_openstack_read(text)
     return text
 
 
-def os_action_script(commands, overcloudrc="~/overcloudrc"):
+# ---------------- live output of a long fix (an item of an OpenStack fix): the script runs in the background on the
+# director, its output goes to a private temporary folder there, read every few seconds and shown on the run page; the
+# last read gives its full output and exit code exactly as one raw run would (then the folder is removed).
+LIVE_DIR = re.compile(r"^/tmp/wi-live\.[A-Za-z0-9]{8,16}$")
+
+
+def live_start(script):
+    """Shell for the director: start the script in the background (it survives the SSH session); prints its folder."""
+    # compressed: the whole start line is one argument of ssh / bash -c (Linux: 128 KB at most), wi_ops.py included
+    payload = base64.b64encode(gzip.compress(str(script).encode())).decode()
+    return ("# wi-live start\n"
+            "d=$(mktemp -d /tmp/wi-live.XXXXXXXX) || exit 97\n"
+            f"printf %s '{payload}' | base64 -d | gunzip > \"$d/script\" || exit 97\n"
+            # the exit code written whole (rc.tmp, then renamed): a reader never sees the file before the code is in it
+            "nohup setsid bash -c 'bash \"$1/script\" > \"$1/out\" 2>&1 < /dev/null; echo $? > \"$1/rc.tmp\"; "
+            "mv \"$1/rc.tmp\" \"$1/rc\"' _ \"$d\" > /dev/null 2>&1 < /dev/null &\n"
+            f"echo \"{MARK}live $d\"")
+
+
+def live_dir(stdout):
+    m = re.search(rf"^{re.escape(MARK)}live (\S+)$", str(stdout or ""), re.M)
+    return m.group(1) if m and LIVE_DIR.match(m.group(1)) else ""
+
+
+def live_poll(folder, seen, wait=5):
+    """Shell: wait, then the complete lines after the first `seen` ones, and the exit code once the script ended."""
+    if not LIVE_DIR.match(str(folder)):
+        raise ValueError("invalid live folder")
+    return (f"# wi-live poll\nsleep {max(0, min(int(wait), 60))}\nd={folder}; n={max(0, int(seen))}\n"
+            "t=$( (cat \"$d/out\" 2>/dev/null || true) | wc -l | tr -d ' ')\n"
+            "[ \"$t\" -gt \"$n\" ] && sed -n \"$((n+1)),${t}p\" \"$d/out\"\n"
+            f"echo \"{MARK}live-at $t $(cat \"$d/rc\" 2>/dev/null)\"")
+
+
+def live_lines(stdout):
+    """{"lines": new complete lines, "at": lines read so far, "rc": exit code or None while it runs} of a poll."""
+    text = str(stdout or "")
+    found = list(re.finditer(rf"^{re.escape(MARK)}live-at (\d+) ?(\d*)\s*$", text, re.M))
+    m = found[-1] if found else None   # the poll prints its marker last; a line of the output can look like one
+    if not m:
+        return {"lines": [], "at": None, "rc": None}
+    lines = [l for l in text[:m.start()].splitlines()]
+    return {"lines": lines, "at": int(m.group(1)), "rc": int(m.group(2)) if m.group(2) else None}
+
+
+def live_wait(folder, seconds):
+    """Shell: wait until the script ended (no more live output: the run page shows it at the end), up to `seconds`."""
+    if not LIVE_DIR.match(str(folder)):
+        raise ValueError("invalid live folder")
+    return (f"# wi-live wait\nd={folder}; end=$(( $(date +%s) + {max(60, int(seconds))} ))\n"
+            "while [ ! -f \"$d/rc\" ] && [ \"$(date +%s)\" -lt \"$end\" ]; do sleep 10; done\n"
+            f"echo \"{MARK}live-at 0 $(cat \"$d/rc\" 2>/dev/null)\"")
+
+
+def live_interval(polls):
+    """Seconds before poll number `polls` (0-based): often at first, less often for long items."""
+    polls = int(polls)
+    return 5 if polls < 12 else 15 if polls < 48 else 30 if polls < 84 else 60
+
+
+LIVE_MAX_POLLS = 120   # include depth of tasks/live_poll.yml (Ansible stops near 200 nested includes): then live_wait
+
+
+def live_end(folder):
+    """Shell: the full output and the exit code of the script (as if it had run directly), then the folder removed."""
+    if not LIVE_DIR.match(str(folder)):
+        raise ValueError("invalid live folder")
+    return (f"# wi-live end\nd={folder}\ncat \"$d/out\" 2>/dev/null\nrc=$(cat \"$d/rc\" 2>/dev/null)\n"
+            "rm -rf \"$d\"\nexit ${rc:-98}")
+
+
+def os_action_script(commands, overcloudrc="~/overcloudrc", until=0):
     """One script for an OpenStack fix on the director: source overcloudrc, then each command between markers (keys a1,
-    a2, ... as action_result expects), stopping at the first that fails."""
+    a2, ... as action_result expects), stopping at the first that fails. until: the end of the time of the item (epoch
+    seconds): wi_ops.py starts no change and waits no longer after it."""
     if not re.match(r"^[~A-Za-z0-9_./-]+$", str(overcloudrc)):
         raise ValueError("invalid overcloudrc path")
     parts = [f"source {overcloudrc} >/dev/null 2>&1 || {{ echo 'source {overcloudrc} failed'; exit 97; }}", OS_FUNCTIONS]
+    if int(until or 0) > 0:
+        parts.insert(0, f"export WI_ITEM_UNTIL={int(until)}")
     texts = [openstack_fix_command(cmd) for cmd in commands]
     if any(t.split(" ", 1)[0] in OPS for t in texts):
         parts.append(ops_preamble())
@@ -512,21 +630,145 @@ def items_result(results, items):
 
 def batch(stdout, keys):
     """Split the output of os_script / host_script: {key: {"rc", "out"}}; a key without output is skipped."""
-    found, current, buf = {}, None, []
+    found, current, buf, ended, end_line = {}, None, [], None, ""
     for line in str(stdout or "").splitlines():
         if line.startswith(f"{MARK}begin "):
-            current, buf = line[len(MARK) + 6:].strip(), []
+            current, buf, ended = line[len(MARK) + 6:].strip(), [], None
             continue
         m = re.match(rf"^{re.escape(MARK)}end (\S+) (\d+)$", line)
-        if m and current == m.group(1):
-            found[current] = {"rc": int(m.group(2)), "out": "\n".join(buf)}
-            current = None
+        if m and m.group(1) in (current, ended):   # the last end of a command wins: an output line can look like one
+            found[m.group(1)] = {"rc": int(m.group(2)), "out": "\n".join(buf)}
+            current, ended, end_line = None, m.group(1), line
             continue
+        if current is None and ended is not None:   # more output of the same command: that "end" was a line of it
+            current = ended
+            buf.append(end_line)
         if current is not None:
             buf.append(line)
     for key in keys:
         found.setdefault(key, {"skipped": "no output (the connection or the script stopped before this command)"})
     return found
+
+
+# ---------------- pages of the REST lists: a list that is longer than one answer (ONTAP _links.next, NSX cursor, vCloud
+# Director page / pageCount, query service total) is read to its end, page after page, between the phases of a check
+# (playbooks/tasks/read_pages.yml), and its pages are merged into the first answer: a check rates every item without
+# knowing pages exist. "The latest N" (sorted: order_by, sortDesc / sortAsc) is never followed.
+PAGE_SOURCES = ("ontap", "nsxt", "vcd")
+PAGE_ROUNDS = 8       # ONTAP / NSX: pages one after the other (each answer gives the next), after the first
+VCD_MAX_PAGES = 40    # vCloud Director: the pages its first answer announces, read together
+TOP_N = re.compile(r"[?&](order_by|sortDesc|sortAsc)=")
+PAGE_KEY = re.compile(r"^(.+):p(\d+)$")
+
+
+def _with_param(path, name, value):
+    base, _, query = str(path).partition("?")
+    parts = [p for p in query.split("&") if p and p.split("=", 1)[0] != name]
+    return base + "?" + "&".join(parts + [f"{name}={value}"])
+
+
+def _safe_query(path):
+    """A path with its query values percent-encoded where REST_PATH would refuse them ("/" in a start name)."""
+    base, _, query = str(path).partition("?")
+    parts = []
+    for p in query.split("&"):
+        k, eq, v = p.partition("=")
+        parts.append(k + eq + urllib.parse.quote(urllib.parse.unquote(v), safe=",.:-_|*") if eq else p)
+    return base + ("?" + "&".join(parts) if query else "")
+
+
+def list_field(doc):
+    """(field, items) of a REST list answer: ONTAP records, NSX results, CloudAPI values, query service record."""
+    for field in ("records", "results", "values", "record"):
+        if isinstance(doc, dict) and isinstance(doc.get(field), list):
+            return field, doc[field]
+    return None, None
+
+
+def _vcd_pages(doc):
+    """(page, page count) of a vCloud answer, or (None, None)."""
+    page, count = doc.get("page"), doc.get("pageCount")
+    if count is None and isinstance(doc.get("total"), int) and doc.get("pageSize"):   # the query service
+        count = -(-doc["total"] // max(1, int(doc["pageSize"])))
+    return (page, count) if isinstance(page, int) and isinstance(count, int) else (None, None)
+
+
+def next_page_path(source, path, doc):
+    """The path of the page after this answer of `path` ("" when it was the last one, or the list must not be followed)."""
+    if not isinstance(doc, dict) or TOP_N.search(str(path)) or list_field(doc)[0] is None:
+        return ""
+    if source == "ontap":
+        href = str(((doc.get("_links") or {}).get("next") or {}).get("href") or "")
+        href = _safe_query(href) if href.startswith("/api/") and ".." not in href else ""
+        return href if href and REST_PATH.match(href) else ""
+    if source == "nsxt" and doc.get("cursor"):
+        nxt = _with_param(path, "cursor", urllib.parse.quote(str(doc["cursor"]), safe=""))
+        return nxt if REST_PATH.match(nxt) else ""
+    if source == "vcd":
+        page, count = _vcd_pages(doc)
+        if page is not None and page < count:
+            return _with_param(path, "page", page + 1)
+    return ""
+
+
+def next_pages(data, reads):
+    """{source: {"<key>:p<n>": path}}: the next pages to read of the lists of this phase (vCloud: every announced page at
+    once; ONTAP / NSX: the next one)."""
+    out = {s: {} for s in PAGE_SOURCES}
+    for source in PAGE_SOURCES:
+        for key, path in ((reads or {}).get(source) or {}).items():
+            item = (data or {}).get(key)
+            if not isinstance(item, dict) or item.get("status") not in (200, "200") or not isinstance(item.get("json"), dict):
+                continue
+            if "pages" not in item:   # only the first answer so far
+                if source == "vcd":
+                    page, count = _vcd_pages(item["json"])
+                    if page is not None and not TOP_N.search(str(path)) and list_field(item["json"])[0]:
+                        for n in range(page + 1, min(count, VCD_MAX_PAGES) + 1):
+                            out[source][f"{key}:p{n}"] = _with_param(path, "page", n)
+                    continue
+                nxt = next_page_path(source, path, item["json"])
+                if nxt:
+                    out[source][f"{key}:p2"] = nxt
+            elif source != "vcd" and item.get("next") and int(item["pages"]) <= PAGE_ROUNDS:
+                out[source][f"{key}:p{int(item['pages']) + 1}"] = item["next"]
+    return out
+
+
+def merge_pages(data, reads):
+    """The pages read so far merged into their list (and removed): the list item gets "pages" (read), "next" (the page
+    still to read, "" when complete) and "more" (pages that will not be read)."""
+    out = dict(data or {})
+    for source in PAGE_SOURCES:
+        for key, path in ((reads or {}).get(source) or {}).items():
+            base = out.get(key)
+            if not isinstance(base, dict) or base.get("status") not in (200, "200") or not isinstance(base.get("json"), dict):
+                continue
+            field, first = list_field(base["json"])
+            if field is None:
+                continue
+            pages = sorted((int(m.group(2)), k) for k in list(out) for m in [PAGE_KEY.match(k)] if m and m.group(1) == key)
+            if "pages" not in base:
+                base = dict(base, json=dict(base["json"]), pages=1, next="" if source == "vcd" else next_page_path(source, path, base["json"]))
+                if source == "vcd":
+                    page, count = _vcd_pages(base["json"])
+                    if page is not None and not TOP_N.search(str(path)) and count > VCD_MAX_PAGES:
+                        base["more"] = f"{VCD_MAX_PAGES} of {count} pages"
+            items, last = list(base["json"][field]), None
+            for n, k in pages:
+                page = out.pop(k)
+                f2, more = list_field(page.get("json")) if page.get("status") in (200, "200") else (None, None)
+                if f2 is None:   # a page that failed: the rest of the list is not read
+                    base["next"], base["more"] = "", base.get("more") or f"page {n} not read ({unavailable(page) or 'no list'})"
+                    break
+                items += more
+                base["pages"], last = max(int(base["pages"]), n), page.get("json")
+            if pages:
+                base["json"][field] = items
+                if source != "vcd" and last is not None and not base.get("more"):
+                    base["next"] = next_page_path(source, path, last)
+            out[key] = base
+    return out
 
 
 def analyze(check_id, data, params, ctx):
@@ -535,6 +777,12 @@ def analyze(check_id, data, params, ctx):
     except Exception as e:   # a bug in an analysis must still give a readable result with the collected data
         return {"ok": False, "check": check_id, "status": "error", "error": f"Analysis of the collected data failed: {e!r}",
                 "steps": [], "recommendations": []}
+    cut = [f"{k} ({v.get('pages')} page(s) read; " + (v.get("more") or "more pages were not read") + ")"
+           for k, v in (data or {}).items() if isinstance(v, dict) and (v.get("more") or v.get("next"))]
+    if cut and isinstance(result.get("steps"), list):   # never silent: a list read only in part may hide a finding
+        result["steps"].append({"key": "pages", "title": "Lists read only in part", "status": "info",
+                                "detail": "These lists are longer than the portal reads in one run: " + "; ".join(cut[:10])
+                                          + ". Items on the pages not read were not checked."})
     try:   # "Where to look": never in the way of the result itself
         result["screens"] = screens.build(check_id, data or {}, params or {}, ctx or {}, result,
                                           commands_run(check_id, data or {}, params or {}, ctx or {}))

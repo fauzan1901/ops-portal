@@ -19,7 +19,7 @@ import portal_auth
 import sites
 from core import PORTAL, register
 
-from . import access, bmcs, catalog, files, fixes, hosts, runs, topology
+from . import access, bmcs, catalog, files, fixes, hosts, progress, runs, templates, topology, wi_analysis
 
 log = logging.getLogger("portal.wi")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -45,6 +45,7 @@ register(MODULE, TITLE, "Checks from the Knowledge Base work instructions and pl
 
 hosts.init()
 bmcs.init()
+templates.init()
 files.cleanup()
 for _stale in runs.init():
     PORTAL.store.event(_stale["username"], "wi.error", _stale["check_id"],
@@ -54,7 +55,7 @@ for _stale in runs.init():
 
 def _ui_version():
     digest = hashlib.sha256()
-    for name in ("static/wi.js", "static/wi.css", "templates/wi/index.html", "static/consoles/consoles.css", "static/consoles/icons.js"):
+    for name in ("static/wi.js", "static/guides.js", "../../static/guide.js", "../../static/guide.css", "static/wi.css", "templates/wi/index.html", "static/consoles/consoles.css", "static/consoles/icons.js"):
         with open(os.path.join(HERE, name), "rb") as f:
             digest.update(f.read())
     return digest.hexdigest()[:12]
@@ -120,16 +121,20 @@ def catalog_view():
     site = request.args.get("site", "")
     cfg = site_cfg(site)
     items = []
-    for c in catalog.CATALOG["checks"]:
-        item = {k: c.get(k) for k in ("id", "category", "title", "summary", "status", "reason", "link", "module", "validation",
-                                      "wi", "basis", "steps", "params", "needs", "uses", "permission")}
+    recent = runs.recent(site) if site else {}
+    for c in catalog.CATALOG["checks"] + templates.checks():   # the built-in checks, then the templates made on the portal
+        item = {k: c.get(k) for k in ("id", "category", "activity", "title", "summary", "status", "reason", "link", "module",
+                                      "validation", "wi", "basis", "steps", "params", "needs", "uses", "permission", "template",
+                                      "does", "fix", "collect")}
         item["access"] = catalog.access(c, site, cfg, PORTAL.credential_configured)
         if c.get("permission") == files.PERMISSION and not files.can_collect(user):
             item["access"] = dict(item["access"], runnable=False, missing=item["access"]["missing"] + [files.NO_PERMISSION])
         item["hosts"] = catalog.host_options(c, cfg, site)
         item["topology"] = topology.build(c, site, cfg) if c["status"] == "ready" else {}
+        item["runs"] = recent.get(c["id"], [])   # the last 10 runs on this site, newest first
         items.append(item)
-    return {"site": site, "categories": catalog.CATALOG["categories"], "checks": items}
+    return {"site": site, "categories": catalog.CATALOG["categories"], "activities": catalog.ACTIVITIES,
+            "symptoms": catalog.CATALOG["symptoms"], "checks": items}
 
 
 # ---------------- run a check ----------------
@@ -173,6 +178,11 @@ def run_context(check, site, cfg, params, target=None):
                 ctx["host_address"] = f"{target['address']}:{target['port']}"
     if "legacy_volume_types" in openstack:
         ctx["legacy_volume_types"] = openstack.get("legacy_volume_types") or {}
+    if check.get("basis") == "template":   # the steps as stored now (wi_analysis.template rates each command again)
+        t = templates.get(check["id"])
+        if not t:
+            raise LookupError("This template was deleted.")
+        ctx["template"] = templates.context(t)
     return ctx
 
 
@@ -245,6 +255,8 @@ def start_run(user, site, check, raw_params, client, owner):
     variables["raw_file"] = files.pending("run", record)
     variables["wi_ctx"]["now"] = int(time.time())   # time windows (logs, events) end when the run starts
     timeout = None
+    if check.get("basis") == "template" and templates.read_wait(check):   # the waits between its read steps
+        timeout = JOBS.timeouts["check"] + templates.read_wait(check)
     if check.get("bundle"):   # archives of the nodes go to the bundle folder of the run; the time window ends now
         timeout = int(check.get("timeout_minutes") or 60) * 60
         variables["bundle_dir"] = files.bundle_dir(record)
@@ -380,10 +392,11 @@ def _fix_finished(action_id, user, record, check, client, owner):
             files.keep_fix(action_id, (hosts.action(action_id) or {}).get("commands") or [])
         except Exception:
             log.exception("Fix #%s: the full output could not be kept", action_id)
-        try:   # the result of each item is now in the fix itself
-            os.remove(files.progress_path(action_id))
-        except OSError:
-            pass
+        for path in (files.progress_path(action_id), files.live_path(action_id)):   # now in the fix itself
+            try:
+                os.remove(path)
+            except OSError:
+                pass
         hosts.action_finish(action_id, "ok" if ok else "failed", steps, error)
         PORTAL.store.event(user["username"], "wi.fix_ok" if ok else "wi.fix_failed", check["id"],
                            (f"Fix #{action_id} of troubleshooting run #{record['id']} on {record['site']} "
@@ -450,7 +463,8 @@ def start_fix(run_id, index):
         if chosen:
             variables.update(action_commands=[str(c) for c in state["commands"]],
                              action_items=[{"label": i["label"], "commands": [str(c) for c in i["commands"]]} for i in chosen],
-                             action_stop_rcs=[int(x) for x in select.get("stop") or [6]])
+                             action_stop_rcs=[int(x) for x in select.get("stop") or [6]],
+                             action_item_timeout=int(select.get("timeout") or 3600))
         secrets = {}
     else:   # ontap: revert the LIF with the ONTAP Restore account of the site
         cred = PORTAL.credential(f"ontap:{record['site']}")
@@ -465,6 +479,8 @@ def start_fix(run_id, index):
     timeout, key = (OPENSTACK_FIX_TIMEOUT if state["kind"] == "openstack" else None), ("fix", record["site"], state["target"])
     if state["kind"] in fixes.VYOS_KINDS:   # copy, install, the reboot and its wait, the post-check
         timeout = int(action["upgrade"].get("wait") or 900) + 3600
+    if action.get("operation") and action.get("wait"):   # the change steps of a template and their waits
+        timeout = JOBS.timeouts["action"] + min(int(action["wait"]), templates.MAX_WAITS)
     if chosen:
         title = f"{state['label']}: {len(chosen)} {state['noun']} ({', '.join(i['label'] for i in chosen[:5])}" \
                 f"{', …' if len(chosen) > 5 else ''}). {title}"[:500]
@@ -476,6 +492,8 @@ def start_fix(run_id, index):
     variables["raw_file"] = files.pending("fix", action_id)
     if chosen:
         variables["progress_file"] = files.progress_path(action_id)
+    if state["kind"] == "openstack":   # the output of the item running now, shown on the run page while it runs
+        variables["live_file"] = files.live_path(action_id)
     PORTAL.store.event(user["username"], "wi.fix", check["id"],
                        (f"Fix #{action_id} of troubleshooting run #{run_id} on {record['site']} {state['target']} "
                         f"({state['risk']} risk): {title}")[:1000], client)
@@ -502,17 +520,93 @@ def fix_status(action_id):
     job = JOBS.get(item["job_id"]) if item.get("job_id") else None
     since = max(0, request.args.get("since", 0, type=int))
     lines = (job or {}).get("lines", [])[since:]
+    running = item.get("status") == "running"
     # items done and the one running (from the playbook's progress file: complete also after the page was reopened)
-    return {"item": item, "lines": lines, "next": since + len(lines),
-            "progress": files.progress(action_id) if item.get("status") == "running" else None}
+    items = files.progress(action_id) if running else None
+    return {"item": item, "lines": lines, "next": since + len(lines), "progress": items,
+            # the progress bar, and the output of the item running now (OpenStack fixes: read every few seconds)
+            "bar": progress.of_fix((job or {}).get("lines", []), items, not running),
+            "live": files.live(action_id) if running else [],
+            "elapsed": round(((job or {}).get("finished") or time.time()) - (job or {}).get("started", time.time()))}
 
 
 # ---------------- Hosts & SSH (administrators) ----------------
-def _admin():
+def _admin(what="hosts and SSH credentials"):
     user = PORTAL.require(MODULE)
     if user["role"] != "admin":
-        raise portal_auth.Forbidden("Only administrators manage hosts and SSH credentials.")
+        raise portal_auth.Forbidden(f"Only administrators manage {what}.")
     return user
+
+
+# ---------------- Templates made on the portal (administrators make them, every module user runs them) ----------------
+@blueprint.get("/api/templates/meta")
+@json_api
+def template_meta():
+    """What the template form offers: the host groups (Huawei: read-only)."""
+    _admin("templates")
+    return {"groups": [{"id": g, "label": label, "read_only": g in templates.READ_ONLY_GROUPS, "shell": shell}
+                       for g, (label, shell) in templates.GROUPS.items()],
+            "max_steps": templates.MAX_STEPS}
+
+
+@blueprint.post("/api/templates/classify")
+@json_api
+def template_classify():
+    """What each command of the form does (read / change), as the portal will rate it when the template runs."""
+    _admin("templates")
+    body = json_body()
+    group = str(body.get("group") or "")
+    commands = body.get("commands") if isinstance(body.get("commands"), list) else []
+    out = []
+    for cmd in commands[:templates.MAX_STEPS]:
+        mode, why = templates.classify(str(cmd or "")[:templates.MAX_COMMAND], group)
+        out.append({"mode": mode, "why": why})
+    return {"items": out}
+
+
+@blueprint.get("/api/templates/<template_id>")
+@json_api
+def template_detail(template_id):
+    _admin("templates")
+    t = templates.get(template_id)
+    if not t:
+        raise LookupError("Template not found.")
+    return {"template": t}
+
+
+@blueprint.post("/api/templates")
+@json_api
+def template_add():
+    user = _admin("templates")
+    body = json_body()
+    template_id = templates.save(user["username"], body)
+    t = templates.get(template_id)
+    _audit(user, "wi.template", template_id, f"Template created: {t['name']} ({t['group']}, {len(t['steps'])} steps)")
+    return {"id": template_id}
+
+
+@blueprint.put("/api/templates/<template_id>")
+@json_api
+def template_update(template_id):
+    user = _admin("templates")
+    if not templates.get(template_id):
+        raise LookupError("Template not found.")
+    templates.save(user["username"], json_body(), template_id)
+    t = templates.get(template_id)
+    _audit(user, "wi.template", template_id, f"Template changed: {t['name']} ({t['group']}, {len(t['steps'])} steps)")
+    return {"id": template_id}
+
+
+@blueprint.delete("/api/templates/<template_id>")
+@json_api
+def template_delete(template_id):
+    user = _admin("templates")
+    t = templates.get(template_id)
+    if not t:
+        raise LookupError("Template not found.")
+    templates.delete(template_id)
+    _audit(user, "wi.template", template_id, f"Template deleted: {t['name']}")
+    return {}
 
 
 @blueprint.get("/api/hosts")
@@ -710,8 +804,16 @@ def job_status(job_id):
     since = max(0, request.args.get("since", 0, type=int))
     lines = job["lines"][since:]
     done = job["status"] != "running"
+    if job["kind"] == "check":   # the progress bar: how far, what runs now, the last tasks
+        try:
+            phases = wi_analysis.plan(job["params"].get("check_id"))["phases"]
+        except (ValueError, KeyError, TypeError):
+            phases = 1
+        bar = progress.of_check(job["lines"], phases, done)
+    else:
+        bar = progress.of_fix(job["lines"], None, done)
     return {"id": job["id"], "status": job["status"], "task": job["task"], "lines": lines, "next": since + len(lines),
-            "error": job["error"], "result": job["result"] if done else None,
+            "error": job["error"], "result": job["result"] if done else None, "progress": bar,
             "elapsed": round((job["finished"] or time.time()) - job["started"])}
 
 

@@ -706,6 +706,204 @@ class EndToEndTest(unittest.TestCase):
         self.assertIn("topology/pod-1/protpaths-103-104/pathep-[Openstack-Traffic-A-PG]", vpc)
         self.assertTrue(vpc and all("/protpaths-" in dn for dn in vpc))
 
+    def test_fabric_interfaces(self):
+        """Fabric (2026-10-26): every leaf port with what uses it, read with GETs only, so an operator finds a port (eth1/23 on
+        node 101) for a static port or a new vPC and sends the right path to Static Port."""
+        client = self.client()
+        posts = self.dcb.count("POST", "/api/node/")
+        data = client.get("/aci/api/fabric?site=DCB").get_json()
+        self.assertTrue(data["ok"], data)
+        self.assertEqual(self.dcb.count("POST", "/api/node/"), posts)   # read-only
+        self.assertIn(101, [n["id"] for n in data["nodes"]])
+        self.assertNotIn(1, [n["id"] for n in data["nodes"]])        # the APIC is no leaf
+        port = {(r["node"], r["interface"]): r for r in data["interfaces"]}
+        # an access port with a static path of an EPG and a server connected (LLDP)
+        r = port[(101, "eth1/1")]
+        self.assertEqual((r["status"], r["oper"], r["policy_group"]), ("access", "up", "ESXi-25G-Access-PG"))
+        self.assertEqual(r["use"], {"kind": "physical", "pod": 1, "node": 101, "interface": "eth1/1"})
+        self.assertEqual([(b["owner"], b["encap"], b["via"]) for b in r["bindings"]], [("CLOUD-1/MGMT-InBand/Mgmt-InBand-EPG", "vlan-11", "port")])
+        self.assertEqual(r["neighbor"]["name"], "dcb-esxi-101-01")
+        # a member of a port-channel of one leaf: bound through the port-channel
+        pc = next(r for r in data["interfaces"] if r["node"] == 101 and r["channel"] == "PC-SERVER-01")
+        self.assertEqual((pc["status"], pc["use"]["interface"]), ("pc", "PC-SERVER-01"))
+        self.assertIn(("CLOUD-1/MGMT-InBand/Mgmt-InBand-EPG", "vlan-11", "PC PC-SERVER-01"), [(b["owner"], b["encap"], b["via"]) for b in pc["bindings"]])
+        # a member of a vPC: bound through the vPC path, on both leaves
+        members = [r for r in data["interfaces"] if r["channel"] == "Openstack-Traffic-A-PG" and r["node"] in (103, 104)]
+        self.assertEqual(sorted({r["node"] for r in members}), [103, 104])
+        for r in members:
+            self.assertEqual((r["status"], r["use"]), ("vpc", {"kind": "paths", "tdn": "topology/pod-1/protpaths-103-104/pathep-[Openstack-Traffic-A-PG]"}))
+            self.assertIn("vPC Openstack-Traffic-A-PG", [b["via"] for b in r["bindings"]])
+        # a port in no interface selector: free, with the warning; a fabric uplink: no use
+        free = port[(101, "eth1/40")]
+        self.assertEqual((free["status"], free["oper"]), ("free", "down"))
+        self.assertIn("No interface policy on this port yet", free["note"])
+        self.assertEqual((port[(101, "eth1/49")]["status"], port[(101, "eth1/49")]["use"]), ("uplink", None))
+        # vPC pairs: their vPCs and the ports free on both leaves (candidates for a new vPC)
+        pair = next(p for p in data["vpc_pairs"] if p["nodes"] == [103, 104])
+        self.assertIn("Openstack-Traffic-A-PG", [v["name"] for v in pair["vpcs"]])
+        self.assertTrue(pair["free_both"])
+        for iface in pair["free_both"]:
+            self.assertEqual((port[(103, iface)]["status"], port[(104, iface)]["status"]), ("free", "free"))
+        self.assertEqual(sum(data["counts"].values()), len(data["interfaces"]))
+        self.assertEqual(client.get("/aci/api/fabric?site=XXX").status_code, 400)
+
+    # ---- new vPC (access policies) ----
+    def vpc_request(self, client, pair="122-123", name="RHOSO-TRAFFIC-H-PG", ports=None, copy="RHOSO-TRAFFIC-F-PG", **extra):
+        """A Create vPC request on DCB: the first port free on both leaves (or the given ones), the settings copied from a
+        vPC of the pair; everything it creates on the mock is removed after the test."""
+        a, b = (int(x) for x in pair.split("-"))
+        if ports is None:
+            fabric_data = client.get("/aci/api/fabric?site=DCB").get_json()
+            free = next(p for p in fabric_data["vpc_pairs"] if p["nodes"] == [a, b])["free_both"][0]
+            ports = {str(a): [free], str(b): [free]}
+        options = client.get("/aci/api/vpc/options?site=DCB").get_json()
+        group = next(g for g in options["groups"] if g["name"] == copy)
+        settings = {k: group[k] for k in ("aaep", "link", "lacp", "cdp", "lldp", "mcp") if group[k]}
+        pg = f"uni/infra/funcprof/accbundle-{name}"
+        path = f"topology/pod-1/protpaths-{a}-{b}/pathep-[{name}]"
+        sel = extra.get("selector") or name.removesuffix("-PG")
+        self.addCleanup(lambda: [self.dcb.mit.pop(k) for k in [k for k in self.dcb.mit if k == pg or k.startswith(pg + "/") or k == path
+                                                              or f"/hports-{sel}-typ-range" in k]])
+        return dict({"site": "DCB", "pair": pair, "name": name, "ports": ports, "settings": settings}, **extra)
+
+    def test_vpc_options_and_preview_are_read_only(self):
+        """New vPC (2026-10-26, ADR-004 phase 2): the pairs, their interface profiles and ports, the vPC policy groups to copy
+        settings from and the interface policies; the preview checks everything against APIC and sends nothing."""
+        client = self.client()
+        posts = self.dcb.count("POST", "/api/node/")
+        options = client.get("/aci/api/vpc/options?site=DCB").get_json()
+        self.assertTrue(options["ok"], options)
+        pair = next(p for p in options["pairs"] if p["nodes"] == [122, 123])
+        self.assertEqual(pair["profiles"]["pair"], ["Leaf122-123_IntProf"])
+        self.assertIn("RHOSO-TRAFFIC-F-PG", pair["vpcs"])
+        group = next(g for g in options["groups"] if g["name"] == "RHOSO-TRAFFIC-F-PG")
+        self.assertEqual((group["pair"], group["aaep"], group["lacp"], group["link"], group["lldp"]),
+                         ("122-123", "DCB-OPENSTACK-AAEP", "LACP-ACTIVE", "25G", "LLDP-ON"))
+        self.assertIn("MCP-ON", options["policies"]["mcp"])
+        self.assertIn("ESXi-25G-Access-PG", options["names"])
+        self.assertEqual({p["status"] for p in options["ports"]["122"] if p["interface"] == "eth1/49"}, {"uplink"})
+        req = self.vpc_request(client)
+        port = req["ports"]["122"][0]
+        plan = client.post("/aci/api/vpc/preview", json=req).get_json()
+        self.assertTrue(plan["ok"], plan)
+        self.assertEqual(plan["blocked"], [])
+        self.assertEqual(plan["path"], "topology/pod-1/protpaths-122-123/pathep-[RHOSO-TRAFFIC-H-PG]")
+        self.assertEqual([(t["name"], t["nodes"]) for t in plan["profiles"]], [("Leaf122-123_IntProf", [122, 123])])
+        self.assertEqual(plan["selector"], "RHOSO-TRAFFIC-H")
+        self.assertIn({"object": "vPC policy group", "name": "uni/infra/funcprof/accbundle-RHOSO-TRAFFIC-H-PG", "kind": "new", "action": "Create"}, plan["steps"])
+        bundle = plan["payload"]["infraInfra"]["children"][0]["infraFuncP"]["children"][0]["infraAccBndlGrp"]
+        self.assertEqual(bundle["attributes"], {"name": "RHOSO-TRAFFIC-H-PG", "lagT": "node"})
+        self.assertIn({"infraRsAttEntP": {"attributes": {"tDn": "uni/infra/attentp-DCB-OPENSTACK-AAEP"}}}, bundle["children"])
+        self.assertIn({"infraRsLacpPol": {"attributes": {"tnLacpLagPolName": "LACP-ACTIVE"}}}, bundle["children"])
+        hports = plan["payload"]["infraInfra"]["children"][1]["infraAccPortP"]["children"][0]["infraHPortS"]
+        number = port.split("/")[1]
+        self.assertIn({"infraPortBlk": {"attributes": {"name": "block2", "fromCard": "1", "toCard": "1", "fromPort": number, "toPort": number}}}, hports["children"])
+        self.assertIn({"infraRsAccBaseGrp": {"attributes": {"tDn": "uni/infra/funcprof/accbundle-RHOSO-TRAFFIC-H-PG"}}}, hports["children"])
+        self.assertEqual(self.dcb.count("POST", "/api/node/"), posts)   # read-only
+        self.assertNotIn("uni/infra/funcprof/accbundle-RHOSO-TRAFFIC-H-PG", self.dcb.mit)
+
+    def test_vpc_apply_creates_the_policy_group_selector_and_path(self):
+        admin = self.client("admin")
+        req = self.vpc_request(admin)
+        port = req["ports"]["122"][0]
+        posts = self.dcb.count("POST", "/api/node/mo/uni/infra.json")
+        result = admin.post("/aci/api/vpc/apply", json=req).get_json()
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["path_ready"])
+        self.assertEqual(self.dcb.count("POST", "/api/node/mo/uni/infra.json"), posts + 1)   # one APIC transaction
+        pg = "uni/infra/funcprof/accbundle-RHOSO-TRAFFIC-H-PG"
+        self.assertEqual(self.dcb.mit[pg][1]["lagT"], "node")
+        self.assertEqual(self.dcb.mit[f"{pg}/rsattEntP"][1]["tDn"], "uni/infra/attentp-DCB-OPENSTACK-AAEP")
+        sel = "uni/infra/accportprof-Leaf122-123_IntProf/hports-RHOSO-TRAFFIC-H-typ-range"
+        self.assertEqual(self.dcb.mit[f"{sel}/rsaccBaseGrp"][1]["tDn"], pg)
+        self.assertIn("topology/pod-1/protpaths-122-123/pathep-[RHOSO-TRAFFIC-H-PG]", self.dcb.mit)
+        # History: action access-policy, with the steps and the payload; the activity log entry
+        record = admin.get(f"/aci/api/audit/{result['audit_id']}").get_json()["item"]
+        self.assertEqual((record["action"], record["status"], record["target"], record["site"]), ("access-policy", "success", pg, "DCB"))
+        self.assertEqual(record["summary"], f"vPC RHOSO-TRAFFIC-H-PG on leaves 122-123: leaf 122 {port}; leaf 123 {port}")
+        self.assertEqual(record["details"]["payload"], result["payload"])
+        events = admin.get("/api/admin/events?kinds=access_policy&limit=5").get_json()["events"]
+        self.assertEqual((events[0]["action"], events[0]["target"]), ("access_policy.applied", pg))
+        # The ports are now in the vPC, bound through its path; the same vPC again is refused before anything is sent
+        rows = {(r["node"], r["interface"]): r for r in admin.get("/aci/api/fabric?site=DCB").get_json()["interfaces"]}
+        for node in (122, 123):
+            self.assertEqual((rows[(node, port)]["status"], rows[(node, port)]["use"]),
+                             ("vpc", {"kind": "paths", "tdn": "topology/pod-1/protpaths-122-123/pathep-[RHOSO-TRAFFIC-H-PG]"}))
+        again = admin.post("/aci/api/vpc/apply", json=req)
+        self.assertEqual(again.status_code, 400)
+        self.assertIn("A policy group named RHOSO-TRAFFIC-H-PG exists already", again.get_json()["error"])
+        self.assertIn(f"{port} on leaf 122 is in use", again.get_json()["error"])
+        self.assertEqual(self.dcb.count("POST", "/api/node/mo/uni/infra.json"), posts + 1)
+        # Never undone by the portal: it does not delete access policies
+        undo = admin.post(f"/aci/api/audit/{result['audit_id']}/undo/preview", json={"site": "DCB"})
+        self.assertEqual(undo.status_code, 400)
+        self.assertIn("never deletes access policies", undo.get_json()["error"])
+
+    def test_vpc_checks_block_before_anything_is_sent(self):
+        client = self.client("admin")
+        posts = self.dcb.count("POST", "/api/node/")
+        free = self.vpc_request(client)["ports"]["122"][0]
+
+        def blocked(**changes):
+            req = dict(self.vpc_request(client, ports={"122": [free], "123": [free]}), **changes)
+            plan = client.post("/aci/api/vpc/preview", json=req).get_json()
+            self.assertTrue(plan["ok"], plan)
+            self.assertIsNone(plan["payload"])
+            return " ".join(plan["blocked"])
+        self.assertIn("eth1/49 on leaf 122 is a fabric uplink", blocked(ports={"122": ["eth1/49"], "123": [free]}))
+        used = next(r["interface"] for r in client.get("/aci/api/fabric?site=DCB").get_json()["interfaces"]
+                    if r["node"] == 122 and r["policy_group"] == "RHOSO-TRAFFIC-F-PG")
+        self.assertIn(f"{used} on leaf 122 is in use: selector RHOSO-TRAFFIC-F of Leaf122-123_IntProf",
+                      blocked(ports={"122": [used], "123": [free]}))
+        self.assertIn("A policy group named RHOSO-TRAFFIC-F-PG exists already", blocked(name="RHOSO-TRAFFIC-F-PG"))
+        self.assertIn("AAEP: choose one", blocked(settings={"lacp": "LACP-ACTIVE"}))
+        self.assertIn("AAEP NOPE-AAEP does not exist", blocked(settings={"aaep": "NOPE-AAEP", "lacp": "LACP-ACTIVE"}))
+        self.assertIn("has a selector named RHOSO-TRAFFIC-F already", blocked(selector="RHOSO-TRAFFIC-F"))
+        other = next(p for p in client.get("/aci/api/fabric?site=DCB").get_json()["vpc_pairs"] if p["nodes"] == [122, 123])["free_both"][1]
+        self.assertIn("the ports must be the same on leaf 122 and leaf 123", blocked(ports={"122": [free], "123": [other]}))
+        r = client.post("/aci/api/vpc/preview", json=dict(self.vpc_request(client), pair="122-124"))
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("is not a vPC pair", r.get_json()["error"])
+        self.assertEqual(self.dcb.count("POST", "/api/node/"), posts)
+
+    def test_vpc_with_a_profile_per_leaf(self):
+        """Leaves 118 and 119 have a profile each (their access ports) and one for the pair: other ports on each leaf go
+        into the profile of each leaf, one selector in each."""
+        client = self.client("admin")
+        pair = next(p for p in client.get("/aci/api/fabric?site=DCB").get_json()["vpc_pairs"] if p["nodes"] == [118, 119])
+        req = self.vpc_request(client, pair="118-119", name="Openstack-Traffic-Z-PG", copy="Openstack-Traffic-I-PG",
+                               ports={"118": [pair["free_both"][0]], "119": [pair["free_both"][1]]})
+        plan = client.post("/aci/api/vpc/preview", json=req).get_json()
+        self.assertEqual(plan["blocked"], [])
+        self.assertEqual([(t["name"], t["nodes"]) for t in plan["profiles"]], [("Leaf118_IntProf", [118]), ("Leaf119_IntProf", [119])])
+        self.assertFalse([w for w in plan["warnings"] if " gets " in w])   # one port on each leaf
+        result = client.post("/aci/api/vpc/apply", json=req).get_json()
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["path_ready"])
+        for leaf in (118, 119):
+            self.assertIn(f"uni/infra/accportprof-Leaf{leaf}_IntProf/hports-Openstack-Traffic-Z-typ-range/rsaccBaseGrp", self.dcb.mit)
+
+    def test_vpc_apply_needs_the_permission(self):
+        operator, admin = self.client(), self.client("admin")
+        self.assertFalse(operator.get("/aci/api/session").get_json()["can_create_vpc"])
+        self.assertTrue(admin.get("/aci/api/session").get_json()["can_create_vpc"])
+        req = self.vpc_request(operator)
+        self.assertTrue(operator.post("/aci/api/vpc/preview", json=req).get_json()["ok"])   # anyone with ACI may review
+        r = operator.post("/aci/api/vpc/apply", json=req)
+        self.assertEqual(r.status_code, 403)
+        self.assertIn("ACI: create vPCs", r.get_json()["error"])
+        self.assertEqual(self.app.test_client().post("/aci/api/vpc/apply", json=req).status_code, 401)
+        users = admin.get("/api/admin/users").get_json()
+        self.assertIn({"id": "aci-interfaces", "title": "ACI: create vPCs (interface policy group and selectors)", "permission_of": "aci",
+                       "explicit": True}, users["modules"])
+        r = admin.post("/api/admin/users", json={"username": "operator3", "role": "operator", "modules": ["aci", "aci-interfaces"]})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.addCleanup(admin.delete, "/api/admin/users/operator3")
+        network = self.client("operator3")
+        self.assertTrue(network.get("/aci/api/session").get_json()["can_create_vpc"])
+        result = network.post("/aci/api/vpc/apply", json=req).get_json()
+        self.assertTrue(result["ok"], result)
+
     # ---- static port ----
     def test_static_port_applies_only_to_selected_site(self):
         client = self.client()

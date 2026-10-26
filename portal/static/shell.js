@@ -436,6 +436,7 @@ const EVENT_LABELS = {
   'static_port.applied': 'Static port applied', 'static_port.failed': 'Static port failed', 'static_port.unknown': 'Static port unknown',
   'static_port.undone': 'Static port undone', 'provisioning.applied': 'Provisioning applied', 'provisioning.failed': 'Provisioning failed',
   'provisioning.unknown': 'Provisioning unknown',
+  'access_policy.applied': 'vPC created', 'access_policy.failed': 'vPC failed', 'access_policy.unknown': 'vPC unknown',
   'static_port.template_saved': 'ACI template saved', 'static_port.template_reset': 'ACI template reset',
   'static_port.product_added': 'ACI product added', 'static_port.product_changed': 'ACI product changed',
   'static_port.product_deleted': 'ACI product deleted',
@@ -447,6 +448,7 @@ const EVENT_COLORS = {'login.failed': 'red', 'login.denied': 'red', 'login.duo_f
   'restore.group_start': 'blue', 'restore.group_done': 'green', 'restore.group_partial': 'gold', 'restore.group_failed': 'red',
   'static_port.applied': 'green', 'static_port.failed': 'red', 'static_port.unknown': 'gold', 'static_port.undone': 'gold',
   'provisioning.applied': 'green', 'provisioning.failed': 'red', 'provisioning.unknown': 'gold',
+  'access_policy.applied': 'green', 'access_policy.failed': 'red', 'access_policy.unknown': 'gold',
   'static_port.template_saved': 'blue', 'static_port.template_reset': 'blue', 'static_port.product_added': 'blue',
   'static_port.product_changed': 'blue', 'static_port.product_deleted': 'gold'};
 

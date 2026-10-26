@@ -305,8 +305,13 @@ class PacemakerHealth:
             if st != "ok":
                 bad.append((res, st, why))
             rows.append([res["bundle"] or "", res["name"], res["agent"], res["state"], res["rest"], st.upper()])
+        # RHOSP 17.x runs the OVN databases as RAFT clusters outside Pacemaker: say so, so they are not taken as missing
+        ovn_note = ("" if any("ovn-dbs" in f"{x['bundle']} {x['name']}" for x in pcs["resources"]) else
+                    " The OVN databases are not a Pacemaker resource here (RAFT clusters on RHOSP 17.x): see the check "
+                    "\"OVN database cluster\".")
         r.step("resources", "Cluster resources (bundles, VIPs, cinder-volume)", worst(*[b[1] for b in bad]) if bad else "ok",
-               f"{len(bad)} of {len(rows)} resource(s) not running as expected." if bad else f"{len(rows)} resource(s), all running.",
+               (f"{len(bad)} of {len(rows)} resource(s) not running as expected." if bad else f"{len(rows)} resource(s), all running.")
+               + ovn_note,
                {"columns": ["Bundle / set", "Resource", "Agent", "State", "Node", "Status"],
                 "rows": [x for x in rows if x[5] != "OK"] or rows[:60]}, marks=[b[0]["name"] for b in bad])
         failed = pcs["failed_actions"]

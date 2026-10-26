@@ -1,7 +1,15 @@
 # ADR-004: Automation of ACI interfaces, port-channels, and vPCs (Fabric Access Policies)
 
-**Status:** Proposed
-**Date:** 2026-10-19
+**Status:** Accepted — phase 1 (Interfaces) and phase 2 for vPCs (Create vPC) built 2026-10-26
+**Date:** 2026-10-19 (proposed), 2026-10-26 (phases 1 and 2)
+
+> **Decision 2026-10-26** (the user asked for vPC creation): the portal **only adds** a vPC policy group + selector + port
+> blocks after a Review (question 1: yes); explicit permission **ACI: create vPCs** (`aci-interfaces`) or an administrator
+> (question 2); the conventions are read from APIC itself: the settings are copied from an existing vPC of the pair, the
+> pair's profile when the ports are the same on both leaves, otherwise one profile per leaf, selector name = policy group
+> name without `-PG` (questions 3–4, no dump yet); a port that is up or has a neighbour = a warning (question 5); no undo
+> (question 6); write rights of the service account on `uni/infra` **not checked in production yet** (question 7). Access
+> ports and single-leaf port-channels are not created yet.
 **Deciders:** Acme Cloud team (owner of the ACI portal module)
 
 ## Context

@@ -1,0 +1,43 @@
+# One read of the live output of tasks/live_director.yml, then the next one (at most wi_analysis.LIVE_MAX_POLLS: Ansible
+# stops near 200 nested includes; tasks/live_director.yml then waits for the end without live output).
+- name: "{{ live_label }}: running"
+  ansible.builtin.raw: "{{ director_prefix }} {{ (live_folder | wi_live_poll(live_seen, live_polls)) | quote }}"
+  delegate_to: mgmt
+  register: live_read
+  changed_when: false
+  failed_when: false
+  ignore_unreachable: true
+
+- name: New lines
+  ansible.builtin.set_fact:
+    live_now: "{{ live_read.stdout | default('') | wi_live_lines }}"
+
+- name: Where the output is
+  ansible.builtin.set_fact:
+    live_seen: "{{ live_now.at if live_now.at is not none else live_seen }}"
+    live_rc: "{{ live_now.rc if live_now.rc is not none else '' }}"
+    live_polls: "{{ live_polls | int + 1 }}"
+    live_misses: "{{ 0 if live_now.at is not none else live_misses | int + 1 }}"
+    # since when the director does not answer ("" when it does)
+    live_miss_since: "{{ '' if live_now.at is not none else (live_miss_since if (live_miss_since | string | length) > 0 else now(fmt='%s')) }}"
+    live_text: "{{ (([live_text] + live_now.lines) | select | join('\n') | wi_tail(1000)) if live_now.lines else live_text }}"
+
+- name: Live output for the run page
+  ansible.builtin.copy:
+    content: "{{ live_text | wi_tail(400) }}"
+    dest: "{{ live_file }}"
+    mode: "0600"
+  failed_when: false
+  when: live_file | default('') | length > 0 and live_now.lines | length > 0
+
+- name: The director did not answer, wait before reading again
+  ansible.builtin.wait_for:   # the pause of a read runs on the director: without it the next reads would follow at once
+    timeout: 15
+  delegate_to: localhost
+  when: live_now.at is none
+
+- name: "{{ live_label }}: next read"
+  ansible.builtin.include_tasks: live_poll.yml
+  when: >-
+    (live_rc | string | length) == 0 and (live_polls | wi_live_more) and (now(fmt='%s') | int) < (live_until | int)
+    and ((live_miss_since | string | length) == 0 or (now(fmt='%s') | int) - (live_miss_since | int) < 300)

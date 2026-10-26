@@ -115,8 +115,9 @@ def state(record, index, rec, check, site_cfg, user, ontap_configured):
     age = _age_minutes(record)
     select = action.get("select") if kind == "openstack" else None
     # a fix of a problem runs from a result that found one; an operation on items the operator ticks (migrations, clean-ups)
-    # runs from any result
-    if not reason and record.get("status") not in ("fail", "warn") and not select and kind not in VYOS_KINDS:
+    # or the change steps of a template (action "operation") run from any result
+    if not reason and record.get("status") not in ("fail", "warn") and not select and kind not in VYOS_KINDS \
+            and not action.get("operation"):
         reason = "The fix only runs from a result with a problem."
     if not reason and (age is None or age > MAX_AGE_MINUTES):
         reason = f"This result is older than {MAX_AGE_MINUTES} minutes: run the check again, then run the fix from the new result."

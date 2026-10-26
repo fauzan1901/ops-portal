@@ -306,7 +306,7 @@ class OvercloudNodeHealth:
             summary.append([n["name"], n["role"]] + [next((s["status"].upper() for s in r.steps if s["key"] == f"{i}_{k}"), "-")
                                                      for k in ("cpu", "mem", "disk", "units", "containers")])
         if summary:
-            r.steps.insert(1, {"key": "summary", "title": "Summary per node", "status": "info", "detail": "",
+            r.steps.insert(1, {"key": "summary", "title": "Summary per node", "status": "info", "open": True, "detail": "",
                                "table": {"columns": ["Node", "Role", "CPU", "Memory", "Disks", "Units", "Containers"],
                                          "rows": summary, "more": 0}})
         return r.done()

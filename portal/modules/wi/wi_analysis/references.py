@@ -26,6 +26,79 @@ def _bc(title, url):
 
 
 REFS = {
+    # ---------------- control plane beyond pcs status (RISET-KNOWN-ISSUES.md, checked 2026-10-25) ----------------
+    "rhosp-ovn-raft": [
+        _rh("Configuring networking (17.1): working with OVN, the clustered OVN databases",
+            "17.1/html/configuring_red_hat_openstack_platform_networking/assembly_work-with-ovn_rhosp-network"),
+        {"vendor": "Red Hat", "title": "[OSP 17.1] OVN DB fails to start: remove and recreate the OVN cluster membership (7091792)",
+         "url": "https://access.redhat.com/solutions/7091792"},
+        {"vendor": "Red Hat", "title": "Bug 2222828: replacing a controller node leads to an OVN database partition",
+         "url": "https://bugzilla.redhat.com/show_bug.cgi?id=2222828"},
+    ],
+    "rhosp-ovn-macbinding": [
+        {"vendor": "Red Hat", "title": "neutron-server high memory usage due to OVN mac_binding explosion at scale (6410121)",
+         "url": "https://access.redhat.com/node/6410121"},
+        _rh("Configuration reference (17.1): [ovn] options", "17.1/html/configuration_reference/_ovn"),
+    ],
+    "rhosp-rabbitmq-queues": [
+        {"vendor": "Red Hat", "title": "OpenStack services slow down while RabbitMQ messages grow without being consumed (2025263)",
+         "url": "https://access.redhat.com/solutions/2025263"},
+        {"vendor": "Red Hat", "title": "RabbitMQ versioned_notifications.info queue grows with no consumer (3139721)",
+         "url": "https://access.redhat.com/solutions/3139721"},
+        {"vendor": "RabbitMQ", "title": "Clustering and network partitions", "url": "https://www.rabbitmq.com/docs/3.13/partitions"},
+    ],
+    "rhosp-galera-connections": [
+        {"vendor": "Red Hat", "title": "How to determine the maximum number of connections required for MariaDB (1990433)",
+         "url": "https://access.redhat.com/solutions/1990433"},
+    ],
+    # ---------------- internal certificates (RISET-KNOWN-ISSUES.md, checked 2026-10-25) ----------------
+    "vmw-sts": [
+        _bc("Checking the STS certificate expiration and replacing expired STS certificates on vCenter Servers (KB 318968)",
+            f"{BKB}/318968"),
+        _bc("\"Signing certificate is not valid\" or \"No healthy upstream\" when logging in to vCenter (KB 316619)", f"{BKB}/316619"),
+        _bc("vSphere Automation API: get the vCenter signing certificate",
+            "https://developer.broadcom.com/xapis/vsphere-automation-api/latest/api/vcenter/certificate-management/vcenter/signing-certificate/get/"),
+    ],
+    "vmw-vcenter-certs": [
+        _bc("vCenter services fail to start after the Machine SSL certificate's issuing CA expires (KB 442815)", f"{BKB}/442815"),
+        _bc("vCenter Server inaccessible due to expired Solution User certificates (KB 421381)", f"{BKB}/421381"),
+        _bc("vCert - Scripted vCenter expired certificate replacement (KB 385107)",
+            f"{BKB}/385107/vcert-scripted-vcenter-expired-certific.html"),
+    ],
+    "vmw-esxi-cert": [
+        _bc("\"ESXi Host Certificate Status\" alert (KB 374032)", f"{BKB}/374032/"),
+        _bc("ESXi host certificate status remains \"expiration imminent\" after renewal (KB 447355)",
+            f"{BKB}/447355/esxi-host-certificate-status-remains-exp.html"),
+    ],
+    "nsx-certs": [
+        _bc("NSX Certificate Expired Alarm (KB 345870)", f"{BKB}/345870/nsx-certificate-expired-alarm.html"),
+        _bc("Host and Edge transport nodes Disconnected and MPA Connectivity Down after the APH certificate expires (KB 424553)",
+            f"{BKB}/424553"),
+        _bc("Alarms indicating CBM certificates have expired prevent NSX Manager upgrades (KB 324175)",
+            f"{BKB}/324175/nsx-alarms-indicating-certificates-have.html"),
+    ],
+    "vcd-certs": [
+        _bc("Cloud Director OpenAPI: Certificate Library", "https://developer.broadcom.com/xapis/vmware-cloud-director-openapi/latest/certificate-library/"),
+        _bc("Cloud Director OpenAPI: Trusted Certificates", "https://developer.broadcom.com/xapis/vmware-cloud-director-openapi/latest/trusted-certificates/"),
+    ],
+    "ontap-certs": [
+        {"vendor": "NetApp", "title": "How to renew an ONTAP self-signed SSL certificate via command line",
+         "url": "https://kb.netapp.com/on-prem/ontap/DM/Encryption/Encryption-KBs/How_to_renew_an_ONTAP_self-signed_SSL_certificate_via_command_line"},
+        {"vendor": "NetApp", "title": "ONTAP REST API: retrieve security certificates",
+         "url": "https://docs.netapp.com/us-en/ontap-restapi/get-security-certificates.html"},
+    ],
+    "rhosp-tlse": [
+        _rh("Hardening Red Hat OpenStack Platform (17.1): TLS everywhere, manually updating SSL/TLS certificates",
+            "17.1/html-single/hardening_red_hat_openstack_platform/index"),
+        {"vendor": "Red Hat", "title": "Update expiring SSL certificate in overcloud public endpoints (7088408)",
+         "url": "https://access.redhat.com/node/7088408"},
+    ],
+    "rhosp-undercloud-cert": [
+        {"vendor": "Red Hat", "title": "certmonger won't renew undercloud certificate automatically even certificate expired (5508191)",
+         "url": "https://access.redhat.com/node/5508191"},
+        {"vendor": "Red Hat", "title": "How to change the validity period of the undercloud certificates (7062493)",
+         "url": "https://access.redhat.com/node/7062493"},
+    ],
     # ---------------- Red Hat OpenStack Platform 16.2 / 17.1 ----------------
     "rhosp-compute-down": [
         _rh("RHOSP 16.2: Troubleshooting Compute node failures",

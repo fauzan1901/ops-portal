@@ -29,8 +29,8 @@ def wi_oc_script(reads):
     return wi_analysis.oc_script(dict(reads))
 
 
-def wi_os_action_script(commands, overcloudrc="~/overcloudrc"):
-    return wi_analysis.os_action_script(list(commands), overcloudrc)
+def wi_os_action_script(commands, overcloudrc="~/overcloudrc", until=0):
+    return wi_analysis.os_action_script(list(commands), overcloudrc, int(until or 0))
 
 
 def wi_item_result(out, item, index, stop_rcs=(6,)):
@@ -56,6 +56,38 @@ def wi_host_script(commands, sudo=False):
 
 def wi_ssh_route(target, keyfile=""):
     return wi_analysis.ssh_route_args(dict(target or {}), str(keyfile or ""))
+
+
+def wi_live_start(script):
+    return wi_analysis.live_start(str(script))
+
+
+def wi_live_dir(stdout):
+    return wi_analysis.live_dir(stdout)
+
+
+def wi_live_poll(folder, seen, polls=0):
+    return wi_analysis.live_poll(str(folder), int(seen or 0), wi_analysis.live_interval(polls))
+
+
+def wi_live_lines(stdout):
+    return wi_analysis.live_lines(stdout)
+
+
+def wi_live_wait(folder, seconds):
+    return wi_analysis.live_wait(str(folder), int(seconds))
+
+
+def wi_live_end(folder):
+    return wi_analysis.live_end(str(folder))
+
+
+def wi_live_more(polls):
+    return int(polls or 0) < wi_analysis.LIVE_MAX_POLLS
+
+
+def wi_tail(text, lines=400):
+    return "\n".join(str(text or "").splitlines()[-int(lines):])
 
 
 def wi_action_script(commands, shell="sh", strip_sudo=False):
@@ -229,6 +261,14 @@ def wi_tls_results(stdout, reads):
     return out
 
 
+def wi_next_pages(data, reads):
+    return wi_analysis.next_pages(dict(data or {}), dict(reads or {}))
+
+
+def wi_merge_pages(data, reads):
+    return wi_analysis.merge_pages(dict(data or {}), dict(reads or {}))
+
+
 def wi_analyze(check_id, data, params, ctx):
     return wi_analysis.analyze(check_id, data, params, ctx)
 
@@ -237,9 +277,12 @@ class FilterModule:
     def filters(self):
         return {"wi_plan": wi_plan, "wi_reads": wi_reads, "wi_os_script": wi_os_script, "wi_uc_script": wi_uc_script, "wi_oc_script": wi_oc_script, "wi_os_action_script": wi_os_action_script, "wi_host_script": wi_host_script,
                 "wi_batch": wi_batch, "wi_skip": wi_skip, "wi_rest_results": wi_rest_results,
-                "wi_command_results": wi_command_results, "wi_tcp_results": wi_tcp_results, "wi_tls_results": wi_tls_results, "wi_analyze": wi_analyze,
+                "wi_command_results": wi_command_results, "wi_tcp_results": wi_tcp_results, "wi_tls_results": wi_tls_results, "wi_analyze": wi_analyze, "wi_next_pages": wi_next_pages, "wi_merge_pages": wi_merge_pages,
                 "wi_action_script": wi_action_script, "wi_action_result": wi_action_result, "wi_ssh_route": wi_ssh_route, "wi_ssh_hint": wi_ssh_hint,
                 "wi_item_result": wi_item_result, "wi_items_result": wi_items_result, "wi_progress": wi_progress,
+                "wi_live_start": wi_live_start, "wi_live_dir": wi_live_dir, "wi_live_poll": wi_live_poll,
+                "wi_live_lines": wi_live_lines, "wi_live_wait": wi_live_wait, "wi_live_end": wi_live_end,
+                "wi_live_more": wi_live_more, "wi_tail": wi_tail,
                 "wi_collect_command": wi_collect_command, "wi_collect_results": wi_collect_results,
                 "wi_vu_step": wi_vu_step, "wi_vu_jump": wi_vu_jump, "wi_vu_backup": wi_vu_backup, "wi_vu_state": wi_vu_state, "wi_vu_iso": wi_vu_iso,
                 "wi_vu_place": wi_vu_place, "wi_vu_grow": wi_vu_grow, "wi_vu_post": wi_vu_post, "wi_vu_clip": wi_vu_clip, "wi_vu_text": wi_vu_text,

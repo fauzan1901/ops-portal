@@ -29,6 +29,21 @@ def kb_url(page, title):
     return f"{KB_URL}/{slug}-{int(page)}" if slug else f"{KB_URL}/{int(page)}"
 
 
+# What the operator wants to do: the first level of the left menu and the filter of every list (id, title, sprite icon,
+# summary). A check without "activity" is health (basis platform) or troubleshoot (a WI).
+ACTIVITIES = [
+    {"id": "troubleshoot", "title": "Troubleshoot a problem", "short": "Troubleshoot", "icon": "alert",
+     "summary": "An alert or a customer problem: the work instructions of the Knowledge Base, the cause found and the fix."},
+    {"id": "health", "title": "Health checks", "short": "Health", "icon": "check-circle",
+     "summary": "The state of the platform: services and agents, nodes, capacity, hardware, certificates."},
+    {"id": "operations", "title": "Operations", "short": "Operations", "icon": "refresh",
+     "summary": "Planned changes and their pre- and post-checks: live migration, upgrades, clean-up, restore, ACI ports."},
+    {"id": "logs", "title": "Logs & exports", "short": "Logs", "icon": "download",
+     "summary": "Read error logs, collect log bundles and sos reports, export events for a vendor case."},
+]
+ACTIVITY_IDS = [a["id"] for a in ACTIVITIES]
+
+
 def load(path=CATALOG_FILE):
     with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
@@ -43,9 +58,22 @@ def load(path=CATALOG_FILE):
             raise ValueError(f"catalog.yml: check {c['id']} has an unknown status {c.get('status')!r}")
         item = dict(c, needs=list(c.get("needs") or []), uses=list(c.get("uses") or []), params=list(c.get("params") or []),
                     steps=list(c.get("steps") or []))
-        item["wi"] = [dict(w, url=kb_url(w["page"], w["title"])) for w in c.get("wi") or []]
+        item["activity"] = c.get("activity") or ("health" if c.get("basis") == "platform" else "troubleshoot")
+        if item["activity"] not in ACTIVITY_IDS:
+            raise ValueError(f"catalog.yml: check {c['id']} has an unknown activity {item['activity']!r}")
+        # a WI not (yet) in the Knowledge Base has no page: its title is shown without a link
+        item["wi"] = [dict(w, url=kb_url(w["page"], w["title"]) if w.get("page") else "") for w in c.get("wi") or []]
+        if not item.get("does") or len(item["does"]) > 100:
+            raise ValueError(f"catalog.yml: check {c['id']} needs does: one sentence of at most 100 characters")
+        item["fix"], item["collect"] = bool(c.get("fix")), bool(c.get("collect"))
         checks.append(item)
-    return {"categories": categories, "checks": checks}
+    symptoms = []
+    for s in data.get("symptoms") or []:
+        unknown = [x for x in s.get("checks") or [] if x not in ids]
+        if unknown or not s.get("checks"):
+            raise ValueError(f"catalog.yml: symptom {s.get('id')} lists unknown checks {unknown}")
+        symptoms.append({"id": s["id"], "title": s["title"], "icon": s.get("icon") or "search", "checks": list(s["checks"])})
+    return {"categories": categories, "checks": checks, "symptoms": symptoms}
 
 
 CATALOG = load()
@@ -53,6 +81,10 @@ CATALOG = load()
 
 def get(check_id):
     item = next((c for c in CATALOG["checks"] if c["id"] == check_id), None)
+    if not item and str(check_id).startswith("tpl-"):   # a template made on the portal (templates.py)
+        from . import templates
+        t = templates.get(check_id)
+        item = templates.as_check(t) if t else None
     if not item:
         raise ValueError(f"Unknown troubleshooting check: {check_id!r}")
     return item
@@ -137,6 +169,44 @@ def clean_params(check, raw, site, site_cfg):
             value = str(p["default"])
         if value == "":
             if p.get("required"):
+                raise ValueError(f"{label} is required")
+            continue
+        if kind == "uuid_list":   # several IDs (rows of the form, or pasted together): kept comma separated, in order
+            items, seen = [], set()
+            for x in re.split(r"[\s,;]+", value.lower()):
+                if not x:
+                    continue
+                if not UUID.match(x):
+                    raise ValueError(f"{label}: {x[:40]} is not an OpenStack UUID")
+                if x not in seen:
+                    seen.add(x)
+                    items.append(x)
+            limit = int(p.get("max") or 16)
+            if len(items) > limit:
+                raise ValueError(f"{label}: at most {limit} IDs per run")
+            if not items and p.get("required"):
+                raise ValueError(f"{label} is required")
+            if items:
+                params[name] = ",".join(items)
+            continue
+        if kind == "ip_list":   # addresses or networks (IPv4 / IPv6), comma separated, in order, once each
+            items = []
+            for x in re.split(r"[\s,;]+", value):
+                if not x:
+                    continue
+                try:
+                    net = ipaddress.ip_network(x, strict=False)
+                except ValueError:
+                    raise ValueError(f"{label}: {x[:45]} is not an IP address or network") from None
+                text = str(net.network_address) if net.num_addresses == 1 else str(net)   # 10.253.0.5/32 = 10.253.0.5
+                if text not in items:
+                    items.append(text)
+            limit = int(p.get("max") or 16)
+            if len(items) > limit:
+                raise ValueError(f"{label}: at most {limit} addresses")
+            if items:
+                params[name] = ",".join(items)
+            elif p.get("required"):
                 raise ValueError(f"{label} is required")
             continue
         if len(value) > 256:

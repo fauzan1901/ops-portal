@@ -13,13 +13,22 @@
       failed_when: false
       when: progress_file | default('') | length > 0
 
+    - name: Time of the item
+      ansible.builtin.set_fact:   # once, here: a value of an include would be computed again (with now()) at every use
+        wi_item_until: "{{ (now(fmt='%s') | int) + (action_item_timeout | default(3600) | int) }}"
+
     - name: "Item {{ wi_index + 1 }}/{{ action_items | length }}: {{ wi_item.label }}"
-      ansible.builtin.raw: "{{ director_prefix }} {{ (wi_item.commands | wi_os_action_script(overcloudrc)) | quote }}"
-      delegate_to: mgmt
-      register: wi_item_out
-      changed_when: true
-      failed_when: false
-      ignore_unreachable: true
+      ansible.builtin.include_tasks: live_director.yml
+      vars:
+        # wi_ops.py stops 2 minutes before: the portal still reads its result
+        live_script: "{{ wi_item.commands | wi_os_action_script(overcloudrc, (wi_item_until | int) - 120) }}"
+        live_label: "Item {{ wi_index + 1 }}/{{ action_items | length }}: {{ wi_item.label }}"
+        live_header: "== Item {{ wi_index + 1 }}/{{ action_items | length }}: {{ wi_item.label }}"
+        live_deadline: "{{ wi_item_until }}"
+
+    - name: "Item {{ wi_index + 1 }}/{{ action_items | length }} ended"
+      ansible.builtin.set_fact:
+        wi_item_out: "{{ live_out }}"
 
     - name: Record the result of the item
       ansible.builtin.set_fact:

@@ -9,6 +9,7 @@ has room; esxi-dca-04 is in maintenance. app-04 (vCloud, Org VDC CUST-A-VDC) sit
 its Org VDC pool (the vCloud power-on error "Resource Pool not available").
 """
 import argparse
+import datetime
 import json
 import sys
 
@@ -105,6 +106,17 @@ def health(what):
              "consolidate": True, "snapshots": []},
             {"moid": "vm-4007", "name": "k8s-node-02", "host": "esxi-dca-03", "power": "poweredOn", "tools": "guestToolsNotRunning",
              "consolidate": False, "snapshots": [{"name": "daily", "created": "2026-10-11T01:00:00+00:00"}]}]
+    if "hostcerts" in what:   # esxi-dca-02 expires in 20 days (vCenter: expiringShortly), esxi-dca-03 in 5 (expirationImminent)
+        soon = {"esxi-dca-02": (20, "expiringShortly"), "esxi-dca-03": (5, "expirationImminent")}
+        at = lambda days: (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=days, hours=2)).isoformat()
+        out["hostcerts"] = [
+            {"moid": f"host-{i + 10}", "name": n, "connection": "connected", "maintenance": m,
+             "subject": f"C=US, ST=California, L=Palo Alto, O=VMware, Inc, OU=VMware ESX Server Default Certificate, CN={n}.prime.local",
+             "issuer": "O=prime.local, C=US, DC=local, DC=vsphere, CN=CA", "not_before": at(-700),
+             "not_after": at(soon.get(n, (600, ""))[0]), "status": soon.get(n, (0, "good"))[1]}
+            for i, (n, _c, _m, m) in enumerate(HOSTS)] + [
+            {"moid": "host-20", "name": "esxi-dca-05", "connection": "notResponding", "maintenance": False,
+             "error": "no certificate manager (host not connected)"}]
     if "datastores" in what:
         out["datastores"] = [{"moid": "datastore-11", "name": "DCA-DS-SSD-01", "accessible": True, "capacity": 10 * 2 ** 40,
                               "free": 4 * 2 ** 40, "type": "VMFS", "status": "green"},

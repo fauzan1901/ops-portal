@@ -191,7 +191,101 @@ class MockOntap:
             space = v.get("space") or {}
             space["used"] = space.get("size", 0) - space.get("available", 0)
             space.setdefault("snapshot", {"used": 0, "reserve_percent": 5})
+            self.volume_extras(v)
         return found
+
+    # ---- volumes, LUNs and HA (Operation Automation "ONTAP volumes and LUNs", "ONTAP HA and redundancy") ----
+    # CINDER_15 is full (10 GiB free of 10 TiB) with autosize off and a LUN offline in space_error (NetApp KB "LUN goes
+    # offline with space-error due to volume full"); CINDER_16 has used 92% of its inodes; node 04 cannot take over its
+    # partner; node 04 has no spare disk; e0c of node 02 is down; one NTP server; node 03 is 2 minutes ahead.
+    def all_luns(self):
+        with self.lock:
+            found = [copy.deepcopy(l) for l in self.luns.values()]
+        full = next(v for v in self.volumes.values() if v["name"].endswith("_CINDER_15_vol"))
+        found.append({"uuid": "5e5e0000-0000-4000-8000-00000000e0e0", "name": f"/vol/{full['name']}/volume-5e5e0000-space",
+                      "svm": {"name": SVM}, "location": {"volume": {"name": full["name"], "uuid": full["uuid"]}},
+                      "space": {"size": 500 * GIB, "used": 500 * GIB}, "status": {"state": "space_error", "mapped": True}})
+        return found
+
+    def volume_extras(self, v):
+        """autosize and inodes of a FlexVol record (as ONTAP gives them with fields=autosize.mode,files...)."""
+        v.setdefault("autosize", {"mode": "off" if v["name"].endswith("_CINDER_15_vol") else "grow"})
+        v.setdefault("files", {"maximum": 21251126, "used": 19550000 if v["name"].endswith("_CINDER_16_vol") else 1200})
+        return v
+
+    def svms(self):
+        return [{"name": SVM, "state": "running", "subtype": "default"}, {"name": OTHER_SVM, "state": "running", "subtype": "default"},
+                {"name": "svm_dr_dest", "state": "stopped", "subtype": "dp_destination"}]
+
+    def spares(self):
+        """Whole spare disks (storage/disks?container_type=spare): nodes 01 and 02 (node 03 has spare partitions only)."""
+        nodes = self.nodes()
+        return [{"name": f"1.{i}.{20 + j}", "node": {"name": n}, "type": "ssd", "class": "solid_state", "container_type": "spare"}
+                for i, n in enumerate(nodes[:2]) for j in range(2)]
+
+    def certificates(self):
+        """security/certificates (check cert-inventory): the cluster server certificate expires in 12 days, the one of
+        svm-cinder expired 3 days ago (self-signed for a year, as ONTAP makes them); trust anchors installed with ONTAP,
+        one of them expired. Expiry times with an offset, as ONTAP writes them."""
+        def at(days):
+            t = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=days, hours=2) - datetime.timedelta(hours=5)
+            return t.strftime("%Y-%m-%dT%H:%M:%S") + "-05:00"
+        name = self.cluster["name"]
+        return [
+            {"uuid": "c1000000-0000-4000-8000-000000000001", "name": f"{name}_17A2B3C4D5E6F708", "scope": "cluster", "type": "server",
+             "common_name": name, "expiry_time": at(12)},
+            {"uuid": "c1000000-0000-4000-8000-000000000002", "name": "svm-cinder_17A2B3C4D5E6F709", "scope": "svm",
+             "svm": {"name": "svm-cinder"}, "type": "server", "common_name": "svm-cinder", "expiry_time": at(-3)},
+            {"uuid": "c1000000-0000-4000-8000-000000000003", "name": "svm-nfs_17A2B3C4D5E6F70A", "scope": "svm",
+             "svm": {"name": "svm-nfs"}, "type": "server", "common_name": "svm-nfs", "expiry_time": at(300)},
+            {"uuid": "c1000000-0000-4000-8000-000000000004", "name": "DigiCert_Global_Root_CA", "scope": "cluster", "type": "server_ca",
+             "common_name": "DigiCert Global Root CA", "expiry_time": at(1900)}] + [
+            {"uuid": f"c1000000-0000-4000-8000-0000000001{i:02d}", "name": f"Root_CA_{i}", "scope": "cluster", "type": "root_ca",
+             "common_name": f"Public Root CA {i}", "expiry_time": at(-60 if i == 3 else 800 + i * 100)} for i in range(6)]
+
+    def all_ports(self):
+        """Every port (check ONTAP HA and redundancy): the iSCSI LIFs are on VLAN a0a-100 of the interface group a0a
+        (e0c + e0e); e0c of node 02 has lost its link (a0a: 1 of 2 members active). e0f is down in Default without a LIF
+        (not used, not rated); e0d has no cable and no broadcast domain."""
+        out = []
+        for i, n in enumerate(self.nodes()):
+            port = lambda name: {"name": name, "node": {"name": n}}
+            out += [{"name": "e0M", "node": {"name": n}, "enabled": True, "state": "up", "type": "physical", "broadcast_domain": {"name": "Mgmt"}},
+                    {"name": "e0a", "node": {"name": n}, "enabled": True, "state": "up", "type": "physical", "broadcast_domain": {"name": "Default"}},
+                    {"name": "e0c", "node": {"name": n}, "enabled": True, "state": "down" if i == 1 else "up", "type": "physical"},
+                    {"name": "e0e", "node": {"name": n}, "enabled": True, "state": "up", "type": "physical"},
+                    {"name": "e0f", "node": {"name": n}, "enabled": True, "state": "down", "type": "physical", "broadcast_domain": {"name": "Default"}},
+                    {"name": "e0d", "node": {"name": n}, "enabled": True, "state": "down", "type": "physical"},   # no cable, not used
+                    {"name": "a0a", "node": {"name": n}, "enabled": True, "state": "up", "type": "lag",
+                     "lag": {"mode": "multimode_lacp", "member_ports": [port("e0c"), port("e0e")],
+                             "active_ports": [port("e0e")] if i == 1 else [port("e0c"), port("e0e")]}},
+                    {"name": "a0a-100", "node": {"name": n}, "enabled": True, "state": "up", "type": "vlan",
+                     "vlan": {"tag": 100, "base_port": port("a0a")}, "broadcast_domain": {"name": "iSCSI"}}]
+        return out
+
+    def spare_pool(self):
+        """storage/aggregates?show_spares=true: node 03 has its spares as partitions only (root-data partitioning)."""
+        nodes = self.nodes()
+        return [{"node": {"name": n}, "disk_class": "solid_state", "disk_type": "ssd", "usable": 2, "is_partition": i == 2}
+                for i, n in enumerate(nodes[:3])]
+
+    def redundancy(self, path, query):
+        nodes = self.nodes()
+        if path == "/api/svm/svms":
+            return self.svms()
+        if path == "/api/private/cli/storage/failover":
+            pairs = [(nodes[0], nodes[1]), (nodes[1], nodes[0]), (nodes[2], nodes[3]), (nodes[3], nodes[2])]
+            return [{"node": a, "partner_name": b, "possible": a != nodes[3],
+                     "state_description": f"Connected to {b}" + ("" if a != nodes[3] else
+                                                                    ", Takeover is not possible: Storage failover interconnect error")}
+                    for a, b in pairs]
+        if path == "/api/cluster/ntp/servers":
+            return [{"server": "10.238.0.1"}]
+        if path == "/api/private/cli/cluster/date":
+            now = datetime.datetime.now(datetime.timezone.utc)
+            return [{"node": n, "date": (now + datetime.timedelta(seconds=120 if i == 2 else 0)).strftime("%Y-%m-%dT%H:%M:%S+00:00")}
+                    for i, n in enumerate(nodes)]
+        return None
 
     # ---- read-only data of the cluster (Operation Automation "ONTAP cluster health") ----
     def nodes(self):
@@ -199,8 +293,13 @@ class MockOntap:
         return [f"{prefix}-0{i}" for i in range(1, 5)]
 
     def node_records(self):
+        nodes = self.nodes()
+        partner = {0: 1, 1: 0, 2: 3, 3: 2}
         return [{"name": n, "state": "up", "membership": "member", "service_processor": {
-            "state": "online", "ipv4_interface": {"address": f"10.238.0.{20 + i}"}}} for i, n in enumerate(self.nodes())]
+            "state": "online", "ipv4_interface": {"address": f"10.238.0.{20 + i}"}},
+            "ha": {"enabled": True, "auto_giveback": True, "partners": [{"name": nodes[partner[i]]}],
+                   "takeover": {"state": "not_attempted"}, "giveback": {"state": "nothing_to_giveback"}}}
+            for i, n in enumerate(nodes)]
 
     @staticmethod
     def lif_uuid(name):
@@ -356,6 +455,14 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(401, error("User is not authorized.", "6"))
         if path == "/api/cluster":
             return self.reply(200, self.ontap.cluster)
+        if path == "/api/storage/luns" and "name" not in query:   # every LUN (check ONTAP volumes and LUNs), in two pages
+            records = self.ontap.all_luns()
+            size, start = (len(records) + 1) // 2, int((query.get("start.index") or ["0"])[0])
+            page = {"records": records[start:start + size], "num_records": len(records[start:start + size])}
+            if start + size < len(records):   # as ONTAP: the link to the next page (here by index)
+                rest = "&".join(p for p in url.query.split("&") if p and not p.startswith("start.index="))
+                page["_links"] = {"next": {"href": f"{path}?{rest}&start.index={start + size}"}}
+            return self.reply(200, page)
         if path == "/api/storage/luns":
             records = self.ontap.find_luns((query.get("name") or [""])[0])
             return self.reply(200, {"records": records, "num_records": len(records)})
@@ -375,14 +482,28 @@ class Handler(BaseHTTPRequestHandler):
         if match:
             lif = next((l for l in self.ontap.lifs() if l["uuid"] == match.group(1)), None)
             return self.reply(200, lif) if lif else self.reply(404, error("entry doesn't exist", "4"))
+        if path == "/api/security/certificates":
+            records = self.ontap.certificates()
+            return self.reply(200, {"records": records, "num_records": len(records)})
+        if path == "/api/network/ethernet/ports" and "name" not in query:   # every port (check ONTAP HA and redundancy)
+            records = self.ontap.all_ports()
+            return self.reply(200, {"records": records, "num_records": len(records)})
         if path == "/api/network/ethernet/ports":
             records = [{"node": {"name": n}, "name": "e0M", "state": "up", "enabled": True} for n in self.ontap.nodes()]
             return self.reply(200, {"records": records, "num_records": len(records)})
+        redundancy = self.ontap.redundancy(path, query)
+        if redundancy is not None:
+            return self.reply(200, {"records": redundancy, "num_records": len(redundancy)})
+        if path == "/api/storage/aggregates" and (query.get("show_spares") or [""])[0] == "true":
+            return self.reply(200, {"records": [], "num_records": 0, "spares": self.ontap.spare_pool()})
         if path == "/api/storage/aggregates":   # capacity check: aggr1 of node 02 at 91%
             records = [{"name": f"aggr1_{n.lower().replace('-', '_')}", "node": {"name": n}, "state": "online",
                         "space": {"block_storage": {"size": 100 * 1024 * GIB, "used": (91 if i == 1 else 60) * 1024 * GIB,
                                                     "available": (9 if i == 1 else 40) * 1024 * GIB}}}
                        for i, n in enumerate(self.ontap.nodes()[:2])]
+            return self.reply(200, {"records": records, "num_records": len(records)})
+        if path == "/api/storage/disks" and (query.get("container_type") or [""])[0] == "spare":
+            records = self.ontap.spares()
             return self.reply(200, {"records": records, "num_records": len(records)})
         if path == "/api/storage/disks":
             records = [{"name": "1.0.11", "state": "broken", "node": {"name": self.ontap.nodes()[0]}, "bay": 11,

@@ -60,6 +60,20 @@ RN = {
     "fvRsBd": lambda a: "rsbd",
     "fvRsDomAtt": lambda a: f"rsdomAtt-[{a['tDn']}]",
     "fvRsPathAtt": lambda a: f"rspathAtt-[{a['tDn']}]",
+    # fabric access policies (a new vPC)
+    "infraFuncP": lambda a: "funcprof",
+    "infraAccBndlGrp": lambda a: f"accbundle-{a['name']}",
+    "infraAccPortGrp": lambda a: f"accportgrp-{a['name']}",
+    "infraRsAttEntP": lambda a: "rsattEntP",
+    "infraRsHIfPol": lambda a: "rshIfPol",
+    "infraRsLacpPol": lambda a: "rslacpPol",
+    "infraRsCdpIfPol": lambda a: "rscdpIfPol",
+    "infraRsLldpIfPol": lambda a: "rslldpIfPol",
+    "infraRsMcpIfPol": lambda a: "rsmcpIfPol",
+    "infraAccPortP": lambda a: f"accportprof-{a['name']}",
+    "infraHPortS": lambda a: f"hports-{a['name']}-typ-{a.get('type', 'range')}",
+    "infraPortBlk": lambda a: f"portblk-{a['name']}",
+    "infraRsAccBaseGrp": lambda a: "rsaccBaseGrp",
 }
 
 
@@ -367,6 +381,34 @@ class MockApic:
                 self.add(cls, dn, **attrs)
         return [dn for dn, _, _ in added]
 
+    def vpc_paths(self):
+        """Like APIC: a vPC policy group in selectors that cover both leaves of a vPC pair gets its path (fabricPathEp)."""
+        attrs = lambda cls: [a for c, a in self.mit.values() if c == cls]
+        nodes_of_nprof = {}
+        for blk in attrs("infraNodeBlk"):
+            nprof = blk["dn"].split("/leaves-")[0]
+            nodes_of_nprof.setdefault(nprof, set()).update(range(int(blk["from_"]), int(blk["to_"]) + 1))
+        nodes_of_ifp = {}
+        for rel in attrs("infraRsAccPortP"):
+            nodes_of_ifp.setdefault(rel["tDn"], set()).update(nodes_of_nprof.get(rel["dn"].split("/rsaccPortP-")[0], set()))
+        pairs = {}
+        for n in attrs("fabricNodePEp"):
+            pairs.setdefault(n["dn"].split("/nodepep-")[0], set()).add(int(n["id"]))
+        covered = {}   # vPC policy group DN -> leaves of its selectors
+        for rel in attrs("infraRsAccBaseGrp"):
+            group = self.mit.get(rel["tDn"])
+            if group and group[0] == "infraAccBndlGrp" and group[1].get("lagT") == "node":
+                ifp = rel["dn"].split("/hports-")[0]
+                covered.setdefault(rel["tDn"], set()).update(nodes_of_ifp.get(ifp, set()))
+        for dn, nodes in covered.items():
+            for pair in pairs.values():
+                if len(pair) == 2 and pair <= nodes:
+                    a, b = sorted(pair)
+                    name = self.mit[dn][1]["name"]
+                    path = f"topology/pod-1/protpaths-{a}-{b}/pathep-[{name}]"
+                    if path not in self.mit:
+                        self.add("fabricPathEp", path, name=name, descr=f"{self.site} path")
+
     def objects(self, cls):
         return [(c, a) for c, a in self.mit.values() if c in cls]
 
@@ -456,6 +498,7 @@ class _Handler(BaseHTTPRequestHandler):
             for cls, cls_body in body.items():
                 apic.upsert(cls, cls_body, parent_dn(match.group(1)))
             apic.posts.append((match.group(1), body))
+            apic.vpc_paths()
         self.reply(200, {"imdata": []})
 
     def do_GET(self):

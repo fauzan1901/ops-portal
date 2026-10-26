@@ -280,7 +280,22 @@ def run(words, env, state):
         return json.dumps(shown)
     if words[:4] == ["openstack", "volume", "snapshot", "list"]:
         vid = option(words, "--volume")
-        return json.dumps([snap for snap in state.get("snapshots", []) if snap.get("Volume") == vid])
+        snaps = [snap for snap in state.get("snapshots", []) if snap.get("Volume") == vid]
+        for snap in snaps:   # Cinder finishes a deletion: gone at the next look (or error_deleting when _stuck)
+            if snap.get("Status") == "deleting":
+                snap["Status"] = "error_deleting" if snap.get("_stuck") else "gone"
+        state["snapshots"] = [snap for snap in state.get("snapshots", []) if snap.get("Status") != "gone"]
+        return json.dumps([{k: v for k, v in snap.items() if not k.startswith("_")} for snap in state["snapshots"]
+                           if snap.get("Volume") == vid])
+    if words[:4] == ["openstack", "volume", "snapshot", "delete"]:
+        sid = args[4]
+        snap = next((x for x in state.get("snapshots", []) if x.get("ID") == sid), None)
+        if not snap:
+            raise CommandError(f"Failed to delete snapshot with name or ID '{sid}': No snapshot with a name or ID of '{sid}' exists.")
+        if snap.get("Status") not in ("available", "error"):
+            raise CommandError("Invalid snapshot: Snapshot status must be available or error. (HTTP 400)")
+        snap["Status"] = "deleting"
+        return ""
     if words[:3] == ["openstack", "volume", "delete"]:
         vol = volumes.get(args[3])
         if not vol:

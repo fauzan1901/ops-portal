@@ -128,7 +128,7 @@ fvTenant (dn; name + descr if the tenant is new)
   - user, site, APIC, action, target DN, product, summary;
   - the list of bindings sent (Static Port), or the provisioning steps with their JSON payload;
   - client address (on the bastion through PortalProxy: the real IP of the browser; for a browser on the bastion itself also its Remote Desktop session, e.g. `172.26.0.100 (RDP 10.252.2.3, INTRANET\jdoe)`).
-- **User activity log.** Every Apply is also entered in **Users → Recent activity** (`static_port.applied/failed/unknown/undone`, `provisioning.*`): target DN, site, product, summary, VLAN, error, and a "change #N" link to History. The log can be filtered by user, activity type, and date, then downloaded with **Export CSV** (administrator; `/export/events.csv`).
+- **User activity log.** Every Apply is also entered in **Users → Recent activity** (`static_port.applied/failed/unknown/undone`, `provisioning.*`, `access_policy.*` for Create vPC): target DN, site, product, summary, VLAN, error, and a "change #N" link to History. The log can be filtered by user, activity type, and date, then downloaded with **Export CSV** (administrator; `/export/events.csv`).
 - **No record, no change.** If the record cannot be written, Apply is cancelled.
 - **The final status** is recorded after APIC replies:
 
@@ -140,6 +140,9 @@ fvTenant (dn; name + descr if the tenant is new)
   | Incomplete | The Web UI process stopped in the middle of Apply |
 - **What the application never does:**
   - delete objects;
-  - change fabric access policies (interface policy group, AEP, VLAN pool);
+  - change or delete existing fabric access policies (interface policy group, selector, AEP, VLAN pool). The only access
+    policy change is **Create vPC** (ADR-004 phase 2): it adds a new vPC policy group with its selector and port blocks,
+    after a Review, with the permission *ACI: create vPCs* (or an administrator); it is recorded in History as
+    `access-policy` and is not undone from the portal;
   - store personal APIC passwords (only one service account per site, encrypted).
 - **Matching with the APIC audit.** The APIC audit log records the site service account; the Web UI History records the portal user (AD) who made the change together with the APIC account used, so the two can be matched by time and target DN. Records from before the service account model show the personal ACI account in the User column.

@@ -1,12 +1,15 @@
 # Delete the old volume (the original volume of a restore) AFTER an administrator approved it in the Web UI (Approvals).
 # check_only=true: only check. Before anything is deleted, these are checked (tasks/delete_check.yml):
 #   - OpenStack: the volume still exists, is still in the same project as at restore time, is available and not
-#     attached, has no Cinder snapshot, and is not the restored volume (keep_volume_id)
+#     attached, and is not the restored volume (keep_volume_id); its Cinder snapshots can be deleted (available or error)
 #   - NetApp: whether the LUN volume-<ID> / volume-<name_id> still exists (it may already be deleted through OpenStack
 #     by the team that did the restore). Volume gone AND LUN gone = already deleted: only recorded. A LUN without an
 #     OpenStack volume (orphan) is never deleted by this portal.
 # detach=true: the volume is first detached from the instances named in detach_servers (must match the attachments at
 # that time; not a boot disk), then checked again and deleted. No --force and no --cascade.
+# delete_snapshots=[<snapshot uuid>, ...]: the Cinder snapshots of the volume the administrator saw in the check; they
+# are deleted first, one by one (openstack volume snapshot delete), and the volume only once all are gone. When the
+# volume has other snapshots than these at that time, nothing is deleted.
 # delete_instance=true: the volume is the boot disk (vda) of one instance: that instance (delete_server, whose name the
 # administrator types: delete_server_name) is deleted first, after another check (restore project, no running task, the
 # restored volume is not attached, no other disk is deleted with it). Delete on termination = yes: Nova deletes the
@@ -49,6 +52,8 @@
               - not (delete_instance | default(false) | bool) or delete_server | default('') is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
               - not (delete_instance | default(false) | bool) or (delete_server_name | default('') | length) in range(1, 256)
               - not (delete_instance | default(false) | bool and detach | default(false) | bool)
+              - delete_snapshots | default([]) | select('match', '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') | list | length
+                == delete_snapshots | default([]) | length
               - ontap_user | length > 0 and ontap_password | length > 0
             fail_msg: >-
               Invalid input. Requires site (one of {{ (sites | default({})).keys() | list }}), volume_id and keep_volume_id as
@@ -76,6 +81,7 @@
               checks: "{{ delete_eval.checks }}"
               warnings: "{{ delete_eval.warnings }}"
               attachments: "{{ delete_eval.attachments }}"
+              snapshots: "{{ delete_eval.snapshots }}"
               luns: "{{ delete_eval.luns }}"
               volume:
                 id: "{{ volume_id }}"
@@ -222,6 +228,80 @@
               ansible.builtin.set_fact:
                 detached_from: "{{ detach_plan }}"
 
+        # Cinder refuses to delete a volume that has snapshots: the ones approved are deleted first, then it is checked again.
+        # Decided once (delete_eval changes inside the block, whose condition is evaluated again for each task).
+        - name: Whether snapshots are deleted first
+          ansible.builtin.set_fact:
+            snapshots_first: "{{ not (check_only | default(false) | bool) and not volume_gone | bool and delete_eval.snapshots | length > 0 }}"
+
+        - name: Delete the snapshots of the volume first
+          when: snapshots_first | bool
+          block:
+            - name: Verify the snapshots are the ones approved
+              vars:
+                before: >-
+                  {{ ('Instance ' ~ instance_deleted.server_name ~ ' was deleted, but nothing else: ') if instance_deleted is defined
+                     else 'Detached, but nothing was deleted: ' if detached_from | default([]) | length > 0 else 'Nothing was deleted: ' }}
+              ansible.builtin.assert:
+                that:
+                  - delete_eval.snapshots | map(attribute='id') | sort == delete_snapshots | default([]) | map('lower') | sort
+                fail_msg: >-
+                  {{ before }}the volume now has {{ delete_eval.snapshots | length }} snapshot(s)
+                  ({{ delete_eval.snapshots | map(attribute='name') | join(', ') }}), not the {{ delete_snapshots | default([]) | length }}
+                  shown when it was approved; check it again.
+                quiet: true
+
+            - name: Verify the snapshots can be deleted
+              ansible.builtin.assert:
+                that: delete_eval.snapshots | rejectattr('status', 'in', ['available', 'error']) | list | length == 0
+                fail_msg: "Nothing was deleted: {{ delete_eval.summary }}"
+                quiet: true
+
+            - name: Remember the snapshots
+              ansible.builtin.set_fact:
+                snapshot_plan: "{{ delete_eval.snapshots }}"
+
+            - name: "OpenStack: delete the snapshots"
+              ansible.builtin.include_tasks: tasks/openstack_cmd.yml
+              vars:
+                os_label: "delete snapshot {{ snap.name or snap.id }} ({{ snap.id }}) of volume {{ volume_id }}"
+                os_command: "openstack volume snapshot delete {{ snap.id | quote }}"
+              loop: "{{ snapshot_plan }}"
+              loop_control:
+                loop_var: snap
+
+            - name: "OpenStack: wait until the snapshots of volume {{ volume_id }} are gone"
+              ansible.builtin.raw: >-
+                {{ director_prefix }} {{ ('source ' ~ overcloudrc ~ ' && openstack volume snapshot list --all-projects --long --volume '
+                ~ (volume_id | quote) ~ ' -f json') | quote }}
+              delegate_to: mgmt
+              register: snaps_out
+              changed_when: false
+              until: >-
+                snaps_out.rc | default(1) == 0
+                and ((snaps_out.stdout | extract_json | default([], true) | volume_snapshots | length) == 0
+                     or (snaps_out.stdout | extract_json | default([], true) | volume_snapshots | selectattr('status', 'eq', 'error_deleting') | list | length) > 0)
+              retries: 120
+              delay: 5
+              failed_when: false
+              ignore_unreachable: true
+
+            - name: Check the volume again after the snapshots
+              ansible.builtin.include_tasks: tasks/delete_check.yml
+
+            - name: Verify the snapshots are deleted
+              ansible.builtin.assert:
+                that: delete_eval.snapshots | length == 0
+                fail_msg: >-
+                  {{ snapshot_plan | length - delete_eval.snapshots | length }} of {{ snapshot_plan | length }} snapshot(s) deleted;
+                  still there: {{ delete_eval.snapshots | map(attribute='name') | zip(delete_eval.snapshots | map(attribute='status'))
+                                  | map('join', ' ') | join(', ') }}. The volume was not deleted: check the snapshots in OpenStack.
+                quiet: true
+
+            - name: Record the deleted snapshots
+              ansible.builtin.set_fact:
+                snapshots_deleted: "{{ snapshot_plan }}"
+
         - name: Verify the volume can be deleted
           ansible.builtin.assert:
             that: delete_eval.can_delete
@@ -289,6 +369,9 @@
             detached: >-
               {{ detached_from | default([]) | map(attribute='server_name') | zip(detached_from | default([]) | map(attribute='device'))
                  | map('join', ' as ') | join(', ') }}
+            snap_note: >-
+              {{ ((snapshots_deleted | length) ~ ' snapshot(s) deleted first ('
+                  ~ (snapshots_deleted | map(attribute='name') | join(', ')) ~ '); ') if snapshots_deleted | default([]) | length > 0 else '' }}
             lun_note: >-
               {{ 'LUN removed from NetApp' if after.read and after.luns | length == 0
                  else ('LUN ' ~ (after.luns | map(attribute='name') | join(', ')) ~ ' is still in NetApp: check it in ONTAP') if after.read
@@ -304,11 +387,11 @@
                    else ('Volume ' ~ volume_id ~ ' was already deleted in OpenStack and NetApp.') if volume_gone | bool
                    else ((('Instance ' ~ instance_deleted.server_name ~ ' was deleted, then volume ' ~ volume_id ~ ' was')
                           if instance_deleted is defined else ('Volume ' ~ volume_id ~ ((' was detached from ' ~ detached ~ ' and')
-                          if detached else ' was'))) ~ ' deleted; ' ~ lun_note ~ '.') }}
+                          if detached else ' was'))) ~ ' deleted; ' ~ snap_note ~ lun_note ~ '.') }}
               note: >-
                 {{ (gone_instance ~ '; volume deleted with it (delete on termination); ' ~ lun_note) if deleted_with_instance | default(false) | bool
                    else 'already deleted in OpenStack and NetApp (outside this portal)' if volume_gone | bool
-                   else ((gone_instance ~ '; ') if gone_instance else '') ~ (('detached from ' ~ detached ~ '; ') if detached else '') ~ lun_note }}
+                   else ((gone_instance ~ '; ') if gone_instance else '') ~ (('detached from ' ~ detached ~ '; ') if detached else '') ~ snap_note ~ lun_note }}
               lun_left: >-
                 {{ (after.luns | default([]) | map(attribute='name') | list)
                    if not volume_gone | bool or deleted_with_instance | default(false) | bool else [] }}

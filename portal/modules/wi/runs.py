@@ -40,6 +40,7 @@ def init():
             site TEXT NOT NULL, check_id TEXT NOT NULL, check_title TEXT NOT NULL, host TEXT, params TEXT,
             status TEXT NOT NULL, summary TEXT, result TEXT, log TEXT, error TEXT, client_ip TEXT, job_id TEXT)""")
         db.execute("CREATE INDEX IF NOT EXISTS wi_runs_ts ON wi_runs(ts)")
+        db.execute("CREATE INDEX IF NOT EXISTS wi_runs_site ON wi_runs(site, id)")
         stale = [dict(r) for r in db.execute("SELECT id, username, site, check_id, client_ip FROM wi_runs WHERE status = 'running'")]
         db.execute("UPDATE wi_runs SET status = 'unknown', finished = ?, error = 'The portal stopped while the check was "
                    "running.' WHERE status = 'running'", (_now(),))
@@ -115,6 +116,20 @@ def query(limit=50, offset=0, user="", site="", status="", check="", q="", fix="
         rows = [_row(r) for r in db.execute(f"SELECT * FROM wi_runs{where} ORDER BY id DESC LIMIT ? OFFSET ?", args + [limit, offset])]
         users = [r[0] for r in db.execute("SELECT DISTINCT username FROM wi_runs ORDER BY username LIMIT 500")]
     return {"items": rows, "total": total, "users": users}
+
+
+def recent(site, per_check=10):
+    """The last runs of every check on one site, newest first (the Last ran and Activity columns of the check lists):
+    {check_id: [{id, ts, status, username, summary}, ...]}."""
+    out = {}
+    with _db() as db:
+        for r in db.execute("SELECT id, ts, status, username, summary, check_id FROM wi_runs WHERE site = ? "
+                            "ORDER BY id DESC LIMIT 20000", (site,)):
+            items = out.setdefault(r["check_id"], [])
+            if len(items) < per_check:
+                items.append({"id": r["id"], "ts": r["ts"], "status": r["status"], "username": r["username"],
+                              "summary": (r["summary"] or "")[:200]})
+    return out
 
 
 def all_rows(user="", site="", status="", check="", q=""):

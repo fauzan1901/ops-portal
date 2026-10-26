@@ -22,6 +22,33 @@ added must exist in that site's fabric (`fabricPathEp`, read from APIC). A save 
 (`aci_templates`, `aci_products`), never APIC, and is recorded in History (action *Product template*, before and after)
 and in the activity log (`static_port.template_saved`, `static_port.product_added`, ...).
 
+**ACI interfaces** (Fabric → Interfaces, per site): every port of every leaf (`l1PhysIf`, `ethpmPhysIf`) with what uses
+it — a vPC or port-channel (`pcAggrIf`, `pcRsMbrIfs`, the vPC pairs of `fabricExplicitGEp`), an interface selector and its
+access / PC / vPC policy group (`infraHPortS`, `infraPortBlk`, `infraRsAccBaseGrp`, the leaf profiles), the static paths
+of EPGs and L3Outs on it, and what is connected (LLDP / CDP). Search finds a port on every leaf (for example `eth1/23`),
+a server, a policy group, an EPG or a VLAN; **Static port** (or ticked ports) puts the right path in the Static Port table:
+the port itself, its port-channel, or its vPC (once for both leaves). A port in no selector is *Free*: a binding on it
+raises a fault on APIC until a policy group is set on it. **vPC pairs** lists the vPCs of each pair of leaves and the
+ports free on both (for a new vPC). Read-only on APIC (GET); Export CSV.
+
+**ACI Create vPC** (Fabric → Create vPC, per site; ADR-004 phase 2): a new vPC on a vPC pair of leaves, as in Fabric →
+Access Policies on APIC: a vPC interface policy group (`infraAccBndlGrp lagT=node`, settings copied from a vPC of the
+pair: AAEP, LACP, link level, CDP, LLDP, MCP) and its interface selector with the port blocks, in the interface profile of
+the pair (the same ports on both leaves) or in the profile of each leaf. Review checks it on APIC again (pair, free ports,
+unused name, policies, unused selector name), History records it before the single POST to `uni/infra`
+(action `access-policy`), and the new path `protpaths-<a>-<b>/pathep-[<name>]` goes to Static Port with one button. The
+portal only adds: it never changes or deletes a policy group, selector or port, and a vPC is not undone from History.
+Creating needs the permission *ACI: create vPCs* (`aci-interfaces`, Users page) or an administrator; the APIC service
+account of the site needs write rights on `uni/infra`. Entry points on Interfaces: *Create vPC* on a vPC pair, or on free
+ports ticked on both leaves of a pair.
+
+**Guides**: every page of the portal modules ends with a fold *Guide* that shows, with an animation on a copy of the page
+as it is now (its own data and dialogs), how the page is used (`static/guide.js`, `modules/<id>/static/guides.js`).
+ONTAP Restore has two: Volume, Snapshot and Target project (with the OpenStack volume, its instance and the other disks
+of that instance), and, while the wizard is on Review, the Review step (Cinder pool, attach, a new instance with its
+networks, commands, launch). They follow the volume in the wizard, else the newest check of the session
+(`GET /ontap/api/guide`, jobs that already ran); a guide never starts a job.
+
 **ACI IP usage** (Fabric → IP Usage, per site): the endpoint IPs APIC learned on each EPG (Client Endpoints: `fvCEp`,
 `fvIp`, `fvRsCEpToPathEp`), the gateways of its bridge domain / EPG subnets, the free addresses and up to 10 suggested
 free IPs. An address is in use when it is a gateway or learned on any endpoint of the site's fabric; every learned IP is

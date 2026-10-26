@@ -1005,11 +1005,28 @@ def _lun_text(lun):
             f"{lun['state'] or 'state unknown'}, {'mapped' if lun['mapped'] else 'not mapped'}")
 
 
+SNAPSHOT_DELETABLE = ("available", "error")   # what Cinder deletes (openstack volume snapshot delete, no --force)
+
+
+def volume_snapshots(snapshots):
+    """The Cinder snapshots of a volume (openstack volume snapshot list --long -f json) as the Approvals page shows them."""
+    out = []
+    for snap in snapshots or []:
+        if not isinstance(snap, dict):
+            continue
+        out.append({"id": str(snap.get("ID") or snap.get("id") or "").lower(), "name": str(snap.get("Name") or snap.get("name") or ""),
+                    "status": str(snap.get("Status") or snap.get("status") or "").lower(),
+                    "size_gb": snap.get("Size") or snap.get("size") or "",
+                    "created": str(snap.get("Created At") or snap.get("created_at") or "")})
+    return sorted(out, key=lambda x: (x["created"], x["id"]))
+
+
 def deletion_checks(volume, expect_project, gone=False, volume_error="", snapshots=None, snapshots_read=True,
                     attachments=None, lun=None):
     """Whether the original volume of a restore can be deleted: the Approvals page shows this before an administrator
     decides, and delete_volume.yml evaluates it again right before deleting.
-      - OpenStack: the volume still exists, in the project of the restore, available and not attached, no snapshots;
+      - OpenStack: the volume still exists, in the project of the restore, available and not attached; its Cinder
+        snapshots are deleted first (each must be available or error: one being created or deleted blocks it);
       - NetApp: its LUN (volume-<ID> or volume-<name_id>) is read from ONTAP. No LUN is only a warning while the volume
         exists (only the OpenStack volume is removed); a LUN without an OpenStack volume is an orphan and is never
         touched by this portal.
@@ -1019,8 +1036,10 @@ def deletion_checks(volume, expect_project, gone=False, volume_error="", snapsho
     luns, vid = lun.get("luns") or [], str((volume or {}).get("id") or "")
     netapp = ("NetApp could not be checked: " + (lun.get("error") or "no answer")) if not lun.get("read") \
         else "; ".join(_lun_text(l) for l in luns) if luns else "No LUN of this volume in NetApp"
+    snaps = volume_snapshots(snapshots)
+    stuck = [x for x in snaps if x["status"] not in SNAPSHOT_DELETABLE]
     result = {"checks": [], "warnings": [], "can_delete": False, "can_detach": False, "can_delete_instance": False,
-              "gone": False, "orphan": False,
+              "gone": False, "orphan": False, "snapshots": snaps,
               "lun_read": bool(lun.get("read")), "luns": luns, "attachments": attachments or []}
     if gone:
         result["orphan"] = bool(luns)
@@ -1049,9 +1068,13 @@ def deletion_checks(volume, expect_project, gone=False, volume_error="", snapsho
         {"key": "detached", "ok": status == "available" and not atts,
          "detail": "Status available, not attached" if status == "available" and not atts
          else f"Attached to {where}" if atts else f"Status {status or '?'}: only an available volume can be deleted"},
-        {"key": "snapshots", "ok": bool(snapshots_read) and not (snapshots or []),
-         "detail": ("No Cinder snapshots" if not snapshots else f"{len(snapshots)} Cinder snapshot(s): delete them first")
-         if snapshots_read else "The snapshots of the volume could not be read"},
+        {"key": "snapshots", "ok": bool(snapshots_read) and not stuck,
+         "detail": "The snapshots of the volume could not be read" if not snapshots_read
+         else "No Cinder snapshots" if not snaps
+         else (f"{len(snaps)} Cinder snapshot(s): " + ", ".join(x["name"] or x["id"] for x in stuck)
+               + " cannot be deleted now (" + ", ".join(sorted({x["status"] or "?" for x in stuck}))
+               + "): wait until it is available or error, then check again") if stuck
+         else f"{len(snaps)} Cinder snapshot(s), deleted first: " + ", ".join(x["name"] or x["id"] for x in snaps)},
         {"key": "netapp", "ok": bool(lun.get("read")), "detail": netapp},
     ]
     if lun.get("read") and not luns:
@@ -1064,10 +1087,11 @@ def deletion_checks(volume, expect_project, gone=False, volume_error="", snapsho
     # the boot disk of one instance: that instance is deleted first, then the volume (or Nova deletes it with the instance)
     result["can_delete_instance"] = (len(atts) == 1 and status == "in-use" and bool(atts[0].get("instance_deletable"))
                                      and all(c["key"] == "detached" for c in blocking))
+    first = f" after its {len(snaps)} snapshot(s)" if snaps else ""
     if result["can_delete"]:
-        result["summary"] = f"Volume {vid} can be deleted."
+        result["summary"] = f"Volume {vid} can be deleted{first}."
     elif result["can_detach"]:
-        result["summary"] = f"Volume {vid} is attached to {where}; it can be detached and then deleted."
+        result["summary"] = f"Volume {vid} is attached to {where}; it can be detached and then deleted{first}."
     elif result["can_delete_instance"]:
         a = atts[0]
         result["summary"] = (f"Volume {vid} is the boot disk ({a['device']}) of instance {a['server_name'] or a['server_id']} "
@@ -1099,6 +1123,7 @@ def image_property_args(props):
 class FilterModule:
     def filters(self):
         return {"extract_json": extract_json, "cinder_table_id": cinder_table_id, "snapshot_choices": snapshot_choices,
+                "volume_snapshots": volume_snapshots,
                 "volume_name_id": volume_name_id, "cinder_pools": cinder_pools, "lun_candidates": lun_candidates,
                 "pool_choices": pool_choices, "batch_script": batch_script, "batch_results": batch_results,
                 "parallel_width": parallel_width,

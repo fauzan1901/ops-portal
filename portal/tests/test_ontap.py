@@ -1217,6 +1217,27 @@ sys.exit(rc)
         self.assertIn(f"openstack server show {fake_director.SERVER_ID} -f json", self.director_state()["calls"])
         self.assertEqual(client.post("/ontap/api/volume_info", json={"site": "DCA", "volume_id": "nope"}).status_code, 400)
 
+    def test_guide_shows_the_newest_check_of_this_session(self):
+        """GET /api/guide (guide of the Restore page): the newest plan of this session and the OpenStack read of its
+        volume, from jobs that already ran; nothing runs, and another session gets nothing."""
+        client, empty = self.client(), {"ok": True, "plan": None, "volume_info": None}
+        self.assertEqual(client.get("/ontap/api/guide?site=DCA").get_json(), empty)
+        r = client.post("/ontap/api/volume_info", json={"site": "DCA", "volume_id": VOLUME_ID})
+        self.wait(client, r.get_json()["job_id"])
+        guide = client.get("/ontap/api/guide?site=DCA").get_json()
+        self.assertIsNone(guide["plan"])
+        self.assertEqual(guide["volume_info"]["volume_id"], VOLUME_ID)
+        plan_id, job = self.plan(client)
+        self.assertEqual(job["status"], "success", job["error"])
+        calls = len(self.director_state()["calls"])
+        guide = client.get("/ontap/api/guide?site=DCA").get_json()
+        self.assertEqual((guide["plan"]["job_id"], guide["plan"]["params"]["snapshot"]), (plan_id, "hourly.2025-12-17_1905"))
+        self.assertEqual(guide["plan"]["result"]["volume"]["id"], VOLUME_ID)
+        self.assertEqual(guide["volume_info"]["result"]["role"]["role"], "extended")
+        self.assertEqual(len(self.director_state()["calls"]), calls)
+        self.assertEqual(self.client().get("/ontap/api/guide?site=DCA").get_json(), empty)
+        self.assertEqual(client.get("/ontap/api/guide?site=OTHER").get_json(), empty)
+
     def test_restore_attaches_the_volume_to_an_instance(self):
         client = self.client()
         plan_id, plan = self.plan(client)
@@ -1678,6 +1699,62 @@ sys.exit(rc)
         finally:
             self.put_lun_back(NAMEID_BACKEND_ID)
             self.put_lun_back(BOOT_VOLUME_ID)
+
+    def test_snapshots_of_the_volume_are_deleted_first(self):
+        """The original volume has Cinder snapshots (2026-10-26: Cinder does not delete a volume that has snapshots): the
+        check lists them, and the approval deletes exactly those first, then the volume. A snapshot that cannot be deleted
+        now blocks it; a snapshot that appeared after the check stops it before anything is deleted."""
+        admin = self.client()
+        s1, s2, s3 = "5a000000-0000-4000-8000-000000000001", "5a000000-0000-4000-8000-000000000002", "5a000000-0000-4000-8000-000000000003"
+
+        def snap(sid, name, status="available", created="2026-10-20T01:00:00.000000"):
+            return {"ID": sid, "Name": name, "Description": "", "Status": status, "Size": 100, "Created At": created,
+                    "Volume": NAMEID_VOLUME_ID, "Properties": ""}
+
+        def put(snaps):
+            state = self.director_state()
+            state["snapshots"] = snaps
+            with open(self.state_file, "w") as f:
+                json.dump(state, f)
+        try:
+            os.remove(self.state_file) if os.path.exists(self.state_file) else None
+            job, d = self.restore_with_deletion(admin, NAMEID_VOLUME_ID)
+            self.make_due(d["id"])
+            put([snap(s1, "before-upgrade"), snap(s2, "daily-1021", "creating", "2026-10-21T01:00:00.000000")])
+            check = self.check_deletion(admin, d["id"])
+            self.assertFalse(check["can_delete"])
+            self.assertIn("daily-1021 cannot be deleted now (creating)", check["summary"])
+            put([snap(s1, "before-upgrade"), snap(s2, "daily-1021", created="2026-10-21T01:00:00.000000")])
+            check = self.check_deletion(admin, d["id"])
+            self.assertTrue(check["can_delete"], check["summary"])
+            self.assertEqual([(x["id"], x["name"], x["status"]) for x in check["snapshots"]],
+                             [(s1, "before-upgrade", "available"), (s2, "daily-1021", "available")])
+            self.assertIn("can be deleted after its 2 snapshot(s)", check["summary"])
+            self.assertIn("2 Cinder snapshot(s), deleted first: before-upgrade, daily-1021",
+                          next(c["detail"] for c in check["checks"] if c["key"] == "snapshots"))
+            self.assertEqual(admin.post(f"/ontap/api/deletions/{d['id']}/approve", json={"confirm": True, "snapshots": ["x"]}).status_code, 400)
+            # a third snapshot was made after the check: nothing is deleted
+            put([snap(s1, "before-upgrade"), snap(s2, "daily-1021"), snap(s3, "made-after-the-check")])
+            refused, item = self.approve_deletion(admin, d["id"], snapshots=[s1, s2])
+            self.assertEqual((refused["status"], item["state"]), ("failed", "failed"))
+            self.assertIn("Nothing was deleted: the volume now has 3 snapshot(s)", item["error"])
+            self.assertIn("not the 2 shown when it was approved", item["error"])
+            calls = self.director_state()["calls"]
+            self.assertFalse(any(c.startswith(("openstack volume snapshot delete", "openstack volume delete")) for c in calls))
+            # the snapshots of the check: deleted one by one, then the volume (no --force / --cascade)
+            put([snap(s1, "before-upgrade"), snap(s2, "daily-1021")])
+            done, item = self.approve_deletion(admin, d["id"], snapshots=[s2, s1])
+            self.assertEqual(done["status"], "success", done["error"] + "\n" + "\n".join(done["all_lines"][-20:]))
+            state = self.director_state()
+            order = [c for c in state["calls"] if c.startswith(("openstack volume snapshot delete", "openstack volume delete"))]
+            self.assertEqual(order, [f"openstack volume snapshot delete {s1}", f"openstack volume snapshot delete {s2}",
+                                     f"openstack volume delete {NAMEID_VOLUME_ID}"])
+            self.assertEqual(state["snapshots"], [])
+            self.assertNotIn(NAMEID_VOLUME_ID, state["volumes"])
+            self.assertEqual(item["state"], "deleted")
+            self.assertEqual(item["note"], "2 snapshot(s) deleted first (before-upgrade, daily-1021); LUN removed from NetApp")
+        finally:
+            self.put_lun_back(NAMEID_BACKEND_ID)
 
     def test_boot_disk_volume_deletes_its_instance_first(self):
         """The original volume is the boot disk (vda) of an instance: after approval (the instance name typed), the instance

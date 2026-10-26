@@ -3,6 +3,7 @@
 
     vsphere_inventory.py --host <vcenter[:port]> [--verify] --what hosts,vms,pools,clusters
     vsphere_inventory.py --host <vcenter[:port]> --what alarms,events@24,hosthealth,vmhealth,datastores
+    vsphere_inventory.py --host <vcenter[:port]> --what hostcerts
 
 Only reads: the PropertyCollector (container views over the inventory, destroyed afterwards), the triggered alarms of
 the root folder, and EventManager.QueryEvents for the error and warning events of the last <hours> (events@<hours>), or
@@ -11,7 +12,7 @@ No method that changes anything is called. The account and password come from th
 WI_VCENTER_PASSWORD), never from the command line. Prints one JSON document with the sets asked for:
 
     {"hosts": [...], "vms": [...], "pools": [...], "clusters": [...], "alarms": [...], "events": [...],
-     "hosthealth": [...], "vmhealth": [...], "datastores": [...], "errors": {set: reason}}
+     "hosthealth": [...], "vmhealth": [...], "datastores": [...], "hostcerts": [...], "errors": {set: reason}}
 
 A set that cannot be read (a property this vCenter does not know, no permission) is reported in "errors" and the
 others are still read.
@@ -23,7 +24,7 @@ import ssl
 import sys
 
 WHAT = ("hosts", "vms", "pools", "clusters")
-HEALTH = ("alarms", "events", "allevents", "hosthealth", "vmhealth", "datastores")
+HEALTH = ("alarms", "events", "allevents", "hosthealth", "vmhealth", "datastores", "hostcerts")
 MAX_EVENTS = 1000
 MAX_ALL_EVENTS = 10000
 PROPS = {
@@ -349,6 +350,31 @@ def read_datastores(si, content):
              "type": str(v.get("summary.type") or ""), "status": str(v.get("overallStatus") or "")} for k, v in props.items()]
 
 
+def read_hostcerts(si, content):
+    """Per ESXi host: its certificate as vCenter knows it (HostCertificateManager.certificateInfo: subject, issuer, not
+    after, and vCenter's status good / expiring / expiringShortly / expirationImminent / expired)."""
+    from pyVmomi import vim
+    props = view_props(content, vim.HostSystem, ["name", "runtime.connectionState", "runtime.inMaintenanceMode",
+                                                 "configManager.certificateManager"])
+    out = []
+    for moid, v in props.items():
+        row = {"moid": moid, "name": v.get("name"), "connection": str(v.get("runtime.connectionState") or ""),
+               "maintenance": bool(v.get("runtime.inMaintenanceMode"))}
+        manager = v.get("configManager.certificateManager")
+        try:
+            info = manager.certificateInfo if manager is not None else None
+            if info is None:
+                row["error"] = "no certificate manager (host not connected)"
+            else:
+                row.update(subject=str(info.subject or ""), issuer=str(info.issuer or ""), not_before=iso(info.notBefore),
+                           not_after=iso(info.notAfter), status=str(info.status or ""))
+        except Exception as e:   # one host must not hide the others
+            detail = getattr(e, "msg", None) or (str(e).splitlines()[0] if str(e) else "")
+            row["error"] = f"{type(e).__name__}: {detail}"[:200]
+        out.append(row)
+    return out
+
+
 def health(si, sets):
     """{set: data} of the health sets, and {"errors": {set: reason}} for those that could not be read."""
     content = si.RetrieveContent()
@@ -368,6 +394,8 @@ def health(si, sets):
                 out["vmhealth"] = read_vmhealth(si, content)
             elif base == "datastores":
                 out["datastores"] = read_datastores(si, content)
+            elif base == "hostcerts":
+                out["hostcerts"] = read_hostcerts(si, content)
         except Exception as e:   # one set must not hide the others; the reason names the property or the fault
             detail = getattr(e, "msg", None) or (f"property {e.name!r}" if getattr(e, "name", None) else str(e).splitlines()[0] if str(e) else "")
             errors[base] = f"{type(e).__name__}: {detail}"[:300]

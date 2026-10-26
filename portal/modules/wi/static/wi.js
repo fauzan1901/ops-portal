@@ -12,6 +12,12 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
 const qs = params => Object.entries(params).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v ?? '')}`).join('&');
 const icon = name => `<svg class="pf-icon" aria-hidden="true"><use href="#i-${name}"></use></svg>`;
+// One of the items of a fix: "instances" -> "instance", "FDB entries" -> "FDB entry".
+const singular = noun => String(noun || '').replace(/ies$/, 'y').replace(/s$/, '');
+// A work instruction: a link to its Knowledge Base page, or its title only when it is not in the Knowledge Base yet.
+const wiRef = (w, cls = '') => w.url
+  ? `<a${cls ? ` class="${cls}"` : ''} href="${esc(w.url)}" target="_blank" rel="noopener">${esc(w.title)}${icon('external')}</a>`
+  : `<span${cls ? ` class="${cls}"` : ''}>${esc(w.title)}</span>`;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 function storage(area) {
@@ -293,12 +299,13 @@ const Router = {
     if ($('#appView').hidden) return;
     UserMenu.close();
     const [, section = 'checks', id] = (location.hash.match(/^#\/([a-z]+)(?:\/([a-z0-9-]+))?/) || []);
-    let page = section === 'runs' ? (id ? 'run' : 'runs') : section === 'products' ? 'product' : section === 'hosts' ? 'hosts'
-      : section === 'bmc' ? 'bmc' : id ? 'launch' : 'checks';
+    let page = section === 'runs' ? (id ? 'run' : 'runs') : ['products', 'activities'].includes(section) ? 'product'
+      : section === 'templates' ? 'template' : section === 'hosts' ? 'hosts' : section === 'bmc' ? 'bmc' : id ? 'launch' : 'checks';
     if (!Session.allowed) page = 'noaccess';
     $$('[data-page]').forEach(el => { el.hidden = el.dataset.page !== page; });
     this.page = page;
-    Nav.current = {checks: 'checks', runs: 'runs', run: 'runs', product: `product:${id}`, launch: `check:${id}`, hosts: 'hosts', bmc: 'bmc'}[page] || '';
+    Nav.current = {checks: 'checks', runs: 'runs', run: 'runs', product: `${section === 'activities' ? 'activity' : 'product'}:${id}`,
+      launch: `check:${id}`, hosts: 'hosts', bmc: 'bmc'}[page] || '';
     $$('.pf-nav__link[data-route]').forEach(a => a.classList.toggle('is-current', a.dataset.route === Nav.current));
     Nav.sync();
     if (page !== 'run') {
@@ -306,8 +313,9 @@ const Router = {
       document.title = Site.current ? `[${Site.current}] ${BASE_TITLE}` : BASE_TITLE;
     }
     if (page === 'checks') run(null, () => Catalog.showOverview());
-    if (page === 'product') run(null, () => Catalog.showProduct(id));
+    if (page === 'product') run(null, () => Catalog.showList(section === 'activities' ? 'activity' : 'product', id));
     if (page === 'launch') run(null, () => Launch.open(id));
+    if (page === 'template') run(null, () => TemplateForm.open(id || 'new'));
     if (page === 'runs') run(null, () => Runs.load());
     if (page === 'hosts') run(null, () => Hosts.load());
     if (page === 'bmc') run(null, () => Bmcs.load());
@@ -321,66 +329,32 @@ const Router = {
    ========================================================================= */
 const Nav = {
   current: '',
-  store: storage('localStorage'),
-  opened() {
-    try { return new Set(JSON.parse(this.store.get('wi_nav_open') || '[]')); } catch (e) { return new Set(); }
-  },
-  init() {
-    $('#navProducts').addEventListener('click', e => {
-      const btn = e.target.closest('.pf-nav__toggle-link');
-      if (!btn) return;
-      const item = btn.closest('[data-product]');
-      const open = !item.classList.contains('pf-m-expanded');
-      this.expand(item, open);
-      const set = this.opened();
-      if (open) set.add(item.dataset.product); else set.delete(item.dataset.product);
-      this.store.set('wi_nav_open', JSON.stringify([...set]));
-    });
-  },
-  expand(item, open) {
-    item.classList.toggle('pf-m-expanded', open);
-    $('.pf-nav__toggle-link', item).setAttribute('aria-expanded', String(open));
-    $('.pf-nav__subnav', item).hidden = !open;
-  },
-  dot(c) {
-    if (c.status === 'ready') {
-      return c.access.runnable ? '<span class="pf-nav__dot is-ready" title="Ready"></span>'
-        : `<span class="pf-nav__dot is-blocked" title="${esc(`Not on ${Site.current}: ${c.access.missing.join('; ')}`)}"></span>`;
-    }
-    return `<span class="pf-nav__dot is-${esc(c.status)}" title="${esc((CHECK_STATUS[c.status] || [c.status])[0])}"></span>`;
-  },
+  init() {},
+  // What the operator wants to do (activities), then the products: one link each with its number of checks. The checks
+  // themselves are on the page of each (a short menu that fits on one screen).
   render() {
     const data = Catalog.data;
     if (!data) return;
-    const open = this.opened();
+    // the short name on one line, the full one as its tooltip ("Network" for "Network (VyOS, NSX-T, Huawei, ACI)")
+    const link = (route, href, ic, title, n, short) => `<li><a class="pf-nav__link" href="${href}" data-route="${route}" title="${esc(title)}">${icon(ic)}`
+      + `<span class="pf-nav__text">${esc(short || title)}</span><span class="pf-nav__count">${n}</span></a></li>`;
+    $('#navActivities').innerHTML = (data.activities || []).map(a => {
+      const n = data.checks.filter(c => c.activity === a.id).length;
+      return n ? link(`activity:${a.id}`, `#/activities/${a.id}`, a.icon, a.title, n, a.short) : '';
+    }).join('');
     $('#navProducts').innerHTML = data.categories.map(cat => {
-      const checks = data.checks.filter(c => c.category === cat.id);
-      if (!checks.length) return '';
-      const sub = `nav-${esc(cat.id)}`;
-      const isOpen = open.has(cat.id);
-      return `<li class="pf-nav__item pf-m-expandable${isOpen ? ' pf-m-expanded' : ''}" data-product="${esc(cat.id)}">`
-        + `<button type="button" class="pf-nav__link pf-nav__toggle-link" aria-expanded="${isOpen}" aria-controls="${sub}">`
-        + `${icon(cat.icon || 'checklist')}<span class="pf-nav__text">${esc(cat.title)}</span>`
-        + `<span class="pf-nav__count">${checks.length}</span><span class="pf-nav__toggle">${icon('angle-right')}</span></button>`
-        + `<section class="pf-nav__subnav" id="${sub}" aria-label="${esc(cat.title)}"${isOpen ? '' : ' hidden'}><ul>`
-        + `<li><a class="pf-nav__link" href="#/products/${esc(cat.id)}" data-route="product:${esc(cat.id)}">Overview</a></li>`
-        + checks.map(c => `<li><a class="pf-nav__link" href="#/checks/${esc(c.id)}" data-route="check:${esc(c.id)}">${this.dot(c)}`
-          + `<span class="pf-nav__text">${esc(c.title)}</span></a></li>`).join('')
-        + '</ul></section></li>';
+      const n = data.checks.filter(c => c.category === cat.id).length;
+      return n ? link(`product:${cat.id}`, `#/products/${cat.id}`, cat.icon || 'checklist', cat.title, n, cat.short) : '';
     }).join('');
     this.sync();
   },
-  // The current page in the menu: its link highlighted, its product group open and marked.
+  // The current page in the menu; a check also marks its activity and its product.
   sync() {
-    const data = Catalog.data;
-    let product = '';
-    if (this.current.startsWith('product:')) product = this.current.slice(8);
-    if (this.current.startsWith('check:') && data) product = data.checks.find(c => c.id === this.current.slice(6))?.category || '';
-    $$('#navProducts [data-product]').forEach(item => {
-      item.classList.toggle('pf-m-current', item.dataset.product === product);
-      if (item.dataset.product === product) this.expand(item, true);
+    const check = this.current.startsWith('check:') ? (Catalog.data?.checks || []).find(c => c.id === this.current.slice(6)) : null;
+    $$('.pf-nav__link[data-route]').forEach(a => {
+      const r = a.dataset.route;
+      a.classList.toggle('is-current', r === this.current || (!!check && (r === `product:${check.category}` || r === `activity:${check.activity}`)));
     });
-    $$('.pf-nav__link[data-route]').forEach(a => a.classList.toggle('is-current', a.dataset.route === this.current));
   },
 };
 
@@ -390,15 +364,55 @@ const Nav = {
 const Catalog = {
   data: null,
   loaded: '',
-  product: '',
+  mode: 'product',   // the list page shows one product, or one activity
+  id: '',
+  store: storage('localStorage'),
+  open: new Set(),   // rows opened (details shown)
+  sort: {key: '', dir: 'asc'},
   init() {
-    $('#ckQ').addEventListener('input', () => this.renderProduct());
-    $('#ckStatus').addEventListener('change', () => this.renderProduct());
+    const openRun = e => {
+      const tr = e.target.closest('tr[data-run]');
+      if (tr && (e.type === 'click' || e.key === 'Enter') && !e.target.closest('a')) location.hash = `#/runs/${tr.dataset.run}`;
+    };
+    $('#ovRecentList').addEventListener('click', openRun);
+    $('#ovRecentList').addEventListener('keydown', openRun);
+    $('#ckQ').addEventListener('input', () => this.renderList());
+    $('#ckFilter').addEventListener('change', () => this.renderList());
+    $('#ckRunnable').checked = this.store.get('wi_runnable') === '1';
+    $('#ckRunnable').addEventListener('change', e => { this.store.set('wi_runnable', e.target.checked ? '1' : ''); this.renderList(); });
     $('#ovQ').addEventListener('input', () => this.renderSearch());
     ['#ckList', '#ovList'].forEach(sel => $(sel).addEventListener('click', e => {
-      const row = e.target.closest('tr[data-check]');
-      if (row && !e.target.closest('a,button')) location.hash = `#/checks/${row.dataset.check}`;
+      if (e.target.closest('[data-clear]')) { this.clear(); return; }
+      const sort = e.target.closest('[data-sort]');
+      if (sort) {
+        const key = sort.dataset.sort;
+        this.sort = this.sort.key === key ? {key, dir: this.sort.dir === 'asc' ? 'desc' : 'asc'} : {key, dir: key === 'last' ? 'desc' : 'asc'};
+        this.redraw();
+        return;
+      }
+      if (e.target.closest('[data-expand-all]')) {
+        const rows = $$('tr.ck-row', $(sel));
+        const open = rows.some(r => !this.open.has(r.dataset.check));
+        rows.forEach(r => this.expand(r, open));
+        return;
+      }
+      // the toggle, or a click anywhere on a row (not on its links and buttons), opens or closes its details
+      const row = e.target.closest('tr.ck-row');
+      if (row && (e.target.closest('[data-toggle]') || !e.target.closest('a,button'))) this.expand(row, !this.open.has(row.dataset.check));
     }));
+    // "/" goes to the search of the page, Esc empties it
+    document.addEventListener('keydown', e => {
+      const typing = e.target.closest('textarea,select,[contenteditable]')
+        || (e.target.matches('input') && !['radio', 'checkbox', 'button', 'submit'].includes(e.target.type));
+      if (e.key === '/' && !typing && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const box = $$('[data-search]').find(x => x.offsetParent !== null);
+        if (box) { e.preventDefault(); box.focus(); box.select(); }
+      }
+      if (e.key === 'Escape' && e.target.matches('[data-search]') && e.target.value) {
+        e.target.value = '';
+        e.target.dispatchEvent(new Event('input'));
+      }
+    });
   },
   async load(force = false) {
     if (!force && this.data && this.loaded === Site.current) return this.data;
@@ -408,107 +422,466 @@ const Catalog = {
     return this.data;
   },
   category(id) { return (this.data?.categories || []).find(c => c.id === id); },
+  activity(id) { return (this.data?.activities || []).find(a => a.id === id); },
   // Both pages draw at once from the catalog already loaded, then again with the fresh one (access per site changes).
   async showOverview() {
-    if (this.data && this.loaded === Site.current) {
-      this.renderOverview();
-      this.renderSearch();
-    }
+    $$('[data-create-template]').forEach(b => { b.hidden = !Session.admin; });
+    if (this.data && this.loaded === Site.current) { this.renderOverview(); this.renderSearch(); }
+    this.renderRecent();
     await this.load(true);
     this.renderOverview();
     this.renderSearch();
   },
-  async showProduct(id) {
-    if (this.data && this.loaded === Site.current) this.drawProduct(id, true);
+  async showList(mode, id) {
+    $$('[data-create-template]').forEach(b => { b.hidden = !Session.admin; });
+    if (this.data && this.loaded === Site.current) this.drawList(mode, id, true);
     await this.load(true);
-    this.drawProduct(id, false);
+    this.drawList(mode, id, false);
   },
-  drawProduct(id, first) {
-    const cat = this.category(id);
-    this.product = id;
-    $('#pdCrumb').textContent = cat ? cat.title : id;
-    $('#pdTitle').textContent = cat ? cat.title : 'Unknown product';
-    $('#pdIcon').innerHTML = icon(cat?.icon || 'checklist');
-    $('#pdSummary').textContent = cat?.summary || '';
-    if (first || this.shownProduct !== id) $('#ckQ').value = '';
-    this.shownProduct = id;
-    this.renderProduct();
+  drawList(mode, id, first) {
+    const meta = mode === 'activity' ? this.activity(id) : this.category(id);
+    const changed = this.mode !== mode || this.id !== id;
+    this.mode = mode;
+    this.id = id;
+    $('#pdCrumb').textContent = meta ? meta.title : id;
+    $('#pdTitle').textContent = meta ? meta.title : (mode === 'activity' ? 'Unknown activity' : 'Unknown product');
+    $('#pdIcon').innerHTML = icon(meta?.icon || 'checklist');
+    $('#pdSummary').textContent = meta?.summary || '';
+    if (first || changed) {
+      $('#ckQ').value = '';
+      $('#ckFilter').innerHTML = this.filterHtml();
+    }
+    this.renderList();
+  },
+  // The second filter: the activities of a product (toggle group), or the products of an activity (select).
+  filterHtml() {
+    const all = this.inScope();
+    if (this.mode === 'activity') {
+      const cats = this.data.categories.map(c => [c, all.filter(x => x.category === c.id).length]).filter(([, n]) => n);
+      return `<select class="pf-form-control ck-product" id="ckProduct" aria-label="Product"><option value="">All products (${all.length})</option>`
+        + cats.map(([c, n]) => `<option value="${esc(c.id)}">${esc(c.title)} (${n})</option>`).join('') + '</select>';
+    }
+    const acts = (this.data.activities || []).map(a => [a, all.filter(x => x.activity === a.id).length]).filter(([, n]) => n);
+    if (acts.length < 2) return '';
+    return `<div class="pf-toggle-group pf-m-compact" role="radiogroup" aria-label="Activity">`
+      + `<label><input type="radio" name="ckAct" value="" checked><span>All ${all.length}</span></label>`
+      + acts.map(([a, n]) => `<label><input type="radio" name="ckAct" value="${esc(a.id)}"><span>${esc(a.short)} ${n}</span></label>`).join('')
+      + '</div>';
+  },
+  inScope() {
+    return this.data.checks.filter(c => this.mode === 'activity' ? c.activity === this.id : c.category === this.id);
+  },
+  clear() {
+    const page = Router.page === 'checks' ? '#ovQ' : '#ckQ';
+    $(page).value = '';
+    if (Router.page !== 'checks') {
+      const all = $('#ckFilter input[value=""]');
+      if (all) all.checked = true;
+      if ($('#ckProduct')) $('#ckProduct').value = '';
+      $('#ckRunnable').checked = false;
+      this.store.set('wi_runnable', '');
+      this.renderList();
+    } else this.renderSearch();
+    $(page).focus();
   },
   counts(checks) {
     const ready = checks.filter(c => c.status === 'ready');
-    return {total: checks.length, ready: ready.length, runnable: ready.filter(c => c.access.runnable).length,
-      planned: checks.filter(c => c.status === 'planned').length, manual: checks.filter(c => ['manual', 'module'].includes(c.status)).length};
+    return {total: checks.length, ready: ready.length, runnable: ready.filter(c => c.access.runnable).length};
   },
+  // Home: the problems an operator sees, each with the checks for it
   renderOverview() {
-    $('#ovProducts').innerHTML = this.data.categories.map(cat => {
-      const checks = this.data.checks.filter(c => c.category === cat.id);
-      if (!checks.length) return '';
-      const n = this.counts(checks);
-      const labels = [`<span class="pf-label">${n.total} problem${n.total === 1 ? '' : 's'}</span>`,
-        n.ready && `<span class="pf-label pf-m-green">${icon('check-circle')}${n.ready} ready</span>`,
-        n.ready && n.runnable < n.ready && `<span class="pf-label pf-m-gold" title="Missing access on ${esc(Site.current)}">${n.ready - n.runnable} not on ${esc(Site.current)}</span>`,
-        n.planned && `<span class="pf-label pf-m-gold">${n.planned} planned</span>`,
-        n.manual && `<span class="pf-label">${n.manual} manual / module</span>`].filter(Boolean).join('');
-      return `<a class="pf-card pf-m-clickable" href="#/products/${esc(cat.id)}">`
-        + `<div class="pf-card__header"><div class="pf-card__header-main"><span class="pf-card__icon">${icon(cat.icon || 'checklist')}</span>`
-        + `<h2 class="pf-card__title">${esc(cat.title)}</h2></div></div>`
-        + `<div class="pf-card__body"><p>${esc(cat.summary || '')}</p>`
-        + `<ul class="ov-problems">${checks.slice(0, 4).map(c => `<li>${esc(c.title)}</li>`).join('')}${checks.length > 4 ? `<li class="pf-text-secondary">and ${checks.length - 4} more</li>` : ''}</ul></div>`
-        + `<div class="pf-card__footer">${labels}</div></a>`;
-    }).join('');
+    const byId = Object.fromEntries(this.data.checks.map(c => [c.id, c]));
+    $('#ovSymptoms').innerHTML = (this.data.symptoms || []).map(s => `<div class="pf-card ov-symptom"><div class="ov-symptom__title">`
+      + `${icon(s.icon)}<h3>${esc(s.title)}</h3></div><ul class="ov-symptom__checks">`
+      + s.checks.filter(id => byId[id]).map(id => `<li><a href="#/checks/${esc(id)}" title="${esc(byId[id].does || '')}">`
+        + `${icon('angle-right')}${esc(byId[id].title)}</a></li>`).join('') + '</ul></div>').join('');
   },
-  matches(c, q, st) {
-    if (st === 'manual' ? !['manual', 'module'].includes(c.status) : st && c.status !== st) return false;
+  // The last runs of this site that found a problem (as the Recent Jobs of the AWX dashboard): one click back to them.
+  // Activities and products are in the menu.
+  async renderRecent() {
+    const site = Site.current;
+    let items = [];
+    try {
+      items = (await api(`/api/runs?limit=40&site=${encodeURIComponent(site)}`)).items || [];
+    } catch (e) {
+      items = [];
+    }
+    if (site !== Site.current) return;
+    const bad = items.filter(r => r.status === 'fail' || r.status === 'warn').slice(0, 6);
+    $('#ovRecent').hidden = !bad.length;
+    $('#ovRecentList').innerHTML = bad.map(r => `<tr class="is-clickable" tabindex="0" data-run="${r.id}">`
+      + `<td><a href="#/runs/${r.id}">${esc(r.check_title)}</a><span class="pf-table__sub">${esc(r.summary || '')}</span></td>`
+      + `<td class="pf-nowrap">${resultLabel(r.status)}</td><td class="pf-nowrap" title="${esc(fmtTime(r.ts))}">${esc(shortTime(r.ts))}</td>`
+      + `<td class="mono pf-nowrap">${esc(r.username)}</td></tr>`).join('');
+  },
+  matches(c, q) {
     if (!q) return true;
-    return [c.title, c.summary, c.id, ...c.wi.map(w => w.title)].some(t => String(t || '').toLowerCase().includes(q));
+    const symptoms = (this.data?.symptoms || []).filter(s => s.checks.includes(c.id)).map(s => s.title);
+    return [c.title, c.does, c.summary, c.id, ...c.wi.map(w => w.title), ...symptoms].some(t => String(t || '').toLowerCase().includes(q));
   },
-  // Search across every product: results grouped by product; the product cards stay below.
+  // Search across every check: grouped by activity; the cards stay below.
   renderSearch() {
     const q = $('#ovQ').value.trim().toLowerCase();
     $('#ovResults').hidden = !q;
     if (!q || !this.data) return;
-    const shown = this.data.checks.filter(c => this.matches(c, q, ''));
+    const shown = this.data.checks.filter(c => this.matches(c, q));
     $('#ovShown').textContent = `${shown.length} check${shown.length === 1 ? '' : 's'}`;
-    let html = '';
-    for (const cat of this.data.categories) {
-      const rows = shown.filter(c => c.category === cat.id);
-      if (rows.length) html += `<tr class="pf-table__group"><td colspan="5">${esc(cat.title)}</td></tr>` + rows.map(c => this.row(c)).join('');
-    }
-    $('#ovList').innerHTML = html || `<tr><td colspan="5"><div class="pf-empty-state">${icon('search')}<h2 class="pf-title">No check matches</h2><span>Try another word, or open a product below.</span></div></td></tr>`;
+    $('#ovList').innerHTML = this.listHtml(shown, ['product', 'type', 'last'], 'Search results');
   },
-  renderProduct() {
+  renderList() {
     if (!this.data) return;
     const q = $('#ckQ').value.trim().toLowerCase();
-    const st = $('#ckStatus input:checked')?.value || '';
-    const all = this.data.checks.filter(c => c.category === this.product);
-    const shown = all.filter(c => this.matches(c, q, st));
+    const act = $('#ckFilter input:checked')?.value || '';
+    const prod = $('#ckProduct')?.value || '';
+    const runnable = $('#ckRunnable').checked;
+    const all = this.inScope();
+    const shown = all.filter(c => this.matches(c, q) && (!act || c.activity === act) && (!prod || c.category === prod)
+      && (!runnable || (c.status === 'ready' && c.access.runnable)));
     const n = this.counts(all);
     $('#ckShown').textContent = `${shown.length} of ${all.length} · ${n.runnable} runnable on ${Site.current}`;
-    $('#ckList').innerHTML = shown.map(c => this.row(c)).join('')
-      || `<tr><td colspan="5"><div class="pf-empty-state">${icon('search')}<h2 class="pf-title">No check matches</h2><span>Change the search or the status filter.</span></div></td></tr>`;
+    const title = (this.mode === 'activity' ? this.activity(this.id) : this.category(this.id))?.title || '';
+    $('#ckList').innerHTML = this.listHtml(shown, this.mode === 'activity' ? ['product', 'type', 'last'] : ['type', 'last'], `Checks of ${title}`);
   },
-  row(c) {
-    const wi = c.wi.map(w => `<a href="${esc(w.url)}" target="_blank" rel="noopener">${esc(w.title)}${icon('external')}</a>`).join('')
-      || (c.basis === 'platform' ? '<span class="pf-label pf-m-blue">Platform health</span>' : '');
-    const missing = new Set(c.access.missing.map(m => m.toLowerCase()));
-    const reads = [...c.needs, ...c.uses].map(n => {
-      const bad = c.status === 'ready' && c.needs.includes(n) && !c.access.runnable && [...missing].some(m => m.includes(n.replace('hosts:', '').replace('ro-', '')));
-      return `<span class="pf-label${bad ? ' pf-m-red' : ''}"${bad ? ` title="${esc(c.access.missing.join('; '))}"` : ''}>${esc(readsLabel(n))}${c.uses.includes(n) ? ' (optional)' : ''}</span>`;
-    }).join('');
-    let action = '';
-    if (c.status === 'ready') {
-      action = c.access.runnable
-        ? `<a class="pf-btn pf-m-secondary pf-m-small" href="#/checks/${esc(c.id)}">${icon('play')}Run</a>`
-        : `<a class="pf-btn pf-m-link pf-m-inline" href="#/checks/${esc(c.id)}" title="${esc(c.access.missing.join('; '))}">Not on ${esc(Site.current)}</a>`;
-    } else if (c.status === 'module') {
-      action = `<a class="pf-btn pf-m-link pf-m-inline" href="${esc(c.link)}">Open module ${icon('angle-right')}</a>`;
-    } else {
-      action = `<a class="pf-btn pf-m-link pf-m-inline" href="#/checks/${esc(c.id)}">Details</a>`;
+  redraw() { if (Router.page === 'checks') this.renderSearch(); else this.renderList(); },
+  expand(row, open) {
+    const id = row.dataset.check;
+    if (open) this.open.add(id); else this.open.delete(id);
+    row.classList.toggle('is-expanded', open);
+    $('[data-toggle]', row).setAttribute('aria-expanded', String(open));
+    row.nextElementSibling.hidden = !open;
+    const table = row.closest('table');
+    const all = $$('tr.ck-row', table).every(r => this.open.has(r.dataset.check));
+    const btn = $('[data-expand-all]', table);
+    btn.setAttribute('aria-expanded', String(all));
+    btn.setAttribute('aria-label', all ? 'Collapse all rows' : 'Expand all rows');
+  },
+  // Order of the rows: the catalog order within each activity (or product), or the column the operator sorted on
+  ordered(checks, groupBy) {
+    const idx = (list, id) => { const i = list.findIndex(x => x.id === id); return i < 0 ? 999 : i; };
+    const group = c => groupBy === 'category' ? idx(this.data.categories, c.category) : idx(this.data.activities || [], c.activity);
+    const base = this.data.checks;
+    const keys = {
+      name: c => c.title.toLowerCase(),
+      activity: c => idx(this.data.activities || [], c.activity),
+      product: c => idx(this.data.categories, c.category),
+      last: c => (c.runs || [])[0]?.id || 0,
+    };
+    const key = keys[this.sort.key];
+    return [...checks].sort((a, b) => {
+      if (key) {
+        const [x, y] = [key(a), key(b)];
+        if (x !== y) return (x < y ? -1 : 1) * (this.sort.dir === 'asc' ? 1 : -1);
+      }
+      return group(a) - group(b) || base.indexOf(a) - base.indexOf(b);
+    });
+  },
+  // The checks as a table like the Templates list of AWX (ansible-ui): expandable rows (description, activity of the last
+  // runs, WI, what it reads), sortable columns, the last run on this site and a Run action.
+  listHtml(checks, cols, label) {
+    if (!checks.length) {
+      return `<div class="pf-empty-state">${icon('search')}<h2 class="pf-title">No check matches</h2>`
+        + '<span>Try another word, or clear the filters.</span><button type="button" class="pf-btn pf-m-link" data-clear>Clear filters</button></div>';
     }
-    return `<tr class="is-clickable" data-check="${esc(c.id)}"><td><a class="ck-title" href="#/checks/${esc(c.id)}">${esc(c.title)}</a>`
-      + `<span class="ck-summary">${esc(c.summary)}</span></td><td><div class="ck-wi">${wi}</div></td>`
-      + `<td><div class="ck-reads">${reads || '<span class="pf-text-secondary pf-text-sm">-</span>'}</div></td>`
-      + `<td class="pf-nowrap">${checkStatusLabel(c)}</td><td class="pf-table__actions">${action}</td></tr>`;
+    const rows = this.ordered(checks, this.mode === 'activity' && Router.page === 'product' ? 'category' : 'activity');
+    const allOpen = rows.every(c => this.open.has(c.id));
+    const head = {name: 'Name', activity: 'Activity', product: 'Product', type: 'What it can do', last: 'Last ran'};
+    const th = key => {
+      const cls = key === 'name' ? '' : ` class="ck-col-${key}${key === 'last' ? '' : ' ck-opt'}"`;
+      if (key === 'type') return `<th scope="col"${cls}>${head[key]}</th>`;
+      const sorted = this.sort.key === key;
+      return `<th scope="col"${cls}${sorted ? ` aria-sort="${this.sort.dir === 'asc' ? 'ascending' : 'descending'}"` : ''}>`
+        + `<button type="button" class="ck-sort" data-sort="${key}">${head[key]}${icon('caret-down')}</button></th>`;
+    };
+    const keys = ['name', ...cols];
+    return `<div class="pf-table-wrap"><table class="pf-table ck-table" aria-label="${esc(label)}"><thead><tr>`
+      + `<td class="ck-toggle-col"><button type="button" class="pf-table__toggle" data-expand-all aria-expanded="${allOpen}" `
+      + `aria-label="${allOpen ? 'Collapse' : 'Expand'} all rows">${icon('angle-right')}</button></td>`
+      + keys.map(th).join('') + '<td class="ck-col-action"></td></tr></thead>'
+      + rows.map(c => this.row(c, keys)).join('') + '</table></div>';
+  },
+  // What a check can do, in words (instead of its activity and kind): check only, check + fix, a change, collects files
+  typeHtml(c) {
+    const badge = (color, ic, text, title) => `<span class="pf-label ck-can${color ? ` pf-m-${color}` : ''}" title="${esc(title)}">${icon(ic)}${esc(text)}</span>`;
+    let out;
+    if (c.status === 'module') out = badge('', 'external', 'Portal module', 'Done by another module of the portal');
+    else if (c.status === 'manual') out = badge('', 'info', 'Manual (WI)', 'Nothing to read automatically: follow the work instruction');
+    else if (c.status === 'planned') out = badge('gold', 'in-progress', 'Planned', c.reason || 'Not runnable yet');
+    else if (c.collect) out = badge('cyan', 'download', 'Collects files', 'Collects logs or events into files to download');
+    else if (c.fix && c.activity === 'operations') out = badge('orange', 'refresh', 'Makes a change', 'Checks first; the change runs only after you confirm it');
+    else if (c.fix) out = badge('blue', 'tool', 'Check + fix', 'Reads only; a fix runs only when you start it from the result');
+    else out = badge('green', 'search', 'Check only', 'Reads only; it changes nothing');
+    if (c.template) out += ' <span class="pf-label">Template</span>';
+    if (c.status === 'ready' && !c.access.runnable) {
+      out += ` <span class="pf-label pf-m-gold" title="${esc(c.access.missing.join('; '))}">Not on ${esc(Site.current)}</span>`;
+    }
+    return out;
+  },
+  runTitle(r) {
+    return `Run #${r.id} · ${(RESULT[r.status] || [r.status])[0]} · ${fmtTime(r.ts)} · ${r.username}`;
+  },
+  lastHtml(c) {
+    const r = (c.runs || [])[0];
+    if (!r) return `<span class="ck-muted">${c.status === 'ready' ? 'Never' : '-'}</span>`;
+    const ic = (RESULT[r.status] || ['', '', 'info'])[2];
+    return `<a class="ck-last" href="#/runs/${r.id}" title="${esc(this.runTitle(r))}">`
+      + `<span class="ck-st is-${esc(r.status)}">${icon(ic)}</span>${esc(shortTime(r.ts))}</a>`;
+  },
+  actionHtml(c) {
+    const a = (href, ic, text, ext = false) => `<a class="pf-btn pf-m-plain" href="${esc(href)}" title="${esc(text)}" `
+      + `aria-label="${esc(`${text}: ${c.title}`)}"${ext ? ' target="_blank" rel="noopener"' : ''}>${icon(ic)}</a>`;
+    if (c.status === 'ready') {
+      const edit = c.basis === 'template' && Session.admin ? a(`#/templates/${c.id}`, 'pencil', 'Edit template') : '';
+      return (c.access.runnable ? a(`#/checks/${c.id}`, 'play', `Run on ${Site.current}`) : a(`#/checks/${c.id}`, 'info', `Why not on ${Site.current}`)) + edit;
+    }
+    if (c.status === 'module') return a(c.link, 'angle-right', 'Open module');
+    const wi = c.wi.find(w => w.url);
+    return wi ? a(wi.url, 'external', 'Open the work instruction', true) : a(`#/checks/${c.id}`, 'info', 'Details');
+  },
+  // The last runs on this site as bars, oldest left (the Activity sparkline of AWX); each bar opens its run
+  sparkline(c) {
+    const items = [...(c.runs || [])].reverse();
+    if (!items.length) return `<span class="ck-muted">No run on ${esc(Site.current)} yet</span>`;
+    return `<span class="ck-spark">${items.map(r => `<a class="is-${esc(r.status)}" href="#/runs/${r.id}" title="${esc(this.runTitle(r))}">`
+      + `<span class="sr-only">${esc(this.runTitle(r))}</span></a>`).join('')}</span>`;
+  },
+  detailHtml(c) {
+    const last = (c.runs || [])[0];
+    const why = c.status === 'ready' ? (c.access.runnable ? '' : c.access.missing.map(esc).join('<br>')) : esc(c.reason || '');
+    const reads = [...(c.needs || []), ...(c.uses || [])];
+    const t = c.template;
+    return dl([
+      ['Description', esc(c.summary)],
+      t && ['Template', `Made on the portal by ${esc(t.created_by || '-')}; changed ${esc(shortTime(t.updated))} by ${esc(t.updated_by || '-')}`],
+      t && ['Steps', `<ol class="ck-tsteps">${t.steps.map(st => `<li>${esc(st.title)} <span class="pf-label${st.mode === 'change' ? ' pf-m-gold' : ''}">`
+        + `${st.mode === 'change' ? 'Changes, after confirmation' : 'Reads'}</span><code class="mono">${esc(st.command)}</code></li>`).join('')}</ol>`],
+      c.status === 'ready' && ['Activity', this.sparkline(c)],
+      last && last.summary && ['Last result', `${resultLabel(last.status)} ${esc(last.summary)}`],
+      c.wi.length && ['Work instructions', c.wi.map(w => wiRef(w, 'wi-link')).join('')],
+      reads.length && ['Reads', reads.map(n => `<span class="pf-label">${esc(readsLabel(n))}${(c.uses || []).includes(n) ? ' (optional)' : ''}</span>`).join(' ')],
+      why && [c.status === 'ready' ? `Not on ${Site.current}` : 'Why not automated', why],
+    ]);
+  },
+  row(c, keys) {
+    const open = this.open.has(c.id);
+    const cell = {
+      name: () => `<td class="ck-name"><a href="#/checks/${esc(c.id)}">${esc(c.title)}</a>`
+        + `<span class="ck-does">${esc(c.does || '')}</span></td>`,
+      activity: () => {
+        const a = this.activity(c.activity);
+        return `<td class="ck-col-activity ck-opt">${a ? `<span class="pf-label">${icon(a.icon)}${esc(a.short)}</span>` : ''}</td>`;
+      },
+      product: () => `<td class="ck-col-product ck-opt">${esc(this.category(c.category)?.title || c.category)}</td>`,
+      type: () => `<td class="ck-col-type ck-opt">${this.typeHtml(c)}</td>`,
+      last: () => `<td class="ck-col-last">${this.lastHtml(c)}</td>`,
+    };
+    return `<tbody><tr class="ck-row${open ? ' is-expanded' : ''}" data-check="${esc(c.id)}">`
+      + `<td class="ck-toggle-col"><button type="button" class="pf-table__toggle" data-toggle aria-expanded="${open}" `
+      + `aria-controls="ckd-${esc(c.id)}" aria-label="Details of ${esc(c.title)}">${icon('angle-right')}</button></td>`
+      + keys.map(k => cell[k]()).join('') + `<td class="ck-col-action">${this.actionHtml(c)}</td></tr>`
+      + `<tr class="ck-detail" id="ckd-${esc(c.id)}"${open ? '' : ' hidden'}><td></td>`
+      + `<td colspan="${keys.length + 1}">${this.detailHtml(c)}</td></tr></tbody>`;
+  },
+};
+
+/* =========================================================================
+   Templates (administrators): a check of your own in steps, without writing Ansible (like Create job template of AWX,
+   with a form instead of a playbook). Each step: one command and the rules that rate its output; the portal says which
+   steps only read (they run with the check) and which change the host (a fix, after the host name is typed).
+   ========================================================================= */
+const TemplateForm = {
+  meta: null,
+  id: '',          // '' = a new template
+  prefill: null,   // {category, activity} of the list the Create button was pressed on
+  timer: 0,
+  seq: 0,
+  init() {
+    $('#tpForm').addEventListener('submit', e => { e.preventDefault(); this.save(); });
+    $('#tpAdd').addEventListener('click', () => { this.addStep({}); this.classify(); $('#tpSteps li:last-child [data-f="title"]').focus(); });
+    $('#tpDelete').addEventListener('click', () => this.remove());
+    $('#tpGroup').addEventListener('change', () => this.classify());
+    $('#tpSteps').addEventListener('input', e => { if (e.target.dataset.f === 'command') this.classifySoon(); });
+    $('#tpSteps').addEventListener('click', e => {
+      const btn = e.target.closest('[data-step-tool]');
+      if (!btn) return;
+      const li = btn.closest('li');
+      const tool = btn.dataset.stepTool;
+      if (tool === 'remove' && $$('#tpSteps > li').length > 1) li.remove();
+      if (tool === 'up' && li.previousElementSibling) li.parentNode.insertBefore(li, li.previousElementSibling);
+      if (tool === 'down' && li.nextElementSibling) li.parentNode.insertBefore(li.nextElementSibling, li);
+      this.number();
+      this.classify();
+      (tool === 'remove' ? $('#tpAdd') : btn).focus();
+    });
+    document.addEventListener('click', e => {
+      if (!e.target.closest('[data-create-template]')) return;
+      this.prefill = Router.page === 'product' ? {[Catalog.mode === 'activity' ? 'activity' : 'category']: Catalog.id} : null;
+      location.hash = '#/templates/new';
+    });
+  },
+  async open(id) {
+    $('#tpNotice').innerHTML = '';
+    $('#tpError').hidden = true;
+    if (!Session.admin) {
+      $('#tpForm').hidden = true;
+      $('#tpNotice').innerHTML = alertBox('warning', 'Administrators only', 'Only administrators create and change templates. Every user can run them from the check lists.');
+      return;
+    }
+    $('#tpForm').hidden = false;
+    this.meta = this.meta || await api('/api/templates/meta');
+    const data = await Catalog.load();
+    this.id = id === 'new' ? '' : id;
+    const t = this.id ? (await api(`/api/templates/${encodeURIComponent(this.id)}`)).template
+      : {name: '', summary: '', activity: this.prefill?.activity || 'troubleshoot', category: this.prefill?.category || '',
+         group: '', steps: [{fail_on_error: true}]};
+    this.prefill = null;
+    const opts = (items, current, empty) => (empty ? `<option value="">${empty}</option>` : '')
+      + items.map(([value, label]) => `<option value="${esc(value)}"${value === current ? ' selected' : ''}>${esc(label)}</option>`).join('');
+    $('#tpGroup').innerHTML = opts(this.meta.groups.map(g => [g.id, g.label + (g.read_only ? ' (read-only)' : '')]), t.group, 'Choose a host group');
+    $('#tpActivity').innerHTML = opts((data.activities || []).map(a => [a.id, a.title]), t.activity);
+    $('#tpCategory').innerHTML = opts(data.categories.map(c => [c.id, c.title]), t.category, 'Choose a product');
+    $('#tpName').value = t.name;
+    $('#tpSummary').value = t.summary || '';
+    const title = this.id ? `Edit template: ${t.name}` : 'Create template';
+    $('#tpTitle').textContent = title;
+    $('#tpCrumb').textContent = this.id ? t.name : 'Create template';
+    document.title = `${title} - ${BASE_TITLE}`;
+    $('#tpCancel').href = this.id ? `#/checks/${this.id}` : '#/checks';
+    $('#tpDelete').hidden = !this.id;
+    $('#tpSteps').innerHTML = '';
+    (t.steps.length ? t.steps : [{fail_on_error: true}]).forEach(s => this.addStep(s));
+    this.classify();
+    $('#tpName').focus();
+  },
+  addStep(s) {
+    const li = document.createElement('li');
+    li.className = 'tp-step';
+    li.innerHTML = this.stepHtml(s, ++this.seq);
+    $('#tpSteps').appendChild(li);
+    this.number();
+  },
+  // One step of the form (also drawn by the guide of this page)
+  stepHtml(s, n) {
+    const id = f => `tp${n}_${f}`;
+    const wait = Math.max(0, parseInt(s.wait, 10) || 0);
+    return `<div class="tp-step__head"><h3 class="tp-step__n"></h3><span class="tp-mode" data-mode></span>`
+      + `<span class="tp-step__tools">`
+      + `<button type="button" class="pf-btn pf-m-plain" data-step-tool="up" title="Move up" aria-label="Move this step up">${icon('arrow-up')}</button>`
+      + `<button type="button" class="pf-btn pf-m-plain" data-step-tool="down" title="Move down" aria-label="Move this step down">${icon('arrow-down')}</button>`
+      + `<button type="button" class="pf-btn pf-m-plain" data-step-tool="remove" title="Remove step" aria-label="Remove this step">${icon('trash')}</button></span></div>`
+      + `<div class="tp-grid">`
+      + `<div class="pf-form-group"><label class="pf-form-label" for="${id('title')}">Title <span class="pf-required" aria-hidden="true">*</span></label>`
+      + `<input class="pf-form-control" id="${id('title')}" data-f="title" maxlength="80" placeholder="e.g. Disk usage of /" value="${esc(s.title || '')}"></div>`
+      + `<div class="pf-form-group tp-command"><label class="pf-form-label" for="${id('command')}">Command <span class="pf-required" aria-hidden="true">*</span></label>`
+      + `<input class="pf-form-control mono" id="${id('command')}" data-f="command" maxlength="1000" spellcheck="false" autocapitalize="off" `
+      + `placeholder="e.g. df -h /" aria-describedby="${id('why')}" value="${esc(s.command || '')}">`
+      + `<span class="pf-helper-text" id="${id('why')}" data-why aria-live="polite"></span></div></div>`
+      + `<fieldset class="tp-rules" data-rules><legend>When is the result a problem?</legend><div class="tp-grid tp-grid--3">`
+      + `<div class="pf-form-group"><label class="pf-form-label" for="${id('problem_if')}">Problem if the output contains</label>`
+      + `<input class="pf-form-control mono" id="${id('problem_if')}" data-f="problem_if" maxlength="200" spellcheck="false" placeholder="e.g. 9[0-9]%" value="${esc(s.problem_if || '')}"></div>`
+      + `<div class="pf-form-group"><label class="pf-form-label" for="${id('warning_if')}">Warning if the output contains</label>`
+      + `<input class="pf-form-control mono" id="${id('warning_if')}" data-f="warning_if" maxlength="200" spellcheck="false" placeholder="e.g. 8[0-9]%" value="${esc(s.warning_if || '')}"></div>`
+      + `<div class="pf-form-group"><label class="pf-form-label" for="${id('expect')}">Problem if the output does not contain</label>`
+      + `<input class="pf-form-control mono" id="${id('expect')}" data-f="expect" maxlength="200" spellcheck="false" placeholder="e.g. ^active" value="${esc(s.expect || '')}"></div></div>`
+      + `<label class="pf-check"><input type="checkbox" data-f="fail_on_error"${s.fail_on_error === false ? '' : ' checked'}>`
+      + `<span>Problem when the command fails (exit code not 0)</span></label>`
+      + `<span class="pf-helper-text">A text or a regular expression, not case-sensitive: <span class="mono">failed|error</span> matches either word. Empty = not used.</span></fieldset>`
+      + `<div class="tp-change" data-change hidden>${alertBox('info', 'This step changes the host',
+        'It does not run with the check. The result offers the change steps as a fix: they run in order, once the operator types '
+        + 'the host name, for accounts that may run fixes, on hosts whose SSH credential allows fixes (Hosts &amp; SSH).')}</div>`
+      + `<div class="pf-form-group tp-wait" data-wait><label class="pf-form-label" for="${id('wait')}">Wait before the next step</label>`
+      + `<div class="pf-input-group"><input class="pf-form-control" type="number" id="${id('wait')}" data-f="wait" min="0" max="1800" step="1" `
+      + `inputmode="numeric" value="${wait % 60 === 0 && wait >= 60 ? wait / 60 : wait}" aria-describedby="${id('wait_help')}">`
+      + `<select class="pf-form-control" data-f="wait_unit" aria-label="Unit of the wait">`
+      + `<option value="1"${wait % 60 === 0 && wait >= 60 ? '' : ' selected'}>seconds</option>`
+      + `<option value="60"${wait % 60 === 0 && wait >= 60 ? ' selected' : ''}>minutes</option></select></div>`
+      + `<span class="pf-helper-text" id="${id('wait_help')}" data-wait-help></span></div>`;
+  },
+  modeHtml(group, mode) {
+    return !group ? '<span class="pf-label">Choose “Runs on” first</span>'
+      : !mode ? '' : mode === 'read' ? `<span class="pf-label pf-m-green">${icon('eye')}Reads</span>`
+        : `<span class="pf-label pf-m-gold">${icon('alert')}Changes the host · after confirmation</span>`;
+  },
+  whyText(mode, why) { return mode === 'change' ? `Changes the host: ${why}.` : mode === 'read' ? 'Only reads: runs with the check.' : ''; },
+  waitHelp(mode) {
+    return mode === 'change'
+      ? 'Inside the fix, before the next change step; after the last one, before the check runs again. Up to 30 minutes.'
+      : 'Inside the check, before the next read step. 0 = go on at once; up to 30 minutes.';
+  },
+  number() {
+    $$('#tpSteps > li').forEach((li, i, all) => {
+      $('.tp-step__n', li).textContent = `Step ${i + 1}`;
+      $('[data-step-tool="up"]', li).disabled = i === 0;
+      $('[data-step-tool="down"]', li).disabled = i === all.length - 1;
+      $('[data-step-tool="remove"]', li).disabled = all.length === 1;
+    });
+    $('#tpAdd').disabled = $$('#tpSteps > li').length >= (this.meta?.max_steps || 20);
+  },
+  classifySoon() {
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => this.classify(), 350);
+  },
+  // What each step does, as the portal will rate it when the template runs (the server decides, never the form)
+  async classify() {
+    const rows = $$('#tpSteps > li');
+    const group = $('#tpGroup').value;
+    const commands = rows.map(li => $('[data-f="command"]', li).value);
+    let items = [];
+    try { items = group ? (await api('/api/templates/classify', {group, commands})).items : []; } catch (e) { items = []; }
+    if ($('#tpGroup').value !== group) return;   // changed meanwhile: a newer call follows
+    rows.forEach((li, i) => {
+      const it = commands[i].trim() && items[i];
+      const mode = it ? it.mode : '';
+      $('[data-mode]', li).innerHTML = this.modeHtml(group, mode);
+      $('[data-why]', li).textContent = this.whyText(mode, it && it.why);
+      $('[data-rules]', li).hidden = mode === 'change';
+      $('[data-change]', li).hidden = mode !== 'change';
+      const readOnly = (this.meta?.groups || []).some(g => g.id === group && g.read_only);
+      $('[data-wait]', li).hidden = readOnly;
+      $('[data-wait-help]', li).textContent = this.waitHelp(mode);
+    });
+  },
+  collect() {
+    return {
+      name: $('#tpName').value, summary: $('#tpSummary').value, activity: $('#tpActivity').value,
+      category: $('#tpCategory').value, group: $('#tpGroup').value,
+      steps: $$('#tpSteps > li').map(li => ({
+        title: $('[data-f="title"]', li).value, command: $('[data-f="command"]', li).value,
+        problem_if: $('[data-f="problem_if"]', li).value, warning_if: $('[data-f="warning_if"]', li).value,
+        expect: $('[data-f="expect"]', li).value, fail_on_error: $('[data-f="fail_on_error"]', li).checked,
+        wait: $('[data-wait]', li).hidden ? 0
+          : Math.round((parseFloat($('[data-f="wait"]', li).value) || 0) * Number($('[data-f="wait_unit"]', li).value)),
+      })),
+    };
+  },
+  async save() {
+    const btn = $('#tpSave');
+    btn.disabled = true;
+    $('#tpError').hidden = true;
+    try {
+      const body = this.collect();
+      const res = this.id ? await api(`/api/templates/${encodeURIComponent(this.id)}`, body, 'PUT') : await api('/api/templates', body);
+      Catalog.loaded = '';   // the lists show the template at once
+      toast(this.id ? 'Template saved' : 'Template created: choose a host and run it', 'success');
+      location.hash = `#/checks/${res.id}`;
+    } catch (e) {
+      $('#tpError').innerHTML = `<div class="pf-alert__title">${esc(e.message)}</div>`;
+      $('#tpError').hidden = false;
+      $('#tpError').focus();
+    } finally {
+      btn.disabled = false;
+    }
+  },
+  async remove() {
+    const name = $('#tpName').value;
+    if (!await Confirm.ask('Delete this template?', `${name} is deleted for everyone. Its past runs stay in Runs.`, 'Delete')) return;
+    try {
+      await api(`/api/templates/${encodeURIComponent(this.id)}`, undefined, 'DELETE');
+      Catalog.loaded = '';
+      toast('Template deleted', 'success');
+      location.hash = '#/checks';
+    } catch (e) {
+      toast(e.message);
+    }
   },
 };
 
@@ -519,6 +892,55 @@ const Launch = {
   check: null,
   init() {
     $('#lnForm').addEventListener('submit', e => { e.preventDefault(); this.submit(); });
+    // A list of IDs (uuid_list): one row per ID, Add / remove buttons; several IDs pasted at once become one row each.
+    const params = $('#lnParams');
+    params.addEventListener('click', e => {
+      const add = e.target.closest('[data-add]');
+      const remove = e.target.closest('[data-remove]');
+      if (add) {
+        const list = $(`.wi-idlist[data-list="${add.dataset.add}"]`, params);
+        const p = (this.check?.params || []).find(x => x.name === add.dataset.add);
+        if (list && p && $$('[data-item]', list).length < (p.max || 16)) {
+          list.insertAdjacentHTML('beforeend', this.idRow(p));
+          $$('[data-item]', list).at(-1).focus();
+        } else if (p) toast(`At most ${p.max || 16} IDs per run`);
+        this.idCount(add.dataset.add);
+      } else if (remove) {
+        const list = remove.closest('.wi-idlist');
+        const rows = $$('.wi-idlist__row', list);
+        if (rows.length > 1) remove.closest('.wi-idlist__row').remove();
+        else $('[data-item]', rows[0]).value = '';
+        this.idCount(list.dataset.list);
+      }
+    });
+    params.addEventListener('paste', e => {
+      const input = e.target.closest('[data-item]');
+      if (!input) return;
+      const ids = (e.clipboardData?.getData('text') || '').split(/[\s,;]+/).filter(Boolean);
+      if (ids.length < 2) return;
+      e.preventDefault();
+      const list = input.closest('.wi-idlist');
+      const p = (this.check?.params || []).find(x => x.name === list.dataset.list);
+      input.value = ids.shift();
+      for (const id of ids) {
+        if ($$('[data-item]', list).length >= (p?.max || 16)) { toast(`At most ${p?.max || 16} IDs per run`); break; }
+        list.insertAdjacentHTML('beforeend', this.idRow(p, id));
+      }
+      this.idCount(list.dataset.list);
+    });
+    params.addEventListener('input', e => { if (e.target.closest('[data-item]')) this.idCount(e.target.closest('.wi-idlist').dataset.list); });
+  },
+  idRow(p, value = '') {
+    const noFill = 'autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" data-form-type="other"';
+    return `<div class="wi-idlist__row"><input type="text" class="pf-form-control mono" data-item ${noFill} spellcheck="false" maxlength="64"`
+      + ` aria-label="${esc(p.label)}" placeholder="e.g. a80a1a07-06b8-489b-a984-b046981f68b9" value="${esc(value)}">`
+      + `<button type="button" class="pf-btn pf-m-plain" data-remove aria-label="Remove this row" title="Remove">${icon('minus-circle')}</button></div>`;
+  },
+  idCount(name) {
+    const list = $(`.wi-idlist[data-list="${name}"]`);
+    const n = list ? $$('[data-item]', list).filter(i => i.value.trim()).length : 0;
+    const out = $(`[data-count="${name}"]`);
+    if (out) out.textContent = n ? `${n} ID${n > 1 ? 's' : ''}` : '';
   },
   async open(id) {
     const data = await Catalog.load();
@@ -534,8 +956,10 @@ const Launch = {
     $('#lnProduct').href = $('#lnCancel').href = `#/products/${c.category}`;
     $('#lnCrumb').textContent = c.title;
     $('#lnTitle').textContent = c.title;
-    $('#lnStatus').innerHTML = checkStatusLabel(c);
-    $('#lnSummary').textContent = c.summary;
+    $('#lnStatus').innerHTML = checkStatusLabel(c) + (c.template ? ' <span class="pf-label pf-m-blue">Template</span>' : '');
+    $('#lnActions').innerHTML = c.template && Session.admin
+      ? `<a class="pf-btn pf-m-secondary" href="#/templates/${esc(c.id)}">${icon('pencil')}Edit template</a>` : '';
+    $('#lnSummary').textContent = c.does || c.summary;
     const site = Site.info(Site.current);
     $('#lnSite').style.setProperty('--opt', site.color);
     $('#lnSite').innerHTML = `<span class="site-banner-name">${esc(site.name)}</span><span class="site-banner-detail"><b>Site ${esc(site.name)}</b>`
@@ -556,12 +980,23 @@ const Launch = {
     const runnable = c.status === 'ready' && c.access.runnable;
     $('#lnRun').disabled = !runnable;
     $('#lnForm').hidden = c.status !== 'ready';
-    $('#lnAbout').innerHTML = `<div class="wi-about"><h3>${c.wi.length ? 'Work instruction' : 'Platform health'}</h3>`
-      + (c.wi.map(w => `<a class="wi-link" href="${esc(w.url)}" target="_blank" rel="noopener">${esc(w.title)}${icon('external')}</a>`).join('')
-         || '<p class="pf-text-secondary">Not from a Knowledge Base page: a health check of the platform. Each finding links to the vendor documentation.</p>')
-      + (c.steps.length ? `<h3>Steps checked</h3><ol>${c.steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol>` : '')
-      + `<h3>Reads</h3>${[...c.needs, ...c.uses].map(n => `<span class="pf-label">${esc(readsLabel(n))}${c.uses.includes(n) ? ' (optional)' : ''}</span>`).join(' ') || '-'}`
-      + '<p class="pf-text-secondary pf-mt-md">Read-only accounts only. OpenStack commands are limited to list and show; host commands are fixed read commands.</p></div>';
+    if (c.template) {
+      const t = c.template;
+      $('#lnAbout').innerHTML = `<div class="wi-about"><p>${esc(c.summary)}</p><h3>Template</h3><p class="pf-text-secondary">Made on the portal by ${esc(t.created_by || '-')}, `
+        + `changed ${esc(fmtTime(t.updated))} by ${esc(t.updated_by || '-')}.</p><h3>Steps</h3><ol class="ck-tsteps">`
+        + t.steps.map(st => `<li>${esc(st.title)} <span class="pf-label${st.mode === 'change' ? ' pf-m-gold' : ''}">`
+          + `${st.mode === 'change' ? 'Changes, after confirmation' : 'Reads'}</span><code class="mono">${esc(st.command)}</code></li>`).join('') + '</ol>'
+        + '<p class="pf-text-secondary pf-mt-md">The read steps run with the SSH credential of the host. The change steps never run with the check: '
+        + 'the result offers them as a fix, which runs once the operator types the host name, for accounts that may run fixes, on hosts '
+        + 'whose SSH credential allows fixes.</p></div>';
+    } else {
+      $('#lnAbout').innerHTML = `<div class="wi-about"><p>${esc(c.summary)}</p><h3>${c.wi.length ? 'Work instruction' : 'Platform health'}</h3>`
+        + (c.wi.map(w => wiRef(w, 'wi-link')).join('')
+           || '<p class="pf-text-secondary">Not from a Knowledge Base page: a health check of the platform. Each finding links to the vendor documentation.</p>')
+        + (c.steps.length ? `<h3>Steps checked</h3><ol>${c.steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol>` : '')
+        + `<h3>Reads</h3>${[...c.needs, ...c.uses].map(n => `<span class="pf-label">${esc(readsLabel(n))}${c.uses.includes(n) ? ' (optional)' : ''}</span>`).join(' ') || '-'}`
+        + '<p class="pf-text-secondary pf-mt-md">Read-only accounts only. OpenStack commands are limited to list and show; host commands are fixed read commands.</p></div>';
+    }
     const topo = Topology.html(c.topology);
     $('#lnTopoCard').hidden = !topo;
     $('#lnTopo').innerHTML = topo;
@@ -584,14 +1019,21 @@ const Launch = {
           : hosts.length ? 'Choose a host' : 'No host of this kind on this site'}</option>`
         + hosts.map(h => `<option value="${esc(h.name)}"${h.name === last ? ' selected' : ''}>${esc(h.name)} — ${esc(h.address)} (${esc(h.group)})</option>`).join('')
         + '</select>';
+    } else if (p.type === 'uuid_list') {
+      return `<div class="pf-form-group"><label class="pf-form-label" for="${id}_0">${esc(p.label)}${p.required ? ' <span class="pf-required" aria-hidden="true">*</span>' : ''}`
+        + ` <span class="pf-text-secondary wi-idlist__count" data-count="${esc(p.name)}"></span></label>`
+        + `<div class="wi-idlist" data-list="${esc(p.name)}">${this.idRow(p).replace('<input ', `<input id="${id}_0" `)}</div>`
+        + `<button type="button" class="pf-btn pf-m-link pf-m-inline wi-idlist__add" data-add="${esc(p.name)}">${icon('plus')} Add instance</button>`
+        + `${help}</div>`;
     } else if (p.type === 'select') {
       control = `<select class="pf-form-control" id="${id}" data-param="${esc(p.name)}" ${noFill}>${(p.options || []).map(o => `<option${String(o) === String(p.default ?? '') ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
     } else {
       const numeric = ['int', 'port'].includes(p.type);
-      const mono = ['uuid', 'ip', 'cidr', 'ip_port', 'project'].includes(p.type) ? ' mono' : '';
+      const mono = ['uuid', 'ip', 'ip_list', 'cidr', 'ip_port', 'project'].includes(p.type) ? ' mono' : '';
       control = `<input type="text" class="pf-form-control${mono}" id="${id}" data-param="${esc(p.name)}" ${numeric ? 'inputmode="numeric"' : ''}`
         + ` ${noFill} spellcheck="false" maxlength="256" value="${esc(p.default ?? '')}"`
-        + `${p.type === 'uuid' ? ' placeholder="e.g. a80a1a07-06b8-489b-a984-b046981f68b9"' : ''}${p.type === 'ip' ? ' placeholder="e.g. 11.7.101.238"' : ''}>`;
+        + `${p.type === 'uuid' ? ' placeholder="e.g. a80a1a07-06b8-489b-a984-b046981f68b9"' : ''}${p.type === 'ip' ? ' placeholder="e.g. 11.7.101.238"' : ''}`
+        + `${p.type === 'ip_list' ? ' placeholder="e.g. 10.249.11.50, 10.249.11.51"' : ''}>`;
     }
     return `<div class="pf-form-group">${label}${control}${help}</div>`;
   },
@@ -603,10 +1045,23 @@ const Launch = {
       el.classList.remove('is-invalid');
       if (el.value.trim() !== '') params[el.dataset.param] = el.value.trim();
     });
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    for (const list of $$('#lnParams .wi-idlist')) {   // the rows of a list of IDs, comma separated
+      const items = $$('[data-item]', list);
+      items.forEach(i => i.classList.remove('is-invalid'));
+      const bad = items.filter(i => i.value.trim() && !uuid.test(i.value.trim()));
+      if (bad.length) {
+        bad.forEach(i => i.classList.add('is-invalid'));
+        bad[0].focus();
+        return toast(`${bad.length} row(s) are not OpenStack IDs`);
+      }
+      const ids = items.map(i => i.value.trim().toLowerCase()).filter(Boolean);
+      if (ids.length) params[list.dataset.list] = [...new Set(ids)].join(',');
+    }
     const missing = c.params.filter(p => p.required && !params[p.name]);
     if (missing.length) {
-      missing.forEach(p => $(`#p_${p.name}`)?.classList.add('is-invalid'));
-      $(`#p_${missing[0].name}`)?.focus();
+      missing.forEach(p => ($(`#p_${p.name}`) || $(`#p_${p.name}_0`))?.classList.add('is-invalid'));
+      ($(`#p_${missing[0].name}`) || $(`#p_${missing[0].name}_0`))?.focus();
       return toast(`${missing.map(p => p.label).join(', ')}: required`);
     }
     const host = c.params.find(p => p.type === 'host');
@@ -708,7 +1163,7 @@ const Runs = {
     $('#rnList').innerHTML = this.items.map(r => `<tr class="is-clickable" tabindex="0" data-id="${r.id}">`
       + `<td class="mono">#${r.id}</td><td>${esc(r.check_title)}<span class="pf-table__sub">${esc(r.summary || r.error || '')}</span></td>`
       + `<td class="pf-nowrap">${resultLabel(r.status)}</td><td>${this.fixes(r)}</td><td>${esc(r.site)}</td><td>${this.target(r)}</td>`
-      + `<td class="mono">${esc(r.username)}</td><td class="pf-nowrap" title="${esc(fmtTime(r.ts))}">${esc(shortTime(r.ts))}</td>`
+      + `<td class="mono pf-nowrap">${esc(r.username)}</td><td class="pf-nowrap" title="${esc(fmtTime(r.ts))}">${esc(shortTime(r.ts))}</td>`
       + `<td class="pf-nowrap">${r.finished ? duration((new Date(r.finished) - new Date(r.ts)) / 1000) : '-'}</td></tr>`).join('')
       || `<tr><td colspan="9"><div class="pf-empty-state">${icon('list')}<h2 class="pf-title">No runs yet</h2><span>Run a check from the Checks page.</span></div></td></tr>`;
   },
@@ -745,6 +1200,37 @@ const LogView = {
   },
 };
 
+/* =========================================================================
+   Progress of a running check or fix: how far (an animated bar), what runs now, how long, the last tasks
+   (progress.py on the portal reads it from the live Ansible output)
+   ========================================================================= */
+const Progress = {
+  html(bar, elapsed, what) {
+    return `<div class="wi-progress" role="group" aria-label="${esc(what)}"><div class="wi-progress__head">`
+      + '<span class="wi-progress__now"><span class="pf-spinner pf-m-sm" aria-hidden="true"></span><span data-now></span></span>'
+      + '<span class="wi-progress__pct" data-pct></span></div>'
+      + `<div class="wi-progress__track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="${esc(what)}">`
+      + '<span class="wi-progress__fill" data-fill></span></div><div class="wi-progress__meta" data-meta aria-live="polite"></div>'
+      + '<ol class="wi-progress__steps" data-steps></ol></div>';
+  },
+  // Update in place (the bar slides from where it was); draw it first when the box is still empty.
+  show(box, bar, elapsed, what) {
+    if (!box) return;
+    if (!$('.wi-progress', box)) box.innerHTML = this.html(bar, elapsed, what);
+    const pct = Math.max(0, Math.min(100, Math.round(bar?.percent ?? 0)));
+    $('[data-pct]', box).textContent = `${pct}%`;
+    $('[data-fill]', box).style.width = `${Math.max(pct, 2)}%`;
+    $('.wi-progress__track', box).setAttribute('aria-valuenow', String(pct));
+    $('[data-now]', box).textContent = bar?.current || 'Starting…';
+    $('[data-meta]', box).textContent = elapsed != null ? `Running for ${duration(elapsed)}` : '';
+    const ic = {ok: ['check-circle', 'is-ok'], failed: ['x-circle', 'is-fail'], running: ['in-progress', 'is-running']};
+    $('[data-steps]', box).innerHTML = (bar?.steps || []).map(st => {
+      const [i, cls] = ic[st.status] || ['circle', ''];
+      return `<li class="${cls}">${icon(i)}<span>${esc(st.name)}</span></li>`;
+    }).join('');
+  },
+};
+
 const RunPage = {
   token: 0,
   record: null,
@@ -761,6 +1247,22 @@ const RunPage = {
     // Permission "collect logs": every command and its full output, and the log bundle of Collect logs / sos report
     // (the bundle is a plain link: it can be gigabytes, the browser downloads it itself).
     $('#runRawBtn').addEventListener('click', e => run(e.currentTarget, () => downloadFile(`/export/runs/${this.record.id}/raw.zip`, `run-${this.record.id}-raw.zip`)));
+    // The exports in one menu (as the user menu of the masthead): open / close, outside click, Escape
+    const menu = $('#runExportMenu'), toggle = $('#runExportToggle');
+    const setOpen = open => { menu.hidden = !open; toggle.setAttribute('aria-expanded', String(open)); };
+    toggle.addEventListener('click', () => { setOpen(menu.hidden); if (!menu.hidden) $('.pf-menu__item:not([hidden])', menu)?.focus(); });
+    menu.addEventListener('click', e => { if (e.target.closest('.pf-menu__item')) setOpen(false); });
+    document.addEventListener('click', e => { if (!menu.hidden && !e.target.closest('#runExportWrap')) setOpen(false); });
+    $('#runExportWrap').addEventListener('keydown', e => { if (e.key === 'Escape' && !menu.hidden) { setOpen(false); toggle.focus(); } });
+    // The findings of the result jump to their step (or to the fixes); the hash stays the route of the page
+    $('#runOutcome').addEventListener('click', e => {
+      const b = e.target.closest('[data-goto]');
+      if (!b) return;
+      const el = $(b.dataset.goto);
+      if (!el) return;
+      $('details.wi-step__more', el)?.setAttribute('open', '');
+      el.scrollIntoView({behavior: 'smooth', block: 'start'});
+    });
     $('#runRecs').addEventListener('click', e => {
       const b = e.target.closest('[data-fix]');
       if (b && !b.disabled) FixDialog.open(this.record, Number(b.dataset.fix), [...(this.sel[Number(b.dataset.fix)] || [])]);
@@ -806,12 +1308,12 @@ const RunPage = {
     const risk = $('.wi-fix__risk', root);
     if (risk) {
       risk.className = `pf-label wi-fix__risk ${high ? 'pf-m-red' : 'pf-m-blue'}`;
-      risk.innerHTML = high ? `${icon('alert')}High risk: deletes, type the number of ticked ${esc(fx.noun)}` : 'Standard fix';
+      risk.innerHTML = high ? `${icon('alert')}High risk: type the number of ticked ${esc(fx.noun)} to confirm` : 'Standard fix';
       btn?.classList.toggle('pf-m-danger', high);
       btn?.classList.toggle('pf-m-primary', !high);
     }
   },
-  stop() { this.token += 1; },
+  stop() { this.token += 1; this.tracking = null; },   // a fix followed before is followed again when its run is reopened
   // A fix of this check on the same target that runs from another run (e.g. this is a newer run of the check): where to
   // follow it; the same fix cannot start twice (one migration / clean-up / upgrade per target at a time).
   renderElsewhere(r) {
@@ -828,13 +1330,16 @@ const RunPage = {
     this.stop();
     const token = this.token;
     this.lineCount = 0;
+    this.bar = null;
+    this.elapsed = null;
     this.task = '';
     ['#runLog', '#runOutcome', '#runSteps', '#runDetail', '#runStatus', '#runRecs', '#runTopo', '#runScreens'].forEach(sel => { $(sel).innerHTML = ''; });
     $('#runTopoCard').hidden = $('#runScreensCard').hidden = $('#runProduct').hidden = $('#runProductSep').hidden = true;
     ['#runElapsed', '#runLines', '#runTitle'].forEach(sel => { $(sel).textContent = ''; });
     $('#runRecsCard').hidden = true;
     $('#runAgainBtn').hidden = $('#runNoteBtn').hidden = $('#runCsvBtn').hidden = $('#runPdfBtn').hidden = true;
-    $('#runRawBtn').hidden = $('#runBundleBtn').hidden = true;
+    $('#runRawBtn').hidden = $('#runBundleBtn').hidden = $('#runExportWrap').hidden = $('#runExportMenu').hidden = true;
+    $('#runTopoSummary').textContent = '';
     $('#runCrumb').textContent = `Run #${id}`;
     let record;
     try {
@@ -870,7 +1375,9 @@ const RunPage = {
       if (token !== this.token) return;
       this.consume(data.lines);
       this.task = data.task || this.task;
-      $('#runElapsed').textContent = duration(data.elapsed ?? (Date.now() - started) / 1000);
+      this.bar = data.progress || this.bar;
+      this.elapsed = data.elapsed ?? (Date.now() - started) / 1000;
+      $('#runElapsed').textContent = duration(this.elapsed);
       this.renderPending(record);
       if (data.status !== 'running') {
         // The job has ended; the portal then stores the result (and a log bundle, which can take a while): wait for it.
@@ -908,8 +1415,12 @@ const RunPage = {
     $('#runNoteBtn').hidden = $('#runCsvBtn').hidden = $('#runPdfBtn').hidden = !done || !r.result?.steps?.length;
     const f = r.files || {};
     $('#runRawBtn').hidden = !done || !f.can;
+    $('#runExportWrap').hidden = $('#runCsvBtn').hidden && $('#runPdfBtn').hidden && $('#runRawBtn').hidden;
     const b = $('#runBundleBtn');
     b.hidden = !done || !f.can || !f.bundle;
+    // one primary action: the log bundle when there is one, else running the check again
+    $('#runAgainBtn').classList.toggle('pf-m-primary', b.hidden);
+    $('#runAgainBtn').classList.toggle('pf-m-secondary', !b.hidden);
     if (f.bundle) {
       b.href = `${BASE}/export/runs/${r.id}/bundle`;
       $('span', b).textContent = `Download log bundle (${bytes(f.bundle.size)})`;
@@ -918,25 +1429,28 @@ const RunPage = {
     document.title = `[${r.site}] Run #${r.id} · ${BASE_TITLE}`;
   },
   renderDetail(r) {
-    const cat = Catalog.category(r.category);
-    if (r.category) {
-      $('#runProduct').textContent = cat ? cat.title : r.category;
+    if (r.category) {   // the product by its name: a run opened directly (a link) loads the catalog first
+      const name = () => { const cat = Catalog.category(r.category); $('#runProduct').textContent = cat ? (cat.short || cat.title) : r.category; };
+      name();
+      if (!Catalog.category(r.category)) Catalog.load().then(name).catch(() => {});
       $('#runProduct').href = `#/products/${r.category}`;
       $('#runProduct').hidden = $('#runProductSep').hidden = false;
     }
     const topo = Topology.html(r.topology, r.status === 'running');
     $('#runTopoCard').hidden = !topo;
     $('#runTopo').innerHTML = topo;
+    $('#runTopoSummary').textContent = Topology.summary(r.topology);
     const params = Object.entries(r.params || {}).filter(([k]) => k !== 'host');
-    $('#runDetail').innerHTML = dl([
-      ['Site', esc(r.site)],
-      r.host && ['Host', `<span class="mono">${esc(r.host)}</span>`],
-      params.length && ['Parameters', params.map(([k, v]) => `${esc(k)} = <span class="mono">${esc(v)}</span>`).join('<br>')],
-      ['Launched by', `${esc(r.username)} <span class="pf-text-secondary">from ${esc(r.client_ip || '-')}</span>`],
-      ['Started', esc(fmtTime(r.ts))],
-      r.finished && ['Finished', esc(fmtTime(r.finished))],
-      (r.wi || []).length && ['Work instruction', r.wi.map(w => `<a class="wi-link" href="${esc(w.url)}" target="_blank" rel="noopener">${esc(w.title)}${icon('external')}</a>`).join('')],
-    ]);
+    // under the title, as a description list (PatternFly): the steps of the result get the whole width
+    const group = (k, v) => `<div class="pf-dl__group"><dt>${esc(k)}</dt><dd>${v}</dd></div>`;
+    $('#runDetail').innerHTML = '<dl class="pf-dl">' + [
+      group('Site', esc(r.site)),
+      r.host && group('Host', `<span class="mono">${esc(r.host)}</span>`),
+      group('Launched by', `${esc(r.username)} <span class="pf-text-secondary">from ${esc(r.client_ip || '-')}</span>`),
+      group('Started', esc(fmtTime(r.ts)) + (r.finished ? ` <span class="pf-text-secondary">· took ${esc(duration((new Date(r.finished) - new Date(r.ts)) / 1000))}</span>` : '')),
+      params.length && group('Parameters', params.map(([k, v]) => `${esc(k)} = <span class="mono">${esc(v)}</span>`).join(', ')),
+      (r.wi || []).length && group('Work instruction', r.wi.map(w => wiRef(w, 'wi-link')).join('')),
+    ].filter(Boolean).join('') + '</dl>';
   },
   // While the playbook runs: the steps of the check, the current Ansible task under them.
   renderPending(r) {
@@ -944,7 +1458,9 @@ const RunPage = {
     $('#runSteps').innerHTML = steps.map((s, i) => `<li class="wi-step ${i === 0 ? 'is-current' : 'is-pending'}"><span class="wi-step__icon">${icon(i === 0 ? 'in-progress' : 'circle')}</span>`
       + `<span class="wi-step__title">${esc(s)}</span>${i === 0 && this.task ? `<span class="wi-step__detail">${esc(this.task)}</span>` : ''}</li>`).join('')
       || `<li class="wi-step is-current"><span class="wi-step__icon">${icon('in-progress')}</span><span class="wi-step__title">${esc(this.task || 'Reading…')}</span></li>`;
-    $('#runOutcome').innerHTML = alertBox('info', 'Reading…', 'The result per step appears when every read is finished.');
+    // the progress bar (updated in place), and the result per step once every read is finished
+    if (!$('#runOutcome .wi-progress')) $('#runOutcome').innerHTML = '';
+    Progress.show($('#runOutcome'), this.bar, this.elapsed, 'Progress of the check');
   },
   renderResult(r) {
     const res = r.result || {};
@@ -955,7 +1471,16 @@ const RunPage = {
     } else {
       const kind = {ok: 'success', warn: 'warning', fail: 'danger', skip: 'info'}[r.status] || 'info';
       const title = {ok: 'No problem found', warn: 'Warnings found', fail: 'Problem found', skip: 'Nothing could be checked'}[r.status] || r.status;
-      $('#runOutcome').innerHTML = alertBox(kind, title, esc(r.summary || ''));
+      // the findings as links to their step, and to the fixes: what is wrong first, the data under it, then how to fix it
+      const found = steps.map((s, i) => [s, i]).filter(([s]) => s.status === 'fail' || s.status === 'warn');
+      const recCount = (res.recommendations || []).length;
+      const jumps = found.map(([s, i]) => `<button type="button" class="pf-label ${s.status === 'fail' ? 'pf-m-red' : 'pf-m-gold'} wi-jump" data-goto="#step-${i}">`
+        + `${icon(s.status === 'fail' ? 'x-circle' : 'alert')}${esc(s.title)}</button>`).join('')
+        + (recCount ? `<button type="button" class="pf-btn pf-m-link pf-m-inline wi-jump-fix" data-goto="#runRecsCard">${icon('tool')}`
+          + `How to fix it (${recCount})</button>` : '');
+      $('#runOutcome').innerHTML = alertBox(kind, title, found.length
+        ? `<span class="wi-findings__count">${found.length} finding${found.length === 1 ? '' : 's'}:</span><span class="wi-findings">${jumps}</span>`
+        : esc(r.summary || ''));
     }
     $('#runSteps').innerHTML = steps.map((s, i) => this.step(s, i)).join('')
       || `<li class="wi-step"><span class="wi-step__icon">${icon('minus-circle')}</span><span class="wi-step__title">No step result</span></li>`;
@@ -1015,7 +1540,7 @@ const RunPage = {
       html += `<div class="wi-fix__bar"><button type="button" class="pf-btn pf-m-primary pf-m-small" data-fix="${i}" disabled>`
         + `${icon('play')}${esc(fx.label || 'Run this fix')}<span class="wi-fix__count"></span></button>`
         + '<span class="pf-label pf-m-blue wi-fix__risk">Standard fix</span>'
-        + `<span class="pf-text-secondary pf-text-sm">on <b>${esc(fx.target)}</b>: one ${esc(fx.noun.replace(/s$/, ''))} after the other, `
+        + `<span class="pf-text-secondary pf-text-sm">on <b>${esc(fx.target)}</b>: one ${esc(singular(fx.noun))} after the other, `
         + `${fx.stop_on_failure ? 'stops at the first one that is not done' : 'skips one that is not done, stops when one needs a person'}</span></div>`
         + (fx.available ? '' : `<span class="pf-helper-text wi-fix__why">${icon('lock')} ${esc(fx.reason)}</span>`);
     } else if (fx) {
@@ -1035,7 +1560,9 @@ const RunPage = {
         + `<span class="pf-text-sm">Fix #${a.id} by ${esc(a.username)}, ${esc(shortTime(a.ts))}${a.risk === 'high' ? ', high risk confirmed' : ''}</span>`
         + (a.verify_run_id ? `<a class="pf-text-sm" href="#/runs/${a.verify_run_id}">Checked again: run #${a.verify_run_id} ${icon('angle-right')}</a>` : '')
         + (a.error ? `<span class="wi-fix__error">${esc(a.error)}</span>` : '')
-        + (a.status === 'running' ? `<ol class="wi-fix__progress" data-progress="${a.id}" aria-live="polite"></ol>` : '')
+        + (a.status === 'running' ? `<div class="wi-fix__live" data-live="${a.id}"><div data-bar></div>`
+          + `<details class="wi-live" open hidden><summary>Live output</summary><pre class="pf-code-block" data-out></pre></details></div>`
+          + `<ol class="wi-fix__progress" data-progress="${a.id}" aria-live="polite"></ol>` : '')
         + (steps ? `<details class="wi-step__more"${fx?.selectable ? ' open' : ''}><summary>${(a.output || []).length} ${fx?.selectable ? 'item(s)' : 'command(s)'}</summary><ol class="wi-fix__steps">${steps}</ol></details>` : '')
         + '</div>';
     }
@@ -1060,6 +1587,7 @@ const RunPage = {
         progress.fromFile = true;
       }
       this.progress(actionId, progress.fromFile ? [] : data.lines || [], progress);
+      this.live(actionId, data);
       if (data.item.status !== 'running') {
         const record = (await api(`/api/runs/${runId}`)).item;
         if (token !== this.token) return;
@@ -1074,6 +1602,20 @@ const RunPage = {
       }
     }
     this.tracking = null;
+  },
+  // The progress bar of a running fix, and the output of the item running now (OpenStack fixes, every few seconds)
+  live(actionId, data) {
+    const box = $(`[data-live="${actionId}"]`);
+    if (!box) return;
+    Progress.show($('[data-bar]', box), data.bar, data.elapsed, `Progress of fix #${actionId}`);
+    const lines = data.live || [];
+    const det = $('.wi-live', box);
+    det.hidden = !lines.length;
+    if (!lines.length) return;
+    const pre = $('[data-out]', box);
+    const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
+    pre.textContent = lines.join('\n');
+    if (atBottom) pre.scrollTop = pre.scrollHeight;
   },
   // Live progress of a fix with selected items, from its Ansible output: the item running now and each item done.
   progress(actionId, lines, state) {
@@ -1103,8 +1645,8 @@ const RunPage = {
         + (s.table.more ? `<span class="pf-helper-text">${s.table.more} more rows not shown.</span>` : '');
     }
     if (s.evidence) more += `<pre class="pf-code-block">${esc(s.evidence)}</pre>`;
-    const open = s.status === 'fail' || s.status === 'warn' ? ' open' : '';
-    return `<li class="wi-step is-${esc(s.status)}"><span class="wi-step__icon" title="${esc((RESULT[s.status] || [s.status])[0])}">${icon(ic)}</span>`
+    const open = s.open || s.status === 'fail' || s.status === 'warn' ? ' open' : '';   // open: a summary shown at once
+    return `<li class="wi-step is-${esc(s.status)}" id="step-${i}"><span class="wi-step__icon" title="${esc((RESULT[s.status] || [s.status])[0])}">${icon(ic)}</span>`
       + `<span class="wi-step__title">${esc(s.title)}</span>${s.detail ? `<span class="wi-step__detail">${esc(s.detail)}</span>` : ''}`
       + (more ? `<details class="wi-step__more"${open}><summary>${s.table?.rows?.length ? `${s.table.rows.length + (s.table.more || 0)} row(s)` : 'Evidence'}</summary>${more}</details>` : '')
       + '</li>';
@@ -1119,7 +1661,7 @@ const RunPage = {
       ...(res.steps || []).map(s => `${mark[s.status] || ''} ${s.title}: ${s.detail}`),
       ...((res.recommendations || []).length ? ['', 'How to fix it:', ...res.recommendations.flatMap((x, i) => [`${i + 1}. ${x.text}`,
         ...(x.where ? [`Run on: ${x.where}`] : []), ...(x.commands || []), ...(x.warning ? [`Note: ${x.warning}`] : []), ''])] : []),
-      ...((r.wi || []).length ? ['', `WI: ${r.wi.map(w => w.url).join(' ; ')}`] : [])].join('\n');
+      ...((r.wi || []).length ? ['', `WI: ${r.wi.map(w => w.url || w.title).join(' ; ')}`] : [])].join('\n');
     navigator.clipboard?.writeText(text).then(() => toast('Ticket note copied', 'success'), () => toast('Copy failed'));
   },
   async again() {
@@ -1146,42 +1688,59 @@ const FixDialog = {
     $('#fixForm').addEventListener('submit', e => { e.preventDefault(); this.submit(); });
     $('#fixConfirm').addEventListener('input', () => this.sync());
   },
-  open(record, index, selected = []) {
+  // What the dialog shows for fix `index` of a run (and the ticked items of a fix with items)
+  content(record, index, selected = []) {
     const fx = (record.fixes || [])[index];
     const rec = ((record.result || {}).recommendations || [])[index];
-    if (!fx || !rec) return;
+    if (!fx || !rec) return null;
+    const picked = fx.selectable ? [...selected].sort((a, b) => a - b) : null;
+    const items = picked ? picked.map(j => fx.items[j]).filter(Boolean) : [];
+    const high = picked ? items.some(it => it.delete) : fx.risk === 'high';
+    const commands = picked ? items.flatMap((it, k) => [`# ${k + 1}. ${it.label}`, ...it.commands]) : (fx.commands || []);
+    return {
+      fx, picked, high, commands, text: rec.text,
+      expected: picked ? `${items.length} ${fx.noun}` : fx.target,
+      title: high ? 'Run a high-risk fix' : 'Run this fix',
+      risk: high ? alertBox('danger', 'High risk', fx.kind === 'openstack'
+        ? 'It deletes on OpenStack, which cannot be undone. Make sure the customer / PIC approved it and it is recorded in the ticket.'
+        : 'It deletes, stops, restarts, kills, reboots, formats or commits a change on a network device. '
+          + 'Make sure the customer and the change process allow it now.') : '',
+      where: dl([['Site', esc(record.site)], ['Runs on', fx.kind === 'openstack'
+          ? `<b>OpenStack ${esc(record.site)}</b> <span class="pf-text-secondary">(director, as admin with overcloudrc)</span> · ${esc(fx.target)}`
+          : fx.kind === 'ontap' ? `<b>${esc(fx.target)}</b> <span class="pf-text-secondary">(ONTAP REST of ${esc(record.site)}, account ontap:${esc(record.site)})</span>`
+          : `<b>${esc(fx.target)}</b>${rec.where && !rec.where.startsWith(fx.target) ? ` <span class="pf-text-secondary">(${esc(rec.where)})</span>` : ''}`],
+        ['From', `run #${record.id}, ${esc(fmtTime(record.finished || record.ts))}`]]),
+      stopNote: picked
+        ? `One ${singular(fx.noun)} after the other: each starts when the one before has ended; ${fx.stop_on_failure
+          ? 'the run stops at the first one that is not done' : 'one that is not done is skipped, the run stops when one needs a person'}. `
+          + 'Each item is checked again first, followed until it ends, and what can be fixed safely is fixed on the way. '
+        : 'They stop at the first command that fails. ',
+      stopHidden: !picked && (fx.commands || []).length < 2,
+      checkHidden: !commands.some(c => /^(require|wait) /.test(c)),
+    };
+  },
+  open(record, index, selected = []) {
+    const d = this.content(record, index, selected);
+    if (!d) return;
     this.record = record;
     this.index = index;
-    this.selected = fx.selectable ? [...selected].sort((a, b) => a - b) : null;
-    const items = this.selected ? this.selected.map(j => fx.items[j]).filter(Boolean) : [];
-    const high = this.selected ? items.some(it => it.delete) : fx.risk === 'high';
-    this.expected = this.selected ? `${items.length} ${fx.noun}` : fx.target;
-    $('#fixTitle').textContent = high ? 'Run a high-risk fix' : 'Run this fix';
-    $('#fixRisk').innerHTML = high ? alertBox('danger', 'High risk', fx.kind === 'openstack'
-      ? 'It deletes on OpenStack, which cannot be undone. Make sure the customer / PIC approved it and it is recorded in the ticket.'
-      : 'It deletes, stops, restarts, kills, reboots, formats or commits a change on a network device. '
-        + 'Make sure the customer and the change process allow it now.') : '';
-    $('#fixText').textContent = rec.text;
-    $('#fixWhere').innerHTML = dl([['Site', esc(record.site)], ['Runs on', fx.kind === 'openstack'
-        ? `<b>OpenStack ${esc(record.site)}</b> <span class="pf-text-secondary">(director, as admin with overcloudrc)</span> · ${esc(fx.target)}`
-        : fx.kind === 'ontap' ? `<b>${esc(fx.target)}</b> <span class="pf-text-secondary">(ONTAP REST of ${esc(record.site)}, account ontap:${esc(record.site)})</span>`
-        : `<b>${esc(fx.target)}</b>${rec.where && !rec.where.startsWith(fx.target) ? ` <span class="pf-text-secondary">(${esc(rec.where)})</span>` : ''}`],
-      ['From', `run #${record.id}, ${esc(fmtTime(record.finished || record.ts))}`]]);
-    const commands = this.selected ? items.flatMap((it, k) => [`# ${k + 1}. ${it.label}`, ...it.commands]) : (fx.commands || []);
-    $('#fixCommands').textContent = commands.join('\n');
-    $('#fixStopNote').textContent = this.selected
-      ? `One ${fx.noun.replace(/s$/, '')} after the other: each starts when the one before has ended; ${fx.stop_on_failure
-        ? 'the run stops at the first one that is not done' : 'one that is not done is skipped, the run stops when one needs a person'}. `
-        + 'The operations (live-migrate, cold-migrate, migrate-volume, delete-image) check the item again first, follow it until it ends and fix what can be fixed safely. '
-      : 'They stop at the first command that fails. ';
-    $('#fixStopNote').hidden = !this.selected && (fx.commands || []).length < 2;
-    $('#fixCheckNote').hidden = !commands.some(c => /^(require|wait) /.test(c));
-    $('#fixConfirmGroup').hidden = !high;
+    this.selected = d.picked;
+    this.expected = d.expected;
+    $('#fixTitle').textContent = d.title;
+    $('#fixRisk').innerHTML = d.risk;
+    $('#fixText').textContent = d.text;
+    $('#fixWhere').innerHTML = d.where;
+    $('#fixCommands').textContent = d.commands.join('\n');
+    $('#fixStopNote').textContent = d.stopNote;
+    $('#fixStopNote').hidden = d.stopHidden;
+    $('#fixCheckNote').hidden = d.checkHidden;
+    $('#fixConfirmGroup').hidden = !d.high;
     $('#fixConfirmName').textContent = this.expected;
     $('#fixConfirm').value = '';
     $('#fixError').hidden = true;
-    $('#fixRun').className = `pf-btn ${high ? 'pf-m-danger' : 'pf-m-primary'}`;
+    $('#fixRun').className = `pf-btn ${d.high ? 'pf-m-danger' : 'pf-m-primary'}`;
     this.sync();
+    const high = d.high;
     $('#fixDialog').showModal();
     (high ? $('#fixConfirm') : $('#fixRun')).focus();
   },
@@ -1256,27 +1815,46 @@ const Hosts = {
   render() {
     const d = this.data;
     if (!d) return;
-    const priv = d.privileges;
-    $('#hsCreds').innerHTML = d.credentials.map(c => `<tr><td><b>${esc(c.name)}</b></td><td class="mono">${esc(c.username)}</td>`
-      + `<td>${esc(d.auths[c.auth] || c.auth)}${c.auth === 'key' && c.fingerprint ? `<span class="pf-table__sub mono">${esc(c.fingerprint)}</span>` : ''}</td><td>${esc(priv[c.privilege] || c.privilege)}</td>`
-      + `<td>${c.fixes ? `<span class="pf-label pf-m-gold">${icon('play')}May run fixes</span>` : '<span class="pf-label">Read only</span>'}</td>`
-      + `<td>${c.hosts}</td><td class="pf-text-sm">${esc(shortTime(c.updated))} ${esc(c.updated_by || '')}</td>`
-      + `<td class="pf-table__actions"><button type="button" class="pf-btn pf-m-link pf-m-inline" data-act="edit" data-id="${c.id}">Edit</button>`
-      + `<button type="button" class="pf-btn pf-m-link pf-m-inline pf-m-danger" data-act="delete" data-id="${c.id}">Remove</button></td></tr>`).join('')
+    $('#hsCreds').innerHTML = d.credentials.map(c => this.credRow(c)).join('')
       || `<tr><td colspan="8"><div class="pf-empty-state">${icon('key')}<h2 class="pf-title">No SSH credential yet</h2><span>Add one, then the hosts that use it.</span></div></td></tr>`;
     const site = $('#hsSite').value, grp = $('#hsGroup').value, q = $('#hsQ').value.trim().toLowerCase();
     const rows = d.hosts.filter(h => (!site || h.site === site) && (!grp || h.grp === grp)
       && (!q || `${h.name} ${h.address} ${h.note || ''}`.toLowerCase().includes(q)));
     $('#hsShown').textContent = `${rows.length} of ${d.hosts.length} host${d.hosts.length === 1 ? '' : 's'}`;
-    $('#hsHosts').innerHTML = rows.map(h => `<tr><td>${esc(h.site)}</td><td>${esc(d.groups[h.grp] || h.grp)}</td><td><b>${esc(h.name)}</b></td>`
+    $('#hsHosts').innerHTML = rows.map(h => this.hostRow(h)).join('')
+      || `<tr><td colspan="8"><div class="pf-empty-state">${icon('server')}<h2 class="pf-title">No host</h2><span>Add a host, or many at once.</span></div></td></tr>`;
+  },
+  // One row of each table, and the choices of the dialogs (also drawn by the guide of this page)
+  credRow(c) {
+    const d = this.data;
+    return `<tr><td><b>${esc(c.name)}</b></td><td class="mono">${esc(c.username)}</td>`
+      + `<td>${esc(d.auths[c.auth] || c.auth)}${c.auth === 'key' && c.fingerprint ? `<span class="pf-table__sub mono">${esc(c.fingerprint)}</span>` : ''}</td><td>${esc(d.privileges[c.privilege] || c.privilege)}</td>`
+      + `<td>${c.fixes ? `<span class="pf-label pf-m-gold">${icon('play')}May run fixes</span>` : '<span class="pf-label">Read only</span>'}</td>`
+      + `<td>${c.hosts}</td><td class="pf-text-sm">${esc(shortTime(c.updated))} ${esc(c.updated_by || '')}</td>`
+      + `<td class="pf-table__actions"><button type="button" class="pf-btn pf-m-link pf-m-inline" data-act="edit" data-id="${c.id}">Edit</button>`
+      + `<button type="button" class="pf-btn pf-m-link pf-m-inline pf-m-danger" data-act="delete" data-id="${c.id}">Remove</button></td></tr>`;
+  },
+  hostRow(h) {
+    const d = this.data;
+    return `<tr><td>${esc(h.site)}</td><td>${esc(d.groups[h.grp] || h.grp)}</td><td><b>${esc(h.name)}</b></td>`
       + `<td class="mono">${esc(h.address)}${h.port !== 22 ? `:${h.port}` : ''}${h.jump ? `<span class="pf-table__sub">through ${esc(h.jump)}</span>` : h.jumped ? `<span class="pf-table__sub">jump host of ${h.jumped}${h.proxy ? ', through the web proxy' : ''}</span>` : h.proxy ? '<span class="pf-table__sub">through the web proxy</span>' : ''}</td><td>${h.credential ? esc(h.credential) : '<span class="pf-label pf-m-gold">None</span>'}</td>`
       + `<td>${h.fixes ? `<span class="pf-label pf-m-gold">${icon('play')}Yes</span>` : '<span class="pf-text-secondary pf-text-sm">Read only</span>'}</td>`
       + `<td class="pf-text-sm">${esc(h.note || '')}</td>`
       + `<td class="pf-table__actions">${!h.jump_id && h.credential_id ? `<button type="button" class="pf-btn pf-m-link pf-m-inline" data-act="behind" data-id="${h.id}">Add hosts behind</button>` : ''}`
       + `<button type="button" class="pf-btn pf-m-link pf-m-inline" data-act="test" data-id="${h.id}">Test</button>`
       + `<button type="button" class="pf-btn pf-m-link pf-m-inline" data-act="edit" data-id="${h.id}">Edit</button>`
-      + `<button type="button" class="pf-btn pf-m-link pf-m-inline pf-m-danger" data-act="delete" data-id="${h.id}">Remove</button></td></tr>`).join('')
-      || `<tr><td colspan="8"><div class="pf-empty-state">${icon('server')}<h2 class="pf-title">No host</h2><span>Add a host, or many at once.</span></div></td></tr>`;
+      + `<button type="button" class="pf-btn pf-m-link pf-m-inline pf-m-danger" data-act="delete" data-id="${h.id}">Remove</button></td></tr>`;
+  },
+  privilegeOptions(current) {
+    return Object.entries(this.data.privileges).map(([k, v]) => `<option value="${esc(k)}"${k === current ? ' selected' : ''}>${esc(v)}</option>`).join('');
+  },
+  siteOptions(site) { return this.data.sites.map(x => `<option${x === site ? ' selected' : ''}>${esc(x)}</option>`).join(''); },
+  groupOptions(grp) {
+    return Object.entries(this.data.groups).map(([k, v]) => `<option value="${esc(k)}"${k === grp ? ' selected' : ''}>${esc(v)}</option>`).join('');
+  },
+  credOptions(cred) {
+    return '<option value="">No credential (cannot be read yet)</option>'
+      + this.data.credentials.map(c => `<option value="${c.id}"${cred === c.id ? ' selected' : ''}>${esc(c.name)} (${esc(c.username)}${c.fixes ? ', may run fixes' : ', read only'})</option>`).join('');
   },
   async action(e, kind) {
     const b = e.target.closest('[data-act]');
@@ -1329,7 +1907,7 @@ const Hosts = {
     $('#sshKey').placeholder = c && c.auth === 'key' && c.fingerprint
       ? `Stored key: ${c.fingerprint}. Paste a new private key only to replace it.`
       : '-----BEGIN OPENSSH PRIVATE KEY-----\n…\n-----END OPENSSH PRIVATE KEY-----';
-    $('#sshPrivilege').innerHTML = Object.entries(this.data.privileges).map(([k, v]) => `<option value="${esc(k)}"${k === (c ? c.privilege : 'sudo') ? ' selected' : ''}>${esc(v)}</option>`).join('');
+    $('#sshPrivilege').innerHTML = this.privilegeOptions(c ? c.privilege : 'sudo');
     $('#sshFixes').checked = !!(c && c.fixes);
     $('#sshError').hidden = true;
     this.authChanged();
@@ -1373,10 +1951,9 @@ const Hosts = {
     const grp = h ? h.grp : via ? via.grp : $('#hsGroup').value;
     const cred = h ? h.credential_id : via ? via.credential_id : null;
     $('#hostTitle').textContent = h ? `Edit ${h.name}` : via ? `Add hosts behind ${via.name}` : many ? 'Add many hosts' : 'Add host';
-    $('#hostSite').innerHTML = d.sites.map(x => `<option${x === site ? ' selected' : ''}>${esc(x)}</option>`).join('');
-    $('#hostGroup').innerHTML = Object.entries(d.groups).map(([k, v]) => `<option value="${esc(k)}"${k === grp ? ' selected' : ''}>${esc(v)}</option>`).join('');
-    $('#hostCred').innerHTML = '<option value="">No credential (cannot be read yet)</option>'
-      + d.credentials.map(c => `<option value="${c.id}"${cred === c.id ? ' selected' : ''}>${esc(c.name)} (${esc(c.username)}${c.fixes ? ', may run fixes' : ', read only'})</option>`).join('');
+    $('#hostSite').innerHTML = this.siteOptions(site);
+    $('#hostGroup').innerHTML = this.groupOptions(grp);
+    $('#hostCred').innerHTML = this.credOptions(cred);
     $('#hostLines').placeholder = via ? `addresses as ${via.name} reaches them, e.g.\nnode-01 10.249.1.11\nnode-02 10.249.1.12 2222   (SSH port 2222)`
       : 'dca-cdn-lb-03 172.31.10.69\ndca-cdn-lb-04 172.31.10.70 2222';
     $('#hostSingle').hidden = many;
@@ -1461,22 +2038,38 @@ const Bmcs = {
   render() {
     const d = this.data;
     if (!d) return;
-    $('#bmCreds').innerHTML = d.credentials.map(c => `<tr><td><b>${esc(c.name)}</b></td><td class="mono">${esc(c.username)}</td><td>${c.bmcs}</td>`
-      + `<td class="pf-text-sm">${esc(shortTime(c.updated))} ${esc(c.updated_by || '')}</td>`
-      + `<td class="pf-table__actions"><button type="button" class="pf-btn pf-m-link pf-m-inline" data-act="edit" data-id="${c.id}">Edit</button>`
-      + `<button type="button" class="pf-btn pf-m-link pf-m-inline pf-m-danger" data-act="delete" data-id="${c.id}">Remove</button></td></tr>`).join('')
+    $('#bmCreds').innerHTML = d.credentials.map(c => this.credRow(c)).join('')
       || `<tr><td colspan="5"><div class="pf-empty-state">${icon('key')}<h2 class="pf-title">No BMC account yet</h2><span>Add the web login of the BMCs (read-only role is enough), then the BMCs.</span></div></td></tr>`;
     const site = $('#bmSite').value, q = $('#bmQ').value.trim().toLowerCase();
     const rows = d.bmcs.filter(b => (!site || b.site === site) && (!q || `${b.name} ${b.address} ${b.note || ''}`.toLowerCase().includes(q)));
     $('#bmShown').textContent = `${rows.length} of ${d.bmcs.length} BMC${d.bmcs.length === 1 ? '' : 's'}`;
-    $('#bmList').innerHTML = rows.map(b => `<tr><td>${esc(b.site)}</td><td><b>${esc(b.name)}</b></td>`
+    $('#bmList').innerHTML = rows.map(b => this.row(b)).join('')
+      || `<tr><td colspan="7"><div class="pf-empty-state">${icon('cubes')}<h2 class="pf-title">No BMC</h2><span>Add a BMC, or many at once.</span></div></td></tr>`;
+  },
+  // One row of each table, and the choices of the dialogs (also drawn by the guide of this page)
+  credRow(c) {
+    return `<tr><td><b>${esc(c.name)}</b></td><td class="mono">${esc(c.username)}</td><td>${c.bmcs}</td>`
+      + `<td class="pf-text-sm">${esc(shortTime(c.updated))} ${esc(c.updated_by || '')}</td>`
+      + `<td class="pf-table__actions"><button type="button" class="pf-btn pf-m-link pf-m-inline" data-act="edit" data-id="${c.id}">Edit</button>`
+      + `<button type="button" class="pf-btn pf-m-link pf-m-inline pf-m-danger" data-act="delete" data-id="${c.id}">Remove</button></td></tr>`;
+  },
+  row(b) {
+    const d = this.data;
+    return `<tr><td>${esc(b.site)}</td><td><b>${esc(b.name)}</b></td>`
       + `<td class="mono"><a href="https://${esc(b.address)}${b.port !== 443 ? `:${b.port}` : ''}/" target="_blank" rel="noopener">${esc(b.address)}${b.port !== 443 ? `:${b.port}` : ''}${icon('external')}</a></td>`
       + `<td>${esc(d.vendors[b.vendor] || b.vendor || '')}</td>`
       + `<td>${b.credential ? esc(b.credential) : '<span class="pf-label pf-m-gold">None</span>'}</td><td class="pf-text-sm">${esc(b.note || '')}</td>`
       + `<td class="pf-table__actions">${b.credential_id ? `<button type="button" class="pf-btn pf-m-link pf-m-inline" data-act="check" data-id="${b.id}">Check</button>` : ''}`
       + `<button type="button" class="pf-btn pf-m-link pf-m-inline" data-act="edit" data-id="${b.id}">Edit</button>`
-      + `<button type="button" class="pf-btn pf-m-link pf-m-inline pf-m-danger" data-act="delete" data-id="${b.id}">Remove</button></td></tr>`).join('')
-      || `<tr><td colspan="7"><div class="pf-empty-state">${icon('cubes')}<h2 class="pf-title">No BMC</h2><span>Add a BMC, or many at once.</span></div></td></tr>`;
+      + `<button type="button" class="pf-btn pf-m-link pf-m-inline pf-m-danger" data-act="delete" data-id="${b.id}">Remove</button></td></tr>`;
+  },
+  siteOptions(site) { return this.data.sites.map(x => `<option${x === site ? ' selected' : ''}>${esc(x)}</option>`).join(''); },
+  vendorOptions(vendor) {
+    return Object.entries(this.data.vendors).map(([k, v]) => `<option value="${esc(k)}"${k === vendor ? ' selected' : ''}>${esc(v)}</option>`).join('');
+  },
+  credOptions(id) {
+    return '<option value="">No account (cannot be read yet)</option>'
+      + this.data.credentials.map(c => `<option value="${c.id}"${id === c.id ? ' selected' : ''}>${esc(c.name)} (${esc(c.username)})</option>`).join('');
   },
   async action(e, kind) {
     const b = e.target.closest('[data-act]');
@@ -1533,10 +2126,9 @@ const Bmcs = {
     const d = this.data;
     const site = b ? b.site : $('#bmSite').value || Site.current;
     $('#bmTitle').textContent = b ? `Edit ${b.name}` : many ? 'Add many BMCs' : 'Add BMC';
-    $('#bmSiteSel').innerHTML = d.sites.map(x => `<option${x === site ? ' selected' : ''}>${esc(x)}</option>`).join('');
-    $('#bmVendor').innerHTML = Object.entries(d.vendors).map(([k, v]) => `<option value="${esc(k)}"${k === (b ? b.vendor : '') ? ' selected' : ''}>${esc(v)}</option>`).join('');
-    $('#bmCred').innerHTML = '<option value="">No account (cannot be read yet)</option>'
-      + d.credentials.map(c => `<option value="${c.id}"${b && b.credential_id === c.id ? ' selected' : ''}>${esc(c.name)} (${esc(c.username)})</option>`).join('');
+    $('#bmSiteSel').innerHTML = this.siteOptions(site);
+    $('#bmVendor').innerHTML = this.vendorOptions(b ? b.vendor : '');
+    $('#bmCred').innerHTML = this.credOptions(b ? b.credential_id : null);
     $('#bmSingle').hidden = many;
     $('#bmMany').hidden = !many;
     $('#bmName').value = b ? b.name : '';
@@ -1598,6 +2190,14 @@ const Topology = {
     const path = y1 === y2 ? `M${x1 + 30},${y1} L${x2 - 34},${y2}` : `M${x1 + 30},${y1} C${mid},${y1} ${mid},${y2} ${x2 - 34},${y2}`;
     return `<path class="topo-edge" d="${path}" marker-end="url(#topoArrow)"></path>`
       + (label ? `<text class="topo-edge__label" x="${mid}" y="${(y1 + y2) / 2 - 8}">${esc(this.short(label, 24))}</text>` : '');
+  },
+  // One line for the folded diagram: the systems read and how each one is
+  summary(t) {
+    const nodes = (t?.lanes || []).flat().filter(n => n && n.id !== 'portal');
+    const bad = nodes.filter(n => n.status === 'fail' || n.status === 'warn').map(n => n.label);
+    if (!nodes.length) return '';
+    return `${nodes.length} system${nodes.length === 1 ? '' : 's'}` + (bad.length ? `; findings on ${bad.slice(0, 3).join(', ')}` : '')
+      + ' · open for the diagram';
   },
   // HTML for a topology from the server ({root, lanes}); '' when there is nothing to draw.
   html(t, running = false) {
@@ -1976,6 +2576,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   Hosts.init();
   document.addEventListener('click', e => { const b = e.target.closest('dialog [data-close]'); if (b) b.closest('dialog').close(); });
   Launch.init();
+  TemplateForm.init();
   Bmcs.init();
   Runs.init();
   RunPage.init();

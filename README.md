@@ -1,5 +1,9 @@
 # Ops Portal
 
+[![tests](https://github.com/fauzan1901/ops-portal/actions/workflows/tests.yml/badge.svg)](https://github.com/fauzan1901/ops-portal/actions/workflows/tests.yml)
+[![release](https://img.shields.io/github/v/release/fauzan1901/ops-portal)](CHANGELOG.md)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A web portal for cloud operations teams. One sign-in gives access to four modules behind a small **Flask**
 application: the automation runs with **Ansible**, and the Shell module opens SSH terminals in the browser. The look
 follows PatternFly v5 (the AWX / OpenShift console style).
@@ -223,6 +227,8 @@ the server.
 - [portal/docs/GRAFANA-ALERTS.md](portal/docs/GRAFANA-ALERTS.md): connecting Grafana, alert rules, automatic fixes
 - [docs/](docs/): architecture decisions and the UI specification
 - [docs/GITHUB.md](docs/GITHUB.md): how this repository is published and updated
+- [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) (report vulnerabilities privately),
+  [CHANGELOG.md](CHANGELOG.md)
 
 ## License
 

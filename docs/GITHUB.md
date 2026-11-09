@@ -80,6 +80,21 @@ After changes in the working copy:
 
 Write commit messages that say what changed and why; they are the history of the project.
 
+### Rhythm
+
+- Update the copy after every portal version that goes into use, and at least once a month: small commits that each
+  say what changed read better than one large one.
+- GitHub Actions (`.github/workflows/tests.yml`) runs every test suite on each push; keep the badge in the README green.
+- Add a line to `CHANGELOG.md` for every update. Tag a release when a module gains or changes a feature, at least
+  every few months:
+
+  ```bash
+  git tag -a v0.2.0 -m "v0.2.0" && git push origin v0.2.0
+  gh release create v0.2.0 --title "v0.2.0" --notes "<the CHANGELOG lines of this version>"
+  ```
+
+- Answer issues and pull requests within a few days; label good first issues for newcomers.
+
 ## Working with others
 
 ```bash
@@ -88,8 +103,8 @@ git switch -c feature/my-change      # a branch for one change
 git push -u origin feature/my-change # then open a pull request on GitHub
 ```
 
-The pull request shows the changes, runs the checks (when GitHub Actions is set up) and is merged into `main` after
-review. Keep `main` deployable.
+The pull request shows the changes, runs the tests on GitHub Actions and is merged into `main` after review. Keep
+`main` deployable. See also [CONTRIBUTING.md](../CONTRIBUTING.md) and [SECURITY.md](../SECURITY.md).
 
 ## License
 

@@ -1,0 +1,43 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  suites:
+    name: find the test suites
+    runs-on: ubuntu-24.04
+    outputs:
+      list: ${{ steps.find.outputs.list }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: find
+        run: echo "list=$(cd portal/tests && ls test_*.py | sed 's/\.py$//' | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
+
+  test:
+    # each suite in its own process: a suite sets up its own sites and data folders when it is imported
+    name: ${{ matrix.suite }}
+    needs: suites
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: ${{ fromJson(needs.suites.outputs.list) }}
+    defaults:
+      run:
+        working-directory: portal
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: portal/requirements.txt
+      - run: python -m pip install -r requirements.txt
+      - run: python -m unittest tests.${{ matrix.suite }}

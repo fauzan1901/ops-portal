@@ -1,0 +1,50 @@
+# Several OpenStack commands in ONE connection to the director: management host --ssh--> director, source overcloudrc,
+# then all commands in order. Faster than one ssh per command (every command is still recorded in the log).
+# Input:
+#   osb_label     name of the step in the log
+#   osb_commands  list of {key, cmd, label (optional), optional (optional)}; values inside cmd are already quoted.
+#                 Each command runs in its own subshell (an export inside it does not carry over to the next command).
+#   osb_secret    hide the output from the log
+#   osb_parallel  READ-ONLY batch: up to openstack.parallel_reads commands (default 4) run at the same time;
+#                 the result stays the same and in order, as if run one by one (filter batch_script). Never used for a
+#                 batch that changes something or contains secrets (osb_secret). parallel_reads: false = one by one again.
+# Result: osb = {results: {key: {rc, out, ok}}, failed: [...], complete}. A command without optional must succeed.
+- name: "OpenStack: {{ osb_label }}"
+  ansible.builtin.raw: "{{ director_prefix }} {{ ('source ' ~ overcloudrc ~ ' && ' ~ (osb_commands | batch_script(osb_width | int))) | quote }}"
+  vars:
+    osb_width: >-
+      {{ (((cfg.openstack | default({})).parallel_reads | default(none)) | parallel_width)
+         if (osb_parallel | default(false) | bool and not (osb_secret | default(false) | bool)) else 1 }}
+  delegate_to: mgmt
+  register: osb_out
+  changed_when: false
+  failed_when: false
+  ignore_unreachable: true
+  no_log: "{{ osb_secret | default(false) | bool }}"
+
+- name: "Save result: {{ osb_label }}"
+  ansible.builtin.set_fact:
+    osb: "{{ osb_out.stdout | default('') | batch_results(osb_commands) }}"
+  no_log: "{{ osb_secret | default(false) | bool }}"
+
+- name: "Check result: {{ osb_label }}"
+  vars:
+    # Same as openstack_cmd.yml: drop irrelevant ssh warnings so the error message stays short.
+    os_err: >-
+      {{ ((osb_out.stderr | default('') | trim) or (osb_out.msg | default('') | trim)).splitlines()
+         | map('trim') | reject('search', 'Permanently added|post-quantum|store now, decrypt later|may need to be upgraded')
+         | map('regex_replace', '^Task failed: Failed to connect to the host via ssh: ', '') | select | join(' ') }}
+    director_denied: "{{ ('@' ~ cfg.director.host ~ ': Permission denied') in os_err }}"
+  ansible.builtin.assert:
+    that:
+      - not (osb_out.unreachable | default(false))
+      - osb.complete
+      - osb.failed | length == 0
+    fail_msg: >-
+      {% if director_denied | bool %}{{ osb_label }} failed: management host {{ cfg.mgmt.host }} is reachable, but the login
+      to director {{ cfg.director.user }}@{{ cfg.director.host }} was denied (Permission denied). Check director.user in
+      sites.yml (TripleO directors usually use the stack user) and the key of user {{ cfg.mgmt.user | default('') }} on the management host.
+      {% elif not osb.complete %}{{ osb_label }} failed{{ ' (management host not reachable)' if osb_out.unreachable | default(false) else '' }}:
+      {{ (os_err or ('' if osb_secret | default(false) | bool else osb_out.stdout | default('') | trim)) | truncate(800) }}
+      {% else %}{{ osb_label }} failed: {{ osb.failed | join('; ') | truncate(800) }}{% endif %}
+    quiet: true

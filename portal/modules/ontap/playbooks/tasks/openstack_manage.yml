@@ -1,0 +1,71 @@
+# OpenStack: import the restored LUN as a Cinder volume (cinder manage) in the selected pool with the original volume
+# type, then wait until available.
+- name: Set new volume name
+  ansible.builtin.set_fact:
+    volume_name_new: >-
+      {{ new_volume_name | default('', true)
+         or ((os_volume.name | default('', true) | regex_replace('[^A-Za-z0-9_.:-]', '-') | regex_replace('^[^A-Za-z0-9]+', '')) or 'volume')
+            ~ '-restore-' ~ (chosen_snapshot.local_time | replace('-', '') | replace(':', '') | replace(' ', '-')) }}
+
+- name: Validate new volume name
+  ansible.builtin.assert:
+    that: volume_name_new is match('^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$')
+    fail_msg: "Invalid new volume name: '{{ volume_name_new }}' (letters, digits, _ . : - only)"
+    quiet: true
+
+- name: "OpenStack: cinder manage"
+  ansible.builtin.include_tasks: openstack_cmd.yml
+  vars:
+    os_label: "cinder manage {{ restore_path }}"
+    os_command: >-
+      cinder manage --id-type source-name --name {{ volume_name_new | quote }}
+      {{ ('--volume-type ' ~ (manage_volume_type | quote)) if manage_volume_type else '' }}
+      {{ '--bootable' if (os_volume.bootable | default('false') | string | lower) == 'true' else '' }}
+      {{ cinder_host | quote }} {{ restore_path | quote }}
+
+- name: Read new volume ID
+  ansible.builtin.set_fact:
+    new_volume_id: "{{ os_out.stdout | cinder_table_id }}"
+
+- name: "OpenStack: wait for the new volume to be available"
+  ansible.builtin.raw: "{{ director_prefix }} {{ ('source ' ~ overcloudrc ~ ' && openstack volume show ' ~ (new_volume_id | quote) ~ ' -f json') | quote }}"
+  delegate_to: mgmt
+  register: new_vol_out
+  changed_when: false
+  until: >-
+    new_vol_out.rc | default(1) == 0
+    and (new_vol_out.stdout | extract_json).status in ['available', 'error', 'error_managing', 'error_managing_deleting']
+  retries: "{{ volume_wait_retries | default(60) | int }}"
+  delay: 5
+  ignore_errors: true
+  ignore_unreachable: true
+
+- name: Verify the new volume is available
+  ansible.builtin.assert:
+    that: new_vol_out.rc | default(1) == 0 and (new_vol_out.stdout | extract_json).status == 'available'
+    fail_msg: >-
+      New volume {{ new_volume_id }} is not available
+      ({{ ('status ' ~ (new_vol_out.stdout | extract_json).status) if new_vol_out.rc | default(1) == 0
+          else (new_vol_out.stderr | default(new_vol_out.msg | default('')) | trim) }}).
+      LUN {{ restore_path }} is still in ONTAP.
+    quiet: true
+
+# Boot volume: the image properties of the original volume (e.g. hw_firmware_type, hw_disk_bus, os_type) are copied to
+# the new volume so an instance that boots from this volume runs like the original. A failure here does not stop the
+# restore (it is recorded).
+- name: "OpenStack: copy image properties to the new volume"
+  ansible.builtin.include_tasks: openstack_cmd.yml
+  vars:
+    os_label: "copy {{ image_props | length }} image properties to volume {{ new_volume_id }}"
+    os_command: "openstack volume set {{ image_props | image_property_args }} {{ new_volume_id | quote }}"
+    os_optional: true
+  when: image_props | length > 0
+
+- name: Record the copied image properties
+  ansible.builtin.set_fact:
+    image_props_result:
+      count: "{{ image_props | length }}"
+      ok: "{{ image_props | length == 0 or os_out.rc | default(1) == 0 }}"
+      error: >-
+        {{ '' if image_props | length == 0 or os_out.rc | default(1) == 0
+           else ((os_out.stderr | default('') | trim) or (os_out.stdout | default('') | trim)) | truncate(300) }}

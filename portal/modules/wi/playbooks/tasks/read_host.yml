@@ -1,0 +1,26 @@
+# Fixed read commands on the host in ONE connection; each command between markers so every output is kept apart.
+- name: "{{ host_target.name }} (read-only): {{ wi_reads.host.keys() | join(', ') }}"
+  vars:
+    host_script: "{{ wi_reads.host | wi_host_script(host_target.sudo | default(false) | bool) }}"
+  ansible.builtin.raw: "{{ (host_prefix ~ ' ' ~ (host_script | quote)) if host_prefix else host_script }}"
+  delegate_to: wi_target
+  register: host_out
+  changed_when: false
+  failed_when: false
+  ignore_unreachable: true
+
+- name: "Check result: connection to {{ host_target.name }}"
+  ansible.builtin.assert:
+    that:
+      - not (host_out.unreachable | default(false))
+      - "'@@WI@@begin' in (host_out.stdout | default(''))"
+    fail_msg: >-
+      {{ host_target.name }} ({{ host_target.address }}{{ (', through jump host ' ~ host_target.jump.name ~ ' ' ~ host_target.jump.address) if host_target.jump is defined else '' }})
+      {{ 'is not reachable' if host_out.unreachable | default(false) else 'did not run the commands' }}:
+      {{ ((host_out.msg | default('')) ~ ' ' ~ (host_out.stderr | default('')) ~ ' ' ~ (host_out.stdout | default(''))) | trim | truncate(500) }}
+      {{ ((host_out.msg | default('')) ~ ' ' ~ (host_out.stderr | default(''))) | wi_ssh_hint(host_target) }}
+    quiet: true
+
+- name: "Record: {{ wi_reads.host.keys() | join(', ') }}"
+  ansible.builtin.set_fact:
+    wi_data: "{{ wi_data | combine(host_out.stdout | default('') | wi_batch(wi_reads.host.keys() | list)) }}"

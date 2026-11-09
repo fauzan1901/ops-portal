@@ -1,0 +1,19 @@
+# TCP connection tests from the portal server (like UptimeRobot from outside). Off with wi.tcp_probe: false in sites.yml.
+- name: "TCP test from the portal server: {{ item.value.host }}:{{ item.value.port }}"
+  ansible.builtin.wait_for:
+    host: "{{ item.value.host }}"
+    port: "{{ item.value.port | int }}"
+    timeout: 5
+    state: started
+  loop: "{{ wi_reads.tcp | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: tcp_out
+  failed_when: false
+  when: (cfg.wi | default({})).tcp_probe | default(true) | bool
+
+- name: "Record: TCP tests"
+  ansible.builtin.set_fact:
+    wi_data: >-
+      {{ wi_data | combine((tcp_out.results | wi_tcp_results) if (cfg.wi | default({})).tcp_probe | default(true) | bool
+         else (wi_reads.tcp | wi_skip('TCP tests are off on this site (wi.tcp_probe: false in sites.yml)'))) }}

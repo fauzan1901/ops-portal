@@ -1,0 +1,143 @@
+# Sites of the Ops Portal. Installed at /etc/ops-portal/sites.yml; read by every module and passed to the
+# Ansible playbooks (-e @sites.yml). Changes apply at once (no restart). Service account passwords are never in this
+# file: administrators enter them on Administration -> Credentials (stored encrypted).
+# Site order = order of the site buttons (DCB blue, DCA green, DCC purple).
+#
+# ---------------------------------------------------------------- ACI module
+#   apic.host           APIC address (IP or name, optionally :port), reached with the site's APIC service account
+#                       (credential apic:<site>).
+#
+# ---------------------------------------------------------------- ONTAP Restore module (and Operation Automation: OpenStack)
+#   ontap.host          ONTAP cluster management IP (REST API, HTTPS 443), reached with the site's service account.
+#   ontap.used_*        After restore-file, cinder manage only runs once used of the -restore LUN = used of the existing LUN:
+#                         used_tolerance_pct   difference still treated as equal (%)
+#                         used_stable_seconds  used does not grow for this long = done (data changed after the snapshot);
+#                                              0 = strict mode (must be equal)
+#                         used_wait_seconds    wait limit; past this the restore is stopped, the -restore LUN is kept
+#                         used_poll_seconds    interval between used checks
+#   ontap.move_*        The Cinder pool chosen by the operator is not the LUN's pool: the -restore LUN is moved (lun move) to the FlexVol of that pool
+#                       (same volume type, same SVM) before cinder manage:
+#                         move_wait_seconds    wait limit for lun move (default 7200); the restore job is extended accordingly
+#                         move_poll_seconds    interval between lun move progress checks (default 10)
+#                         move_settle_seconds  lun move only starts once used of the -restore LUN has not changed for this long
+#                                              (default 60; restore-file is still processed in the background even when used is already 99%)
+#                         move_settle_max_seconds  wait limit for used to become stable (default 900)
+#                         move_attempts        attempts if ONTAP stops lun move without creating the target LUN (default 5)
+#                         move_retry_delay_seconds  delay before trying again (default 120)
+#                         move_patch_timeout_seconds  wait limit for ONTAP's answer to the lun move request (default 300)
+#                         move_flexvol_regex   names of FlexVol pools allowed as lun move target (default
+#                                              "^(?!.*test).*_[0-9]+(_vol)?$": numbered pools only, test pools such as
+#                                              ..._VOL_TEST50 are never chosen)
+#   ontap.ignore_flexvol_regex  FlexVols that are not Cinder pools (result of cloning/reclaim) and hold a copy of the LUN with the same
+#                       name: ignored when looking for the volume's LUN and never used as lun move target
+#                       (default "clone|reclaimed", case-insensitive)
+#   mgmt                OpenStack management host, reached from this server with a private key.
+#   director            Reached FROM the management host with passwordless ssh, using the key of user mgmt.user that
+#                       already exists on the management host; the user on the TripleO director is stack (same as ~/.ssh/config
+#                       on the management host). Then source overcloudrc. If the director IP = the management IP, the command
+#                       is run directly on that host.
+#   openstack.transfer_role  Temporary role for the admin in the customer project: accept the transfer, then attach to an instance
+#                       or create a new instance (revoked again afterwards).
+#   openstack.pool_max_used_percent  A Cinder pool counts as full (cannot be chosen in Review) from this usage
+#                       (default 85). Usage = Cinder allocated_capacity_gb / (total_capacity_gb x overcommit_ratio).
+#   openstack.overcommit_ratio  Cinder pool overcommit on this site relative to ONTAP capacity (default 1 = no overcommit;
+#                       DCA 2 = 2:1). The ONTAP FlexVol must still have enough space for the LUN data.
+#   openstack.hidden_volume_types  Volume types not offered in Review when choosing a new volume type, per site
+#                       (old DCA types: premium, standard "Dont use this volume type again"; on DCB/DCC these names are active types).
+#                       Private types and __DEFAULT__ are never offered; the original volume type can always be used.
+#   openstack.parallel_reads  OpenStack commands that ONLY READ (the Volume and Review steps, and the re-check at the start of
+#                       the restore) run at most this many at once on the director (default 4, max. 8). The result is the same
+#                       as one by one. false = one by one as before (applies at once, no restart).
+#                       Commands that change something (restore, transfer, port/instance, delete) always run one by one.
+#   openstack.attach_wait_seconds    wait limit for the volume to become in-use after attach to an instance (default 300)
+#   openstack.instance_wait_seconds  wait limit for the new instance to become ACTIVE (default 900); the restore job is extended accordingly
+#   openstack.delete_after_hours     the original volume is scheduled for deletion after this many hours if ticked in Review; still
+#                       waits for administrator approval in the Approvals menu (default 72)
+#
+# ---------------------------------------------------------------- Operation Automation module (read-only)
+#   OpenStack checks use mgmt / director / openstack above (only list / show commands are allowed).
+#   openstack.legacy_volume_types  "old type: new type" for the WIs Snapshot error / Resize root disk / Backup Scheduler
+#                       (default standard: fas500f-standard, basic: fas500f-basic, premium: affa-premium; {} = none)
+#   ontap.host          also read by Operation Automation (GET only) with the ONTAP Restore account (ontap:<site>)
+#   vcenter.host        vCenter, read-only account (ro-vcenter:<site>, role Read-only propagated from the root)
+#   nsxt.host           NSX-T Manager, read-only account (ro-nsxt:<site>, role Auditor)
+#                       vcenter / nsxt / vcd hosts are optional here: the administrator can set (and change) the address
+#                       with the account on Administration -> Credentials; an address set there replaces the one here.
+#   vcd (TOP LEVEL, next to sites:)  ONE vCloud Director serves every site: one read-only provider account, ro-vcd
+#                       (written user@System, View-only role). vcd.api_version: API version in the Accept header
+#                       (default 37.0 = vCloud Director 10.4; 38.0 for 10.5). The VM checks compare with the vCenter of the
+#                       site chosen in the portal (one read-only vCenter account per site, ro-vcenter:<site>).
+#   wi.test_ssh_command test mode only: run the hosts of Hosts & SSH with a fake program instead of ssh
+#   Hosts & SSH         (portal page, administrators) more hosts per site and group, each with an SSH credential (private
+#                       key or password, stored encrypted); a credential that "may run fixes" lets operators with the
+#                       permission "run fixes" run the fix of a check result on its hosts. sites.yml hosts stay read-only.
+#   vcenter.inventory_command  replaces the pyVmomi inventory reader (test mode only)
+#     <system>.validate_certs  true when the certificate is trusted by this server (default false)
+#   wi.tcp_probe        TCP tests from this server (Custom Port TCP alerts); false = skip them (default true)
+#   wi.siem_collector   default collector for "OpenStack RHEL forwards logs" (IP:port, e.g. 172.26.0.40:541)
+#   wi.esxi_collector   default collector for "ESXi sends syslog" (IP:port, e.g. 172.26.80.73:514)
+#   wi.vyos_image_url   VyOS 1.5 image the upgrade pre-check puts in "add system image" (internal mirror)
+#   hosts.<group>       hosts Operation Automation may read over SSH, per group. Operators can only choose these hosts.
+#                       Groups used by the catalog: cdn, repo, dns, vyos, huawei, linux, siem, esxi, gb200.
+#       user            read-only account on the hosts (e.g. wi-ro)
+#       private_key     its SSH key on this server (owner opsportal, mode 600)
+#       port            SSH port (default 22)
+#       sudo            true: commands that need root run with "sudo -n" — allow ONLY the read commands of
+#                       portal/docs/WI-CHECK-ACCESS.md in sudoers for that account
+#       members         name: address (the operator may also type the address from an alert, "172.31.10.67:9100")
+#       upstream_peer   (huawei) default upstream BGP peer for the prefix check
+# vcd: {host: "<vCloud Director>", api_version: "37.0"}      # one for every site (account ro-vcd)
+#   brand (optional): the title of the tenant portal header in "Where to look" (default "IAAS ACME CLOUD")
+sites:
+  DCB:
+    timezone: "+07:00"
+    apic: {host: "172.26.2.250"}
+    ontap: {host: "172.26.8.190", validate_certs: false,
+            used_tolerance_pct: 1, used_stable_seconds: 300, used_wait_seconds: 7200, used_poll_seconds: 10}
+    mgmt: {host: "172.26.70.11", user: admin, port: 22, private_key: /etc/ops-portal/keys/openstack_mgmt}
+    director: {host: "172.26.70.101", user: stack, overcloudrc: "~/overcloudrc"}
+    openstack: {transfer_role: member, legacy_volume_types: {}}
+    # openstack.horizon (optional): the Horizon host of the site, only shown in the address bar of "Where to look",
+    # e.g. openstack: {..., horizon: "horizon-dcb.example.com"}
+    # vcenter: {host: "<vCenter DCB>"}
+    # nsxt: {host: "<NSX-T Manager DCB>"}
+    wi: {siem_collector: "172.26.0.40:541", esxi_collector: "172.26.80.73:514"}
+    hosts:
+      huawei:
+        user: wi-ro
+        private_key: /etc/ops-portal/keys/wi_ro
+        upstream_peer: 11.18.9.157
+        members: {DCB02RCGW03: 172.26.15.15}
+
+  DCA:
+    timezone: "+07:00"
+    apic: {host: "172.24.27.251"}
+    ontap: {host: "172.24.27.30", validate_certs: false,
+            used_tolerance_pct: 1, used_stable_seconds: 300, used_wait_seconds: 7200, used_poll_seconds: 10}
+    mgmt: {host: "172.26.51.11", user: admin, port: 22, private_key: /etc/ops-portal/keys/openstack_mgmt}
+    director: {host: "172.26.51.101", user: stack, overcloudrc: "~/overcloudrc"}
+    # premium and standard on DCA are old types ("Dont use this volume type again"); on DCB/DCC these names are active.
+    openstack: {transfer_role: member, overcommit_ratio: 2, hidden_volume_types: [premium, standard],
+                legacy_volume_types: {standard: fas500f-standard, basic: fas500f-basic, premium: affa-premium}}
+    wi: {siem_collector: "172.26.0.40:541", esxi_collector: "172.26.80.73:514"}
+    hosts:
+      cdn:
+        user: wi-ro
+        private_key: /etc/ops-portal/keys/wi_ro
+        sudo: true
+        members: {dca-cdn-lb-01: 172.31.10.67}
+      dns:
+        user: wi-ro
+        private_key: /etc/ops-portal/keys/wi_ro
+        sudo: true
+        members: {dns-recursive-dca: "<IP>"}
+
+  DCC:
+    timezone: "+07:00"
+    apic: {host: "172.25.172.53"}
+    ontap: {host: "172.25.172.44", validate_certs: false,
+            used_tolerance_pct: 1, used_stable_seconds: 300, used_wait_seconds: 7200, used_poll_seconds: 10}
+    mgmt: {host: "172.25.175.11", user: admin, port: 22, private_key: /etc/ops-portal/keys/openstack_mgmt}
+    director: {host: "172.25.175.101", user: stack, overcloudrc: "~/overcloudrc"}
+    openstack: {transfer_role: member, legacy_volume_types: {}}
+    wi: {siem_collector: "172.26.0.40:541", esxi_collector: "172.26.80.73:514"}

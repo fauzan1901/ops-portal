@@ -1,0 +1,42 @@
+# Redfish GET on the BMC of the check (page BMC): HTTPS on its management IP with its web account (WI_BMC_USER /
+# WI_BMC_PASSWORD, environment only). Only GET; paths come from wi_analysis (under /redfish/v1, checked there). BMCs use
+# self-signed certificates: not verified. One GET at a time (BMCs serve few sessions).
+- name: "Record: no BMC"
+  ansible.builtin.set_fact:
+    wi_data: "{{ wi_data | combine(wi_reads.redfish | wi_skip('no BMC chosen for this check')) }}"
+  when: (host_target | default({})).connection | default('') != 'redfish'
+
+- name: Validate the BMC address
+  ansible.builtin.assert:
+    that:
+      - host_target.address | default('') is match('^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+      - (host_target.port | default(443) | int) > 0 and (host_target.port | default(443) | int) < 65536
+    fail_msg: "The BMC address of {{ host_target.name | default('?') }} is not valid."
+    quiet: true
+  when: (host_target | default({})).connection | default('') == 'redfish'
+
+- name: "BMC {{ host_target.name | default('') }} (Redfish GET, read-only): {{ wi_reads.redfish.keys() | join(', ') }}"
+  ansible.builtin.uri:
+    url: "https://{{ host_target.address }}{{ '' if (host_target.port | default(443) | int) == 443 else ':' ~ host_target.port }}{{ item.value }}"
+    method: GET
+    url_username: "{{ lookup('ansible.builtin.env', 'WI_BMC_USER') }}"
+    url_password: "{{ lookup('ansible.builtin.env', 'WI_BMC_PASSWORD') }}"
+    force_basic_auth: true
+    validate_certs: false
+    headers:
+      Accept: application/json
+      OData-Version: "4.0"
+    return_content: true
+    status_code: [200]
+    timeout: "{{ (cfg.wi | default({})).redfish_timeout | default(60) }}"
+  loop: "{{ wi_reads.redfish | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: rf_out
+  failed_when: false
+  when: (host_target | default({})).connection | default('') == 'redfish'
+
+- name: "Record: {{ wi_reads.redfish.keys() | join(', ') }}"
+  ansible.builtin.set_fact:
+    wi_data: "{{ wi_data | combine(rf_out.results | wi_rest_results) }}"
+  when: (host_target | default({})).connection | default('') == 'redfish'

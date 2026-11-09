@@ -1,0 +1,55 @@
+# Archives of the overcloud nodes (checks Collect logs and sos report), streamed node -> director -> management host ->
+# portal server into the bundle folder of the run (bundle_dir, from the portal); see wi_analysis/logs.py and
+# wi_collect.py. Nothing stays on the node, the director or the management host. Logs: every node at once; sos report:
+# one node after the other (it loads the node for minutes). Each node has its own time limit (collect_timeout).
+- name: Check the bundle folder
+  ansible.builtin.assert:
+    that:
+      - bundle_dir | default('') is match('^/')
+    fail_msg: "This check needs a bundle folder from the portal."
+    quiet: true
+
+- name: "Logs of the nodes, all at once: {{ wi_reads.collect.keys() | select('match', '^logs_') | join(', ') }}"
+  ansible.builtin.shell:
+    cmd: "{{ item.value | wi_collect_command(director_prefix, cfg.mgmt, bundle_dir) }}"
+    executable: /bin/bash
+  loop: "{{ wi_reads.collect | dict2items | selectattr('key', 'match', '^logs_') | list }}"
+  loop_control:
+    label: "{{ item.value.split('|')[0] }}"
+  async: "{{ collect_timeout | default(5400) | int }}"
+  poll: 0
+  register: wi_logs_jobs
+  changed_when: false
+  failed_when: false
+
+- name: Wait for the logs of every node
+  ansible.builtin.async_status:
+    jid: "{{ item.ansible_job_id }}"
+  loop: "{{ wi_logs_jobs.results | default([]) | selectattr('ansible_job_id', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.item.value.split('|')[0] }}"
+  register: wi_logs_done
+  until: wi_logs_done.finished
+  retries: "{{ ((collect_timeout | default(5400) | int) / 10) | int + 6 }}"
+  delay: 10
+  changed_when: false
+  failed_when: false
+
+- name: "sos report, one node after the other: {{ wi_reads.collect.keys() | select('match', '^sos_') | join(', ') }}"
+  ansible.builtin.shell:
+    cmd: "{{ item.value | wi_collect_command(director_prefix, cfg.mgmt, bundle_dir) }}"
+    executable: /bin/bash
+  loop: "{{ wi_reads.collect | dict2items | selectattr('key', 'match', '^sos_') | list }}"
+  loop_control:
+    label: "{{ item.value.split('|')[0] }}"
+  async: "{{ collect_timeout | default(5400) | int }}"
+  poll: 15
+  register: wi_sos_done
+  changed_when: false
+  failed_when: false
+
+- name: "Record: {{ wi_reads.collect.keys() | join(', ') }}"
+  ansible.builtin.set_fact:
+    wi_data: >-
+      {{ wi_data | combine(wi_reads.collect | wi_skip('the node did not answer in time'))
+         | combine(((wi_logs_done.results | default([])) + (wi_sos_done.results | default([]))) | wi_collect_results) }}

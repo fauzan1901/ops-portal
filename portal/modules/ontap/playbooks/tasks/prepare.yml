@@ -1,0 +1,22 @@
+# Validate the input, then prepare the site configuration (site.yml).
+- name: Validate input
+  ansible.builtin.assert:
+    that:
+      - sites is defined and site | default('') in sites
+      - volume_id | default('') is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+      - (project_id | default('')) == '' or project_id is match('^[0-9A-Za-z_-]{8,64}$')
+      - (target_pool | default('')) == '' or target_pool is match('^[A-Za-z0-9_.:@-]+#[A-Za-z0-9_.-]+$')
+      - post_action | default('', true) in ['', 'none', 'attach', 'instance']
+      - (attach_server_id | default('')) == '' or attach_server_id is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+      - post_action | default('', true) != 'attach' or (attach_server_id | default('')) != ''
+      - (new_instance_name | default('')) == '' or new_instance_name is match('^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$')
+      - ontap_user | length > 0 and ontap_password | length > 0
+    fail_msg: >-
+      Invalid input. Requires site (one of {{ (sites | default({})).keys() | list }}),
+      volume_id as a lowercase UUID, optional project_id, target_pool (Cinder host@backend#pool),
+      post_action (none, attach with attach_server_id as a UUID, or instance with an optional new_instance_name:
+      letters, digits, _ . - up to 63), and ONTAP credentials in env ONTAP_USER/ONTAP_PASSWORD.
+    quiet: true
+
+- name: Site configuration
+  ansible.builtin.import_tasks: site.yml

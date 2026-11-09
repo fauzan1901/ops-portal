@@ -1,0 +1,77 @@
+# One ticked item of an OpenStack fix (an instance, a volume, an image): its commands as one script on the director
+# (management host -> director -> source overcloudrc; wi_analysis.os_action_script, wi_ops.py for the operations), then
+# its result. An item does not start after one that needs a person (exit 6, unless the operator chose to skip such items;
+# exit 8 the control plane; the connection), after several in a row that needed a person, when the operator chose to
+# stop at the first failure after any item that was not done (action_stop_rcs), or once the run was cancelled on the
+# portal (cancel_file, read here before each item: the item that ran before is never touched).
+- name: "Check for a cancel before item {{ wi_index + 1 }}"
+  ansible.builtin.slurp:
+    src: "{{ cancel_file }}"
+  register: wi_cancel_read
+  failed_when: false
+  when: cancel_file | default('') | length > 0 and not (wi_items_stop | default(false))
+
+- name: "Cancelled on the portal: item {{ wi_index + 1 }} and the ones after it do not start"
+  ansible.builtin.set_fact:
+    wi_items_stop: true
+    wi_items_cancelled: "{{ wi_cancel_read.content | wi_cancel_info }}"
+  when: (wi_cancel_read.content | default('')) | length > 0 and not (wi_items_stop | default(false))
+
+- name: "Item {{ wi_index + 1 }}/{{ action_items | length }}: {{ wi_item.label }}"
+  when: not (wi_items_stop | default(false))
+  block:
+    - name: Progress of the items (the run page reads it, also after it was closed and opened again)
+      ansible.builtin.copy:
+        content: "{{ wi_item_results | default([]) | wi_progress(action_items, wi_index) | to_json }}"
+        dest: "{{ progress_file }}"
+        mode: "0600"
+      failed_when: false
+      when: progress_file | default('') | length > 0
+
+    - name: Time of the item
+      ansible.builtin.set_fact:   # once, here: a value of an include would be computed again (with now()) at every use
+        wi_item_until: "{{ (now(fmt='%s') | int) + (action_item_timeout | default(3600) | int) }}"
+
+    - name: "Item {{ wi_index + 1 }}/{{ action_items | length }}: {{ wi_item.label }}"
+      ansible.builtin.include_tasks: live_director.yml
+      vars:
+        # wi_ops.py stops 2 minutes before: the portal still reads its result
+        live_script: "{{ wi_item.commands | wi_os_action_script(overcloudrc, (wi_item_until | int) - 120) }}"
+        live_label: "Item {{ wi_index + 1 }}/{{ action_items | length }}: {{ wi_item.label }}"
+        live_header: "== Item {{ wi_index + 1 }}/{{ action_items | length }}: {{ wi_item.label }}"
+        live_deadline: "{{ wi_item_until }}"
+
+    - name: "Item {{ wi_index + 1 }}/{{ action_items | length }} ended"
+      ansible.builtin.set_fact:
+        wi_item_out: "{{ live_out }}"
+
+    - name: Record the result of the item
+      ansible.builtin.set_fact:
+        wi_item_results: "{{ (wi_item_results | default([])) + [wi_item_out | wi_item_result(wi_item, wi_index, action_stop_rcs | default([6]))] }}"
+        wi_item_raw: >-
+          {{ (wi_item_raw | default([])) + [{'label': wi_item.label, 'commands': wi_item.commands,
+              'stdout': wi_item_out.stdout | default(''), 'stderr': wi_item_out.stderr | default(wi_item_out.msg | default(''))}] }}
+
+    - name: Console screenshots of the item (the run page shows them while the next items run)
+      ansible.builtin.copy:
+        content: "{{ wi_item_results[-1] | wi_item_shots | to_json }}"
+        dest: "{{ shots_dir }}/item-{{ wi_index + 1 }}.json"
+        mode: "0600"
+      failed_when: false
+      when: shots_dir | default('') | length > 0 and (wi_item_results[-1] | wi_item_shots | length) > 0
+
+    - name: "Item {{ wi_index + 1 }}/{{ action_items | length }} done"
+      ansible.builtin.debug:
+        msg: "{{ wi_item_results[-1].progress }}"
+
+    - name: Record whether the next item may start (this item, or several in a row that needed a person)
+      ansible.builtin.set_fact:
+        wi_items_stop: "{{ wi_item_results | wi_items_stop_next }}"
+
+    - name: Progress of the items
+      ansible.builtin.copy:
+        content: "{{ wi_item_results | wi_progress(action_items, -1) | to_json }}"
+        dest: "{{ progress_file }}"
+        mode: "0600"
+      failed_when: false
+      when: progress_file | default('') | length > 0

@@ -1,0 +1,7 @@
+# Every troubleshooting check runs on localhost (REST APIs, TCP tests). The OpenStack management host and the host or device of a
+# check are added while the playbook runs (add_host), from sites.yml and the host the operator chose.
+all:
+  hosts:
+    localhost:
+      ansible_connection: local
+      ansible_python_interpreter: "{{ ansible_playbook_python }}"

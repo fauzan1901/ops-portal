@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="ui-version" content="{{ ui_version }}">
+<title>Shell</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='3' fill='%230066cc'/%3E%3Crect x='6' y='8' width='20' height='16' rx='1.5' stroke='white' stroke-width='2' fill='none'/%3E%3Cpath d='M10 13l3 3-3 3M15 19h6' stroke='white' stroke-width='2' fill='none'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/portal.css">
+<link rel="stylesheet" href="/static/switcher.css">
+<link rel="stylesheet" href="{{ url_for('shell.static', filename='vendor/xterm/xterm.css', v=ui_version) }}">
+<link rel="stylesheet" href="{{ url_for('shell.static', filename='term.css', v=ui_version) }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='guide.css', v=ui_version) }}">
+</head>
+<body>
+{% include "_sprite.html" %}
+<svg xmlns="http://www.w3.org/2000/svg" class="sprite" aria-hidden="true">
+  <symbol id="i-star" viewBox="0 0 24 24"><path d="M12 3.8l2.5 5.2 5.7.8-4.1 4 1 5.6L12 16.7l-5.1 2.7 1-5.6-4.1-4 5.7-.8z"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><path d="M12 6h.01M12 12h.01M12 18h.01"/></symbol>
+  <symbol id="i-paste" viewBox="0 0 24 24"><rect x="5.5" y="5" width="13" height="15.5" rx="1.5"/><path d="M9 5V3.8h6V5M9 11h6M9 15h4"/></symbol>
+  <symbol id="i-code" viewBox="0 0 24 24"><path d="M8.5 7.5L4 12l4.5 4.5M15.5 7.5L20 12l-4.5 4.5M13.5 5l-3 14"/></symbol>
+  <symbol id="i-layout-1" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="1.5"/></symbol>
+  <symbol id="i-layout-2" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="1.5"/><path d="M12 4.5v15"/></symbol>
+  <symbol id="i-layout-2r" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="1.5"/><path d="M3.5 12h17"/></symbol>
+  <symbol id="i-layout-4" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="1.5"/><path d="M12 4.5v15M3.5 12h17"/></symbol>
+  <symbol id="i-cog" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2.8v2.4M12 18.8v2.4M2.8 12h2.4M18.8 12h2.4M5.5 5.5l1.7 1.7M16.8 16.8l1.7 1.7M5.5 18.5l1.7-1.7M16.8 7.2l1.7-1.7"/></symbol>
+  <symbol id="i-root" viewBox="0 0 24 24"><path d="M12 3.5l7 3v5c0 4.3-3 7.6-7 9-4-1.4-7-4.7-7-9v-5z"/><path d="M9.5 12l2 2 3.5-3.5"/></symbol>
+  <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 3.5v4M15 3.5v4M6.5 7.5h11v3a5.5 5.5 0 0 1-11 0zM12 16v4.5"/></symbol>
+  <symbol id="i-history" viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3"/><path d="M4.5 4.5v4h4"/><path d="M12 8.5V12l2.5 1.5"/></symbol>
+  <symbol id="i-maximize" viewBox="0 0 24 24"><path d="M4.5 9V4.5H9M15 4.5h4.5V9M19.5 15v4.5H15M9 19.5H4.5V15"/></symbol>
+</svg>
+
+<div class="pf-page sh-page" id="appView" hidden>
+  <header class="pf-masthead">
+    <button type="button" class="pf-masthead__toggle" id="navToggle" aria-label="Toggle the host list" aria-expanded="true"><svg class="pf-icon" aria-hidden="true"><use href="#i-bars"></use></svg></button>
+    <div class="pf-masthead__brand"><span class="pf-masthead__logo"><svg class="pf-icon" aria-hidden="true"><use href="#i-terminal"></use></svg></span><span><b>Shell</b></span></div>
+    <div class="pf-masthead__content">
+      <div id="portalLauncher" data-current="shell"></div>
+      <div class="pf-masthead__user" id="userMenuWrap">
+        <button type="button" class="pf-user-toggle" id="userToggle" aria-haspopup="menu" aria-expanded="false" aria-controls="userMenu">
+          <span class="pf-avatar" id="userAvatar" aria-hidden="true"></span>
+          <span class="pf-user-toggle__name" id="userName"></span>
+          <span class="pf-label pf-m-compact" id="userRole"></span>
+          <svg class="pf-icon" aria-hidden="true"><use href="#i-caret-down"></use></svg>
+        </button>
+        <div class="pf-menu" id="userMenu" role="menu" aria-labelledby="userToggle" hidden>
+          <div class="pf-menu__header">
+            <b id="userMenuName"></b>
+            <span class="mono pf-text-secondary" id="userMenuLogin"></span>
+            <span class="pf-text-secondary pf-text-sm" id="userMenuMfa"></span>
+            <span class="pf-text-secondary pf-text-sm" id="userMenuClient"></span>
+          </div>
+          <button type="button" class="pf-menu__item" role="menuitem" id="logoutBtn"><svg class="pf-icon" aria-hidden="true"><use href="#i-sign-out"></use></svg>Sign out</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- ---------- Hosts: one folder per site, then per product (Termius / MobaXterm session tree) ---------- -->
+  <aside class="pf-sidebar" id="sidebar">
+    <div class="sh-hosts">
+      <div class="sh-hosts__head">
+        <input class="pf-form-control pf-m-search" id="hostQ" maxlength="80" placeholder="Search hosts  ( / )" aria-label="Search hosts" autocomplete="off">
+        <div class="pf-toggle-group pf-m-dark sh-hosts__sites" id="siteFilter" role="radiogroup" aria-label="Site"></div>
+      </div>
+      <div class="sh-tree" id="hostTree" role="tree" aria-label="Hosts" tabindex="0"></div>
+      <nav class="sh-hosts__nav" aria-label="Shell">
+        <ul>
+          <li><a class="pf-nav__link" href="#/" data-route="terminals"><svg class="pf-icon" aria-hidden="true"><use href="#i-terminal"></use></svg>Terminals<span class="pf-nav__badge" id="navOpen" hidden></span></a></li>
+          <li><a class="pf-nav__link" href="#/history" data-route="history"><svg class="pf-icon" aria-hidden="true"><use href="#i-history"></use></svg>Session history</a></li>
+          <li class="admin-only" hidden><a class="pf-nav__link" href="#/access" data-route="access"><svg class="pf-icon" aria-hidden="true"><use href="#i-lock"></use></svg>Access</a></li>
+          <li class="admin-only" hidden><a class="pf-nav__link" href="/wi/#/hosts"><svg class="pf-icon" aria-hidden="true"><use href="#i-server"></use></svg>Hosts &amp; SSH</a></li>
+          <li class="admin-only" hidden><a class="pf-nav__link" href="/#/users"><svg class="pf-icon" aria-hidden="true"><use href="#i-users"></use></svg>Users</a></li>
+        </ul>
+      </nav>
+    </div>
+  </aside>
+
+  <main class="pf-page__main">
+    <!-- ---------- No access ---------- -->
+    <div id="page-noaccess" data-page="noaccess" hidden>
+      <section class="pf-page__section">
+        <div class="pf-card"><div class="pf-empty-state"><svg class="pf-icon" aria-hidden="true"><use href="#i-lock"></use></svg>
+          <h2 class="pf-title">No access to Shell</h2>
+          <span>Your account cannot open shells. An administrator ticks <b>Shell</b> for your account on the Users page (it is never part of "all modules").</span>
+          <a class="pf-btn pf-m-primary" href="/#/home">Back to the portal</a></div></div>
+      </section>
+    </div>
+
+    <!-- ---------- Terminals: tabs, panes, status bar, snippets ---------- -->
+    <div id="page-terminals" data-page="terminals" hidden>
+      <div class="sh-workspace" id="workspace">
+        <div class="sh-tabbar">
+          <div class="sh-tabs" id="tabs" role="tablist" aria-label="Open sessions"></div>
+          <button type="button" class="sh-newtab" id="newTabBtn" title="Open a host ( / )" aria-label="Open a host"><svg class="pf-icon" aria-hidden="true"><use href="#i-plus"></use></svg></button>
+          <div class="sh-tabbar__tools">
+            <button type="button" class="sh-tool" data-layout="1" title="One pane" aria-pressed="true"><svg class="pf-icon" aria-hidden="true"><use href="#i-layout-1"></use></svg></button>
+            <button type="button" class="sh-tool" data-layout="2" title="Two panes side by side" aria-pressed="false"><svg class="pf-icon" aria-hidden="true"><use href="#i-layout-2"></use></svg></button>
+            <button type="button" class="sh-tool" data-layout="2r" title="Two panes, one above the other" aria-pressed="false"><svg class="pf-icon" aria-hidden="true"><use href="#i-layout-2r"></use></svg></button>
+            <button type="button" class="sh-tool" data-layout="4" title="Four panes" aria-pressed="false"><svg class="pf-icon" aria-hidden="true"><use href="#i-layout-4"></use></svg></button>
+            <span class="sh-tools-sep"></span>
+            <button type="button" class="sh-tool" id="snippetsBtn" title="Snippets: saved commands" aria-pressed="false"><svg class="pf-icon" aria-hidden="true"><use href="#i-code"></use></svg></button>
+            <button type="button" class="sh-tool" id="settingsBtn" title="Terminal settings"><svg class="pf-icon" aria-hidden="true"><use href="#i-cog"></use></svg></button>
+            <button type="button" class="sh-tool" id="fullBtn" title="Full screen"><svg class="pf-icon" aria-hidden="true"><use href="#i-maximize"></use></svg></button>
+          </div>
+        </div>
+        <div class="sh-body">
+          <div class="sh-panes is-l1" id="panes"></div>
+          <aside class="sh-drawer" id="snippetDrawer" hidden aria-label="Snippets">
+            <div class="sh-drawer__head">
+              <h2>Snippets</h2>
+              <button type="button" class="pf-btn pf-m-secondary pf-m-small" id="snippetAddBtn"><svg class="pf-icon" aria-hidden="true"><use href="#i-plus"></use></svg>Add</button>
+              <button type="button" class="pf-btn pf-m-plain pf-m-small" id="snippetCloseBtn" aria-label="Close snippets"><svg class="pf-icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+            </div>
+            <div class="sh-drawer__search"><input class="pf-form-control pf-m-search" id="snippetQ" maxlength="80" placeholder="Search snippets" aria-label="Search snippets"></div>
+            <div class="sh-drawer__list" id="snippetList"></div>
+          </aside>
+        </div>
+        <div class="sh-status" id="statusBar" aria-live="polite"></div>
+      </div>
+    </div>
+
+    <!-- ---------- Access (administrators): which hosts each operator may open ---------- -->
+    <div id="page-access" data-page="access" hidden>
+      <section class="pf-page__section pf-m-light">
+        <h1 class="pf-title">Access</h1>
+        <p>Which hosts each operator may open in Shell: nothing until an administrator gives some here. Give a whole site, a
+          product of a site (also the hosts added to it later) or single hosts. Administrators open every host. An account
+          gets the Shell module itself on the <a href="/#/users">Users</a> page.</p>
+      </section>
+      <section class="pf-page__section">
+        <div class="sh-access">
+          <div class="pf-card sh-access__users">
+            <div class="pf-card__header"><h2 class="pf-card__title">Accounts with Shell</h2></div>
+            <div class="sh-access__search"><input class="pf-form-control pf-m-search" id="accQ" maxlength="64" placeholder="Search accounts" aria-label="Search accounts"></div>
+            <div class="sh-access__list" id="accUsers" role="listbox" aria-label="Accounts"></div>
+          </div>
+          <div class="pf-card sh-access__hosts">
+            <div class="pf-card__header"><h2 class="pf-card__title" id="accTitle">Choose an account</h2><span class="pf-card__actions pf-text-secondary pf-text-sm" id="accCount"></span></div>
+            <div class="sh-access__toolbar">
+              <input class="pf-form-control pf-m-search" id="accHostQ" maxlength="80" placeholder="Search hosts" aria-label="Search hosts">
+              <label class="pf-check"><input type="checkbox" id="accAll"><span>Every host of every site</span></label>
+            </div>
+            <div class="sh-access__toolbar sh-access__validity" role="group" aria-label="What a new tick gives">
+              <span class="pf-text-secondary pf-text-sm">A new tick gives:</span>
+              <label class="pf-check"><input type="radio" name="accValidity" value="permanent" id="accPermanent" checked><span>Permanent access</span></label>
+              <label class="pf-check"><input type="radio" name="accValidity" value="until" id="accTemporary"><span>Until</span></label>
+              <input class="pf-form-control" type="datetime-local" id="accUntil" aria-label="Valid until">
+              <input class="pf-form-control" id="accTicket" maxlength="80" placeholder="Ticket / reason (e.g. INC-1234)" aria-label="Ticket or reason">
+            </div>
+            <div class="sh-acc-tree" id="accTree"></div>
+            <div class="pf-card__footer sh-access__footer">
+              <button type="button" class="pf-btn pf-m-primary" id="accSave" disabled>Save</button>
+              <button type="button" class="pf-btn pf-m-link" id="accReset" disabled>Undo changes</button>
+              <span class="pf-text-secondary pf-text-sm" id="accDirty"></span>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ---------- Session history: who opened which shell, when, how it ended; the recording ---------- -->
+    <div id="page-history" data-page="history" hidden>
+      <section class="pf-page__section pf-m-light">
+        <h1 class="pf-title">Session history</h1>
+        <p id="historyIntro">Shell sessions, newest first: your own (administrators see everyone's, and can watch an open session of another user live or join it; its user sees that). The output of each session is recorded and kept for <span id="keepDays"></span> days.</p>
+      </section>
+      <section class="pf-page__section">
+        <div class="pf-card sh-history">
+          <div class="sh-history-toolbar">
+            <select class="pf-form-control" id="historySite" aria-label="Site"><option value="">All sites</option></select>
+            <input class="pf-form-control admin-only" id="historyUser" maxlength="64" placeholder="User" aria-label="User" hidden>
+            <span class="pf-toolbar__spacer"></span>
+            <span class="pf-text-secondary pf-text-sm" id="historyShown"></span>
+            <button type="button" class="pf-btn pf-m-plain" id="historyRefresh" title="Refresh"><svg class="pf-icon" aria-hidden="true"><use href="#i-refresh"></use></svg></button>
+          </div>
+          <div class="pf-table-wrap">
+            <table class="pf-table pf-m-compact" aria-label="Shell sessions">
+              <thead><tr><th>Started</th><th>User</th><th>Host</th><th>Account</th><th>Duration</th><th>Result</th><th>From</th><th></th></tr></thead>
+              <tbody id="historyList"></tbody>
+            </table>
+          </div>
+          <div class="pf-card__footer"><button type="button" class="pf-btn pf-m-link" id="historyMore" hidden>Show older sessions</button></div>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<!-- ---------- Paste of several lines: shown before it reaches the host ---------- -->
+<dialog class="pf-modal pf-m-large" id="pasteDialog" aria-labelledby="pasteTitle">
+  <form method="dialog">
+    <header class="pf-modal__header"><h1 class="pf-title" id="pasteTitle">Paste several lines?</h1></header>
+    <div class="pf-modal__body">
+      <p class="pf-mb-md" id="pasteBody"></p>
+      <pre class="pf-code-block sh-paste-preview" id="pastePreview"></pre>
+      <label class="pf-check"><input type="checkbox" id="pasteNoAsk"><span>Do not ask again in this browser</span></label>
+    </div>
+    <footer class="pf-modal__footer">
+      <button type="submit" class="pf-btn pf-m-primary" value="ok" id="pasteOk">Paste</button>
+      <button type="submit" class="pf-btn pf-m-link" value="cancel">Cancel</button>
+    </footer>
+  </form>
+</dialog>
+
+<!-- ---------- Add or change a snippet ---------- -->
+<dialog class="pf-modal pf-m-large" id="snippetDialog" aria-labelledby="snippetTitle">
+  <form method="dialog" id="snippetForm">
+    <header class="pf-modal__header"><h1 class="pf-title" id="snippetTitle">Add snippet</h1></header>
+    <div class="pf-modal__body">
+      <div class="sh-form-row"><label class="pf-form-label" for="snippetName">Name</label>
+        <input class="pf-form-control" id="snippetName" maxlength="80" required placeholder="e.g. Pacemaker status"></div>
+      <div class="sh-form-row"><label class="pf-form-label" for="snippetCommand">Command</label>
+        <textarea class="pf-form-control" id="snippetCommand" maxlength="8000" required spellcheck="false" placeholder="sudo pcs status"></textarea>
+        <span class="pf-helper-text">Pasted into the terminal of the active pane; <b>Run</b> then presses Enter.</span></div>
+      <label class="pf-check admin-only" hidden><input type="checkbox" id="snippetShared"><span>Shared: every Shell user sees it (administrators)</span></label>
+    </div>
+    <footer class="pf-modal__footer">
+      <button type="submit" class="pf-btn pf-m-primary" value="ok" id="snippetSave">Save</button>
+      <button type="submit" class="pf-btn pf-m-link" value="cancel" formnovalidate>Cancel</button>
+    </footer>
+  </form>
+</dialog>
+
+<!-- ---------- Terminal settings (this browser) ---------- -->
+<dialog class="pf-modal pf-m-small" id="settingsDialog" aria-labelledby="settingsTitle">
+  <form method="dialog">
+    <header class="pf-modal__header"><h1 class="pf-title" id="settingsTitle">Terminal settings</h1></header>
+    <div class="pf-modal__body sh-settings">
+      <div class="sh-form-row"><label class="pf-form-label" for="setFont">Font size</label>
+        <select class="pf-form-control" id="setFont"><option>11</option><option>12</option><option>13</option><option>14</option><option>15</option><option>16</option><option>18</option><option>20</option></select></div>
+      <div class="sh-form-row"><label class="pf-form-label" for="setTheme">Theme</label>
+        <select class="pf-form-control" id="setTheme"><option value="dark">Dark</option><option value="light">Light</option></select></div>
+      <label class="pf-check"><input type="checkbox" id="setCopySelect"><span>Copy text as soon as it is selected</span></label>
+      <div class="sh-form-row"><label class="pf-form-label" for="setRightClick">Right-click in a terminal</label>
+        <select class="pf-form-control" id="setRightClick"><option value="paste">Pastes (MobaXterm, PuTTY: select to copy, right-click to paste)</option><option value="menu">Opens a menu (Copy, Paste, Select all…)</option></select>
+        <span class="pf-helper-text">Shift + right-click always opens the menu. A paste never presses Enter.</span></div>
+      <label class="pf-check"><input type="checkbox" id="setPasteAsk"><span>Ask before pasting several lines</span></label>
+      <label class="pf-check"><input type="checkbox" id="setWheelArrows"><span>Mouse wheel sends arrow keys in full-screen programs that do not read the mouse (less, man; also tmux without <span class="mono">mouse on</span>, where the arrows reach the shell history)</span></label>
+      <label class="pf-check"><input type="checkbox" id="setKeepScrollback"><span>Keep the scrollback when the host clears the screen (<span class="mono">clear</span>, Ctrl+L)</span></label>
+      <span class="pf-helper-text">Saved in this browser only.</span>
+    </div>
+    <footer class="pf-modal__footer">
+      <button type="submit" class="pf-btn pf-m-primary" value="ok">Save</button>
+      <button type="submit" class="pf-btn pf-m-link" value="cancel">Cancel</button>
+    </footer>
+  </form>
+</dialog>
+
+<!-- ---------- Recording of a session ---------- -->
+<dialog class="pf-modal sh-m-wide" id="playerDialog" aria-labelledby="playerTitle">
+  <form method="dialog">
+    <header class="pf-modal__header"><h1 class="pf-title" id="playerTitle">Recording</h1>
+      <button type="submit" class="pf-btn pf-m-plain" value="cancel" aria-label="Close"><svg class="pf-icon" aria-hidden="true"><use href="#i-x"></use></svg></button></header>
+    <div class="pf-modal__body">
+      <p class="pf-text-secondary pf-mb-md" id="playerInfo"></p>
+      <div class="sh-player" id="player"></div>
+    </div>
+    <footer class="pf-modal__footer">
+      <button type="button" class="pf-btn pf-m-secondary" id="playerDownload"><svg class="pf-icon" aria-hidden="true"><use href="#i-download"></use></svg>Download as text</button>
+      <button type="submit" class="pf-btn pf-m-link" value="cancel">Close</button>
+    </footer>
+  </form>
+</dialog>
+
+<!-- ---------- Confirmation ---------- -->
+<dialog class="pf-modal pf-m-small" id="confirmDialog" aria-labelledby="confirmTitle" aria-describedby="confirmBody">
+  <form method="dialog">
+    <header class="pf-modal__header"><h1 class="pf-title" id="confirmTitle"></h1></header>
+    <div class="pf-modal__body"><p id="confirmBody"></p></div>
+    <footer class="pf-modal__footer">
+      <button type="submit" class="pf-btn pf-m-danger" value="ok" id="confirmOk">End</button>
+      <button type="submit" class="pf-btn pf-m-link" value="cancel" id="confirmCancel">Cancel</button>
+    </footer>
+  </form>
+</dialog>
+
+<div class="sh-menu" id="hostMenu" role="menu" hidden></div>
+<div class="sh-menu" id="termMenu" role="menu" aria-label="Terminal" hidden></div>
+<div class="pf-alert-group" id="toasts" aria-live="polite"></div>
+
+<script src="{{ url_for('shell.static', filename='vendor/xterm/xterm.js', v=ui_version) }}"></script>
+<script src="{{ url_for('shell.static', filename='vendor/xterm/addon-fit.js', v=ui_version) }}"></script>
+<script src="/static/switcher.js"></script>
+<script src="{{ url_for('shell.static', filename='term.js', v=ui_version) }}"></script>
+<script src="{{ url_for('static', filename='guide.js', v=ui_version) }}"></script>
+<script src="{{ url_for('shell.static', filename='guides.js', v=ui_version) }}"></script>
+</body>
+</html>

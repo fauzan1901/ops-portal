@@ -1,0 +1,75 @@
+# REST GET on ONTAP, vCenter, NSX-T or vCloud Director with the site's read-only account (passwords only in the
+# environment). rest_access[<source>] (from the portal): {ok, base, validate_certs, reason}. Without access every item
+# is skipped. vCenter and vCloud Director use a session (opened once, closed at the end of run_check.yml).
+- name: "Record: no {{ rest_source }} access"
+  ansible.builtin.set_fact:
+    wi_data: "{{ wi_data | combine(wi_reads[rest_source] | wi_skip(rest_access[rest_source].reason | default('no access'))) }}"
+  when: not (rest_access[rest_source].ok | default(false) | bool)
+
+- name: "vCenter: open a session (read-only account)"
+  ansible.builtin.uri:
+    url: "{{ rest_access.vcenter.base }}/api/session"
+    method: POST
+    url_username: "{{ lookup('ansible.builtin.env', 'WI_VCENTER_USER') }}"
+    url_password: "{{ lookup('ansible.builtin.env', 'WI_VCENTER_PASSWORD') }}"
+    force_basic_auth: true
+    validate_certs: "{{ rest_access.vcenter.validate_certs | default(false) | bool }}"
+    status_code: [200, 201]
+    return_content: true
+    timeout: 30
+  register: vc_login
+  when: rest_source == 'vcenter' and (rest_access.vcenter.ok | default(false) | bool) and vcenter_session | default('') == ''
+
+- name: "vCenter: keep the session"
+  ansible.builtin.set_fact:
+    vcenter_session: "{{ vc_login.json if vc_login.json is string else vc_login.content | trim('\"') }}"
+  when: vc_login is defined and vc_login.json is defined and rest_source == 'vcenter'
+
+- name: "vCloud Director: open a provider session (read-only account)"
+  ansible.builtin.uri:
+    url: "{{ rest_access.vcd.base }}/cloudapi/1.0.0/sessions/provider"
+    method: POST
+    url_username: "{{ lookup('ansible.builtin.env', 'WI_VCD_USER') }}"
+    url_password: "{{ lookup('ansible.builtin.env', 'WI_VCD_PASSWORD') }}"
+    force_basic_auth: true
+    headers:
+      Accept: "application/json;version={{ rest_access.vcd.api_version | default('37.0') }}"
+    validate_certs: "{{ rest_access.vcd.validate_certs | default(false) | bool }}"
+    status_code: [200, 201]
+    timeout: 30
+  register: vcd_login
+  when: rest_source == 'vcd' and (rest_access.vcd.ok | default(false) | bool) and vcd_token | default('') == ''
+
+- name: "vCloud Director: keep the session"
+  ansible.builtin.set_fact:
+    vcd_token: "{{ vcd_login.x_vmware_vcloud_access_token | default('') }}"
+  when: rest_source == 'vcd' and vcd_login is defined and vcd_login.status | default(0) in [200, 201]
+
+- name: "{{ {'ontap': 'ONTAP', 'vcenter': 'vCenter', 'nsxt': 'NSX-T', 'vcd': 'vCloud Director'}[rest_source] }} (read-only GET): {{ wi_reads[rest_source].keys() | join(', ') }}"
+  vars:
+    vcd_accept: "{{ 'application/json' if item.value.startswith('/cloudapi/') else 'application/*+json' }};version={{ rest_access.vcd.api_version | default('37.0') }}"
+  ansible.builtin.uri:
+    url: "{{ rest_access[rest_source].base }}{{ item.value }}"
+    method: GET
+    url_username: "{{ omit if rest_source in ['vcenter', 'vcd'] else lookup('ansible.builtin.env', 'WI_' ~ (rest_source | upper) ~ '_USER') }}"
+    url_password: "{{ omit if rest_source in ['vcenter', 'vcd'] else lookup('ansible.builtin.env', 'WI_' ~ (rest_source | upper) ~ '_PASSWORD') }}"
+    force_basic_auth: "{{ rest_source not in ['vcenter', 'vcd'] }}"
+    headers: >-
+      {{ {'vmware-api-session-id': vcenter_session | default('')} if rest_source == 'vcenter'
+         else {'Authorization': 'Bearer ' ~ vcd_token | default(''), 'Accept': vcd_accept} if rest_source == 'vcd'
+         else {'Accept': 'application/json'} }}
+    validate_certs: "{{ rest_access[rest_source].validate_certs | default(false) | bool }}"
+    return_content: true
+    status_code: [200]
+    timeout: 60
+  loop: "{{ wi_reads[rest_source] | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: rest_out
+  failed_when: false
+  when: rest_access[rest_source].ok | default(false) | bool
+
+- name: "Record: {{ wi_reads[rest_source].keys() | join(', ') }}"
+  ansible.builtin.set_fact:
+    wi_data: "{{ wi_data | combine(rest_out.results | wi_rest_results) }}"
+  when: rest_access[rest_source].ok | default(false) | bool

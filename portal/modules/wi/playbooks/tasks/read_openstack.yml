@@ -1,0 +1,32 @@
+# Several read-only OpenStack commands in ONE connection to the director (management host -> director).
+- name: "OpenStack (read-only): {{ wi_reads.openstack.keys() | join(', ') }}"
+  ansible.builtin.raw: "{{ director_prefix }} {{ (wi_reads.openstack | wi_os_script(overcloudrc)) | quote }}"
+  delegate_to: mgmt
+  register: os_out
+  changed_when: false
+  failed_when: false
+  ignore_unreachable: true
+
+- name: "Check result: OpenStack connection"
+  vars:
+    os_err: >-
+      {{ ((os_out.stderr | default('') | trim) or (os_out.msg | default('') | trim)).splitlines()
+         | map('trim') | reject('search', 'Permanently added|post-quantum|store now, decrypt later|may need to be upgraded')
+         | map('regex_replace', '^Task failed: Failed to connect to the host via ssh: ', '') | select | join(' ') }}
+    director_denied: "{{ ('@' ~ cfg.director.host ~ ': Permission denied') in os_err }}"
+  ansible.builtin.assert:
+    that:
+      - not (os_out.unreachable | default(false))
+      - os_out.rc | default(1) != 97
+      - "'@@WI@@begin' in (os_out.stdout | default(''))"
+    fail_msg: >-
+      {% if os_out.unreachable | default(false) %}Management host {{ cfg.mgmt.host }} is not reachable: {{ os_err | truncate(400) }}
+      {% elif director_denied | bool %}Management host {{ cfg.mgmt.host }} is reachable, but the login to director
+      {{ cfg.director.user }}@{{ cfg.director.host }} was denied (Permission denied).
+      {% elif os_out.rc | default(1) == 97 %}source {{ overcloudrc }} failed on the director.
+      {% else %}The OpenStack commands did not run: {{ (os_err or (os_out.stdout | default(''))) | truncate(500) }}{% endif %}
+    quiet: true
+
+- name: "Record: {{ wi_reads.openstack.keys() | join(', ') }}"
+  ansible.builtin.set_fact:
+    wi_data: "{{ wi_data | combine(os_out.stdout | default('') | wi_batch(wi_reads.openstack.keys() | list)) }}"

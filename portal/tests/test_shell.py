@@ -437,7 +437,17 @@ class ShellTest(unittest.TestCase):
                 seen("history-word-42\r\n", 2)
                 m.write(s, "\x12history-wo")
                 seen("reverse-i-search")                    # Ctrl+R reaches bash's line editor
-                m.write(s, "\x03exit\r")
+                # Ctrl+C on its own: Linux bash drops what came in with it, so exit is typed at the next prompt (under
+                # sshpass on macOS, Ctrl+C itself ends the session)
+                prompts = bytes(s.buf).count(b"$ ")
+                m.write(s, "\x03")
+                deadline = time.time() + 8
+                while bytes(s.buf).count(b"$ ") <= prompts and s.state != "closed" and time.time() < deadline:
+                    time.sleep(0.05)
+                try:
+                    m.write(s, "exit\r")
+                except ValueError:   # the session has ended already
+                    pass
                 deadline = time.time() + 8
                 while s.state != "closed" and time.time() < deadline:
                     time.sleep(0.05)

@@ -1872,7 +1872,9 @@ class OpsTest(unittest.TestCase):
         line = (f"live-migrate {self.SID} from compute-07 to auto try compute-09 timeout 3600 stall abort nodes - user -")
         script = wi_analysis.os_action_script([line])
         env = dict(os.environ, FAKE_CLOUD_STATE=state, FAKE_OSC_VERSION="5.5.2")
-        out = subprocess.run([PY, os.path.join(HERE, "fake_cloud.py"), script], env=env, capture_output=True, text=True).stdout
+        # packed, as the playbook sends it (Linux takes one argument of 128 KiB at most)
+        out = subprocess.run([PY, os.path.join(HERE, "fake_cloud.py"), wi_analysis.packed(script)], env=env,
+                             capture_output=True, text=True).stdout
         self.assertIn("openstack --os-compute-api-version 2.30 server migrate --live-migration", out)
         self.assertIn("RESULT ok: web-01 is on compute-09", out)
 
@@ -3710,7 +3712,7 @@ class FlowTest(unittest.TestCase):
         self.assertNotIn(mock_vmware.READONLY_PASSWORD, item["log"])
 
     def wait_fix(self, client, action_id):
-        deadline = time.time() + 120
+        deadline = time.time() + 300   # a slow machine (CI runner) included
         while time.time() < deadline:
             item = client.get(f"/wi/api/fixes/{action_id}").get_json()["item"]
             if item["status"] != "running" and (item["verify_run_id"] or item["status"] != "ok"):
@@ -3719,7 +3721,7 @@ class FlowTest(unittest.TestCase):
         self.fail("fix did not finish")
 
     def wait_run(self, client, run_id):
-        deadline = time.time() + 120
+        deadline = time.time() + 300   # a slow machine (CI runner) included
         while time.time() < deadline:
             item = client.get(f"/wi/api/runs/{run_id}").get_json()["item"]
             if item["status"] != "running":

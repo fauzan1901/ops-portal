@@ -1899,7 +1899,9 @@ def live(script):
         inner = gzip.decompress(base64.b64decode(re.search(r"printf %s '([A-Za-z0-9+/=]*)'", script).group(1))).decode()
         folder = "/tmp/wi-live." + os.urandom(6).hex()
         os.makedirs(folder, mode=0o700)
-        done = subprocess.run([sys.executable, os.path.abspath(__file__), inner], capture_output=True, text=True)
+        # the item again through main(), packed as the director gets it: Linux takes one argument of 128 KiB at most
+        repacked = "# wi packed\nprintf %s '" + base64.b64encode(gzip.compress(inner.encode())).decode() + "'\n"
+        done = subprocess.run([sys.executable, os.path.abspath(__file__), repacked], capture_output=True, text=True)
         with open(os.path.join(folder, "out"), "w") as f:
             f.write(done.stdout + done.stderr)
         with open(os.path.join(folder, "rc"), "w") as f:

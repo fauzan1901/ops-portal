@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -693,6 +694,16 @@ sys.exit(rc)
             time.sleep(0.5)
         self.fail(f"Job {job_id} did not finish within {timeout}s")
 
+    def history(self, client, history_id, timeout=30):
+        """GET /api/history/<id> once its record left "running": a job shows its end before its on_finish writes the
+        record (portal/jobs.py), which can take a moment on a slow machine."""
+        deadline = time.time() + timeout
+        while True:
+            data = client.get(f"/restore/api/history/{history_id}").get_json()
+            if (data.get("item") or {}).get("status") != "running" or time.time() > deadline:
+                return data
+            time.sleep(0.2)
+
     def plan(self, client, volume_id=VOLUME_ID, snapshot="hourly.2025-12-17_1905", project_id="", site="DCA"):
         r = client.post("/restore/api/plan", json={"site": site, "volume_id": volume_id, "snapshot": snapshot, "project_id": project_id})
         self.assertEqual(r.status_code, 200, r.get_json())
@@ -1111,7 +1122,7 @@ sys.exit(rc)
             self.assertNotIn(secret, log_text)
 
         # The history names the AD user who launched it; ONTAP only saw the site's service account (svc_restore).
-        item = client.get(f"/restore/api/history/{body['history_id']}").get_json()["item"]
+        item = self.history(client, body['history_id'])["item"]
         self.assertEqual((item["status"], item["new_volume_id"], item["username"]), ("success", new_id, "admin"))
         self.assertEqual((item["volume_type"], item["cinder_pool"], item["move_flexvol"], item["post_action"]),
                          ("netapp-iscsi", self.pool(14), "", ""))
@@ -1228,7 +1239,7 @@ sys.exit(rc)
         self.assertEqual((vol["type"], vol["os-vol-host-attr:host"], job["result"]["new_volume"]["type"]),
                          ("nvme-premium", nvme_host, "nvme-premium"))
         self.assertTrue(any("--volume-type nvme-premium" in c for c in self.director_state()["calls"] if "cinder manage" in c))
-        item = client.get(f"/restore/api/history/{body['history_id']}").get_json()["item"]
+        item = self.history(client, body['history_id'])["item"]
         self.assertEqual((item["volume_type"], item["move_flexvol"]), ("nvme-premium", "DCAOPNSTACK_NVME_01_vol"))
         start = next(e["detail"] for e in self.restore_events(body["history_id"]) if e["action"] == "restore.start")
         self.assertIn("-> new volume vm-01-data-nvme (volume type changed to nvme-premium) in project", start)
@@ -1274,7 +1285,7 @@ sys.exit(rc)
         self.assertIn("--volume-type netapp-iscsi", manage)
         self.assertEqual(job["result"]["lun_path"], f"/vol/DCAOPNSTACK_CINDER_16_vol/volume-{new_id}")
         self.assertEqual((job["result"]["lun_move"]["flexvol"], job["result"]["cinder_pool"]), ("DCAOPNSTACK_CINDER_16_vol", self.pool(16)))
-        item = client.get(f"/restore/api/history/{body['history_id']}").get_json()["item"]
+        item = self.history(client, body['history_id'])["item"]
         self.assertEqual((item["volume_type"], item["move_flexvol"], item["cinder_pool"], item["restore_path"]),
                          ("netapp-iscsi", "DCAOPNSTACK_CINDER_16_vol", self.pool(16), target))
         events = {e["action"]: e["detail"] for e in self.restore_events(body["history_id"])}
@@ -1360,7 +1371,7 @@ sys.exit(rc)
         self.assertEqual(sum(1 for c in state["calls"] if c.startswith("openstack role add")), 1)
         self.assertNotIn([fake_director.ADMIN_USER, fake_director.CUSTOMER_PROJECT, "member"], state["roles"])
         self.assertIn("attached to instance vm-02 as /dev/vdb", job["result"]["summary"])
-        item = client.get(f"/restore/api/history/{body['history_id']}").get_json()["item"]
+        item = self.history(client, body['history_id'])["item"]
         self.assertEqual((item["post_action"], item["post_result"]),
                          (f"attach {fake_director.SERVER2_ID}", "ok: attached to vm-02 as /dev/vdb"))
         # Activity log: what was asked for (pool, project, action after it) and what came out of it.
@@ -1420,7 +1431,7 @@ sys.exit(rc)
                           (fake_director.NET_DB, [], True, "vm-01-restored-port2")])
         self.assertNotIn("10.249.128.15", [ip["ip_address"] for p in new_ports for ip in p["fixed_ips"]])
         self.assertEqual(after["addresses"], {"net-app": ["10.249.128.101"], "net-db": ["10.248.0.101"]})
-        item = client.get(f"/restore/api/history/{body['history_id']}").get_json()["item"]
+        item = self.history(client, body['history_id'])["item"]
         self.assertEqual(item["post_result"], f"ok: instance vm-01-restored ({after['server_id']}) ACTIVE")
         events = {e["action"]: e["detail"] for e in self.restore_events(body["history_id"])}
         self.assertIn("(100 GB, type netapp-iscsi, bootable)", events["restore.start"])
@@ -1674,6 +1685,23 @@ sys.exit(rc)
         self.assertEqual(done["action"], "restore.group_failed")
         self.assertIn("0 of 2 volumes restored", done["detail"])
 
+    def test_history_waits_for_the_record_of_a_finished_job(self):
+        """A job shows its end before its on_finish writes the history record (portal/jobs.py), so a slow record is still
+        "running" right after the job ended (a slow CI runner): history() waits for it."""
+        client = self.client()
+        real = self.webapp.history.finish
+
+        def slow(*args, **kwargs):
+            time.sleep(2)
+            return real(*args, **kwargs)
+        plan_id, _plan = self.plan(client)
+        with mock.patch.object(self.webapp.history, "finish", side_effect=slow):
+            r = self.restore(client, plan_id)
+            job = self.wait(client, r.get_json()["job_id"])
+            history_id = r.get_json()["history_id"]
+            self.assertEqual(client.get(f"/restore/api/history/{history_id}").get_json()["item"]["status"], "running")
+            self.assertEqual(self.history(client, history_id)["item"]["status"], job["status"])
+
     def test_failed_new_instance_keeps_the_restored_volume(self):
         client = self.client()
         # 1) The second port cannot be created: the first one is deleted again, no instance, the restore itself succeeds.
@@ -1697,7 +1725,7 @@ sys.exit(rc)
         self.assertEqual((state["volumes"][new_id]["status"], state["volumes"][new_id]["os-vol-tenant-attr:tenant_id"]),
                          ("available", fake_director.CUSTOMER_PROJECT))
         self.assertNotIn([fake_director.ADMIN_USER, fake_director.CUSTOMER_PROJECT, "member"], state["roles"])
-        item = client.get(f"/restore/api/history/{r.get_json()['history_id']}").get_json()["item"]
+        item = self.history(client, r.get_json()['history_id'])["item"]
         self.assertEqual(item["status"], "success")
         self.assertTrue(item["post_result"].startswith("failed: Creating the ports failed: port 2 (net-db)"), item["post_result"])
         # 2) The instance goes to ERROR: it is kept for troubleshooting with the fault message.
@@ -1736,7 +1764,7 @@ sys.exit(rc)
         self.assertEqual(r.status_code, 200, r.get_json())
         job = self.wait(client, r.get_json()["job_id"])
         self.assertEqual(job["status"], "success", job["error"])
-        return job, client.get(f"/restore/api/history/{r.get_json()['history_id']}").get_json()["deletion"]
+        return job, self.history(client, r.get_json()['history_id'])["deletion"]
 
     def check_deletion(self, client, deletion_id):
         r = client.post(f"/restore/api/deletions/{deletion_id}/check", json={})
@@ -1998,7 +2026,7 @@ sys.exit(rc)
         r = self.restore(admin, plan_id, schedule_delete=True)
         job = self.wait(admin, r.get_json()["job_id"])
         self.assertEqual(job["status"], "success", job["error"])
-        d = admin.get(f"/restore/api/history/{r.get_json()['history_id']}").get_json()["deletion"]
+        d = self.history(admin, r.get_json()['history_id'])["deletion"]
         self.assertEqual(operator.post(f"/restore/api/deletions/{d['id']}/postpone", json={"hours": 24}).status_code, 403)
         self.assertEqual(admin.post(f"/restore/api/deletions/{d['id']}/postpone", json={"hours": 5}).status_code, 400)
         item = admin.post(f"/restore/api/deletions/{d['id']}/postpone", json={"hours": 24}).get_json()["item"]
@@ -2013,7 +2041,7 @@ sys.exit(rc)
         plan_id, plan = self.plan(admin)
         r = self.restore(admin, plan_id)
         self.wait(admin, r.get_json()["job_id"])
-        self.assertIsNone(admin.get(f"/restore/api/history/{r.get_json()['history_id']}").get_json()["deletion"])
+        self.assertIsNone(self.history(admin, r.get_json()['history_id'])["deletion"])
 
     def test_failed_lun_move_stops_before_cinder_manage(self):
         client = self.client()
@@ -2070,7 +2098,7 @@ sys.exit(rc)
         self.assertEqual(state["volumes"][new_id]["os-vol-tenant-attr:tenant_id"], fake_director.ADMIN_PROJECT)
         self.assertNotIn([fake_director.ADMIN_USER, fake_director.CUSTOMER_PROJECT, "member"], state["roles"])
         self.assertTrue(job["result"]["transfer"]["role_removed"])
-        item = client.get(f"/restore/api/history/{r.get_json()['history_id']}").get_json()["item"]
+        item = self.history(client, r.get_json()['history_id'])["item"]
         self.assertEqual((item["status"], item["new_volume_id"]), ("failed", new_id))
 
     def test_used_stops_below_existing_then_continues_as_stable(self):

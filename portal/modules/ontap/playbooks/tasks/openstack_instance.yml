@@ -1,0 +1,137 @@
+# After the restore (boot volume): a new instance in the target project that boots from the restored volume, with the
+# settings of the old instance (new_instance from discover.yml): flavor, AZ, properties, config drive, and one new port
+# per old port in the same network and subnet, with the same security group and vNIC type. The IP is new (the old
+# instance keeps its IP); port security is always on when a port has an IP, so the copy cannot use the IP of the old
+# instance.
+# Ports are created first (--nic port-id), so the order of the network interfaces is the same as in the old instance. If
+# a port or the instance cannot be created, the ports that were already created are deleted again. An instance in ERROR
+# is left for inspection (the volume = its boot disk).
+# Restore of one instance (group): the other volumes of that instance were restored earlier (new_instance_volumes =
+# [{id, device}] in device order) and are attached when the instance is created, so the first boot already sees all
+# disks (an /etc/fstab entry for a data disk can stop the boot if that disk is attached only afterwards).
+- name: Set the new instance name
+  ansible.builtin.set_fact:
+    new_instance_name_final: "{{ new_instance_name | default('', true) or new_instance.default_name }}"
+    new_port_ids: []
+    new_server_id: ""
+    extra_volumes: "{{ new_instance_volumes | default([], true) }}"
+
+- name: Validate the new instance
+  ansible.builtin.assert:
+    that:
+      - new_instance.possible
+      - new_instance_name_final is match('^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$')
+    fail_msg: >-
+      {{ ('A new instance cannot be created: ' ~ new_instance.reason) if not new_instance.possible
+         else 'Invalid instance name: ' ~ new_instance_name_final }}
+    quiet: true
+
+- name: "OpenStack: the other restored volumes of the instance"
+  ansible.builtin.include_tasks: openstack_batch.yml
+  vars:
+    osb_label: "read {{ extra_volumes | length }} restored volume(s) for instance {{ new_instance_name_final }}"
+    osb_commands: "{{ extra_volumes | map(attribute='id') | show_commands('volume', 'xv') }}"
+  when: extra_volumes | length > 0
+
+- name: Verify the other restored volumes can be attached
+  vars:
+    problems: "{{ extra_volumes | extra_volume_problems(osb | batch_objects('xv'), target_project) }}"
+  ansible.builtin.assert:
+    that: problems | length == 0
+    fail_msg: "The other restored volumes cannot be attached to the new instance: {{ problems | join('; ') }}."
+    quiet: true
+  when: extra_volumes | length > 0
+
+- name: Create the ports and the instance
+  block:
+    - name: "OpenStack: create ports for instance {{ new_instance_name_final }}"
+      ansible.builtin.include_tasks: openstack_batch.yml
+      vars:
+        osb_label: "create {{ new_instance.ports | length }} port(s) for instance {{ new_instance_name_final }}"
+        osb_commands: "{{ new_instance.ports | port_create_commands(new_instance_name_final, project_env) }}"
+
+    - name: Save the new ports
+      ansible.builtin.set_fact:
+        new_port_ids: "{{ (osb | created_ports(new_instance.ports)).ids }}"
+        new_port_failed: "{{ (osb | created_ports(new_instance.ports)).failed }}"
+
+    - name: Verify all ports were created
+      ansible.builtin.assert:
+        that: new_port_failed | length == 0
+        fail_msg: "Creating the ports failed: {{ new_port_failed | join('; ') }}"
+        quiet: true
+
+    - name: "OpenStack: create instance {{ new_instance_name_final }}"
+      ansible.builtin.include_tasks: openstack_cmd.yml
+      vars:
+        os_label: >-
+          create instance {{ new_instance_name_final }} from volume {{ new_volume_id }}{{
+          (' with ' ~ (extra_volumes | length) ~ ' more volume(s)') if extra_volumes | length > 0 else '' }}
+        os_command: >-
+          {{ project_env }} openstack server create
+          {{ new_instance | server_create_args(new_volume_id, new_port_ids, new_instance_name_final,
+                                               {'restore_source_server': new_instance.source_id, 'restore_source_volume': volume_id,
+                                                'restore_snapshot': snapshot}, extra_volumes) }} -f json
+
+    - name: Read the new instance ID
+      ansible.builtin.set_fact:
+        new_server_id: "{{ (os_out.stdout | extract_json).id }}"
+
+  rescue:
+    - name: Save the reason
+      ansible.builtin.set_fact:
+        instance_create_error: "{{ ansible_failed_result.msg | default('no message') | trim }}"
+
+    - name: Delete the ports created for the new instance
+      ansible.builtin.include_tasks:
+        file: openstack_cmd.yml
+        apply:
+          ignore_errors: true
+      vars:
+        os_label: "delete {{ new_port_ids | length }} port(s) created for instance {{ new_instance_name_final }}"
+        os_command: "openstack port delete {{ new_port_ids | map('quote') | join(' ') }}"
+      when: new_port_ids | length > 0 and new_server_id | length == 0
+
+    - name: Creating the instance failed
+      ansible.builtin.fail:
+        msg: >-
+          {{ instance_create_error | regex_replace('[.]+$', '') }}.
+          {{ 'The ports created for it were deleted. ' if new_port_ids | length > 0 else '' }}The new volume {{ new_volume_id }} is in the project.
+
+- name: "OpenStack: wait for instance {{ new_instance_name_final }} to be active"
+  ansible.builtin.raw: "{{ director_prefix }} {{ ('source ' ~ overcloudrc ~ ' && openstack server show ' ~ (new_server_id | quote) ~ ' -f json') | quote }}"
+  delegate_to: mgmt
+  register: new_server_out
+  changed_when: false
+  until: >-
+    new_server_out.rc | default(1) == 0
+    and (new_server_out.stdout | extract_json).status | default('') | upper in ['ACTIVE', 'ERROR', 'SHUTOFF']
+  retries: "{{ (((cfg.openstack | default({})).instance_wait_seconds | default(900) | int) / 5) | round(0, 'ceil') | int }}"
+  delay: 5
+  ignore_errors: true
+  ignore_unreachable: true
+
+- name: Verify the new instance is active
+  vars:
+    server: "{{ (new_server_out.stdout | extract_json) if new_server_out.rc | default(1) == 0 else {} }}"
+  ansible.builtin.assert:
+    that: server.status | default('') | upper == 'ACTIVE'
+    fail_msg: >-
+      Instance {{ new_instance_name_final }} ({{ new_server_id }}) is {{ server.status | default('not readable') }}
+      {{- (': ' ~ (server.fault.message | default(server.fault | default('')) | string | truncate(300))) if server.fault | default('') else '' }}.
+      It is kept for troubleshooting: the new volume {{ new_volume_id }} is its boot disk, delete the instance to free the volume.
+    quiet: true
+
+- name: Record the new instance
+  vars:
+    server: "{{ new_server_out.stdout | extract_json }}"
+  ansible.builtin.set_fact:
+    post_result:
+      action: instance
+      ok: true
+      server_id: "{{ new_server_id }}"
+      server_name: "{{ new_instance_name_final }}"
+      status: "{{ server.status }}"
+      addresses: "{{ (server | instance_summary).addresses }}"
+      ports: "{{ new_port_ids }}"
+      volumes: "{{ extra_volumes | map(attribute='id') | list }}"

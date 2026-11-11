@@ -1,0 +1,48 @@
+# Reboot the VyOS and wait until SSH answers with a new boot ID (vyos_upgrade.yml: step 11 after the install, and step 5
+# when the VyOS must read a disk enlarged in OpenStack / vCenter). Vars: vr_n (the step number in the output, "11."),
+# vr_why (why it reboots), vr_fail (what to do when it does not come back).
+- name: "{{ vr_n }} Boot ID before the reboot"
+  ansible.builtin.include_tasks: vyos_step.yml
+  vars:
+    vs_label: "{{ vr_n }} Boot ID before the reboot"
+    vs_script: "{{ 'alive' | wi_vu_step({}) }}"
+
+- name: Remember the boot ID
+  ansible.builtin.set_fact:
+    vu_boot_id: "{{ vs_out.stdout | default('') | trim }}"
+
+- name: "{{ vr_n }} Reboot"
+  ansible.builtin.include_tasks: vyos_step.yml
+  vars:
+    vs_label: "{{ vr_n }} Reboot {{ host_target.name }} ({{ vr_why }}; traffic through it stops for a few minutes)"
+    vs_script: "{{ 'reboot' | wi_vu_step({}) }}"
+
+- name: Start of the wait
+  ansible.builtin.set_fact:
+    vu_up: false
+    vu_attempts: 0
+    vu_last: ""
+    vu_wait_start: "{{ now(fmt='%s') | int }}"
+
+# one attempt per item until a new boot ID or the time limit (until/retries stops at the first unreachable attempt)
+- name: "{{ vr_n }} Wait for SSH (every {{ vu.poll }} s, at most {{ (vu.wait / 60) | int }} minutes)"
+  ansible.builtin.include_tasks: vyos_wait.yml
+  loop: "{{ range(0, ((vu.wait | int) / (vu.poll | int)) | round(0, 'ceil') | int + 2) | list }}"
+  loop_control:
+    label: "attempt {{ item + 1 }}"
+
+- name: Record the wait
+  ansible.builtin.set_fact:
+    vu_steps: "{{ vu_steps + [{'command': vr_n ~ ' SSH again after the reboot (at most ' ~ ((vu.wait / 60) | int) ~ ' minutes)',
+                                 'rc': 0 if vu_up | bool else 1,
+                                 'out': ('answered after ' ~ vu_attempts ~ ' attempt(s) in ' ~ vu_waited ~ ' s, new boot ID') if vu_up | bool
+                                        else ('no answer with a new boot ID within ' ~ ((vu.wait / 60) | int) ~ ' minutes ('
+                                              ~ vu_attempts ~ ' attempt(s) in ' ~ vu_waited ~ ' s); last: ' ~ vu_last)}] }}"
+  vars:
+    vu_waited: "{{ (now(fmt='%s') | int) - (vu_wait_start | int) }}"
+
+- name: Verify the VyOS is back
+  ansible.builtin.assert:
+    that: vu_steps[-1].rc == 0
+    fail_msg: "{{ host_target.name }} did not answer SSH within {{ (vu.wait / 60) | int }} minutes after the reboot. {{ vr_fail }}"
+    quiet: true

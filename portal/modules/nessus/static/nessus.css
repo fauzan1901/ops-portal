@@ -1,0 +1,102 @@
+/* Nessus: only layout glue the shared portal styles (portal.css) do not have, taken from the other modules so the pages
+   look the same: title actions, menu counts and expandable rows of Runbook Automation (wi.css), the KPI tiles of the ACI
+   report (app.css, docs/UI-SPEC.md "KPI"), the AWX sparkline, and the PatternFly orange label for the severity High. */
+.pf-title-row .ns-title-actions { display: inline-flex; align-items: center; flex-wrap: wrap; gap: var(--pf-space-sm); margin-left: auto; }
+.ns-title-actions .pf-text-sm { color: var(--pf-text-secondary); }
+#sidebar { overflow-y: auto; }
+.pf-nav__text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.pf-nav__count { flex: none; min-width: 22px; padding: 0 6px; border-radius: var(--pf-radius-pill); background: #3c3f42; color: #d2d2d2; font-size: var(--pf-font-xs); line-height: 18px; text-align: center; }
+#ovNotice:not(:empty), #hoNotice:not(:empty), #scNotice:not(:empty), #snNotice:not(:empty) { margin-bottom: var(--pf-space-lg); }
+#hoDetail, #snDetail { margin-top: var(--pf-space-md); }
+.pf-page__section .pf-card + .pf-card { margin-top: var(--pf-space-lg); }
+.pf-l-gallery > .pf-card + .pf-card { margin-top: 0; }
+
+/* A sync running now (as the fixes running of Runbook Automation) */
+.ns-running { padding-bottom: 0; }
+
+/* Severity labels: PatternFly label colors, one per severity (Critical red, High orange, Medium gold, Low blue) */
+.pf-label.pf-m-orange { background: #fff6ec; color: #8f4700; box-shadow: inset 0 0 0 1px #f4b678; }
+.pf-label.pf-m-orange .pf-icon { color: #ec7a08; }
+@media (prefers-color-scheme: dark) {
+  .pf-label.pf-m-orange { background: #3a2410; color: #f4b678; box-shadow: inset 0 0 0 1px var(--pf-border); }
+  .pf-label.pf-m-orange .pf-icon { color: #f4b678; }
+}
+.ns-count { font-variant-numeric: tabular-nums; }
+.ns-zero { color: var(--pf-text-disabled); }
+
+/* Overview: one card per site with KPI tiles (ACI report) */
+.kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--pf-space-sm); margin-bottom: var(--pf-space-md); }
+.kpi { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: var(--pf-space-sm) var(--pf-space-md); border: 1px solid var(--pf-border); background: var(--pf-bg); color: var(--pf-text); font: inherit; text-align: left; cursor: pointer; }
+.kpi:hover { box-shadow: var(--pf-shadow-md); }
+.kpi:focus-visible { outline: 2px solid var(--pf-primary); outline-offset: 1px; }
+.kpi-value { font-family: var(--pf-font-heading); font-size: var(--pf-font-2xl); font-variant-numeric: tabular-nums; line-height: 1.2; }
+.kpi-label { color: var(--pf-text-secondary); font-size: var(--pf-font-sm); }
+.kpi.is-critical .kpi-value { color: var(--pf-danger); }
+.kpi.is-high .kpi-value { color: var(--pf-orange-text, #8f4700); }
+.ns-site-head { display: flex; align-items: center; gap: var(--pf-space-sm); }
+.ns-site-head .pf-card__title { margin: 0; }
+.ns-site-card .pf-dl { font-size: var(--pf-font-sm); }
+.ns-site-card .pf-dl.pf-m-horizontal { grid-template-columns: max-content minmax(0, 1fr); }
+.kpi.is-zero .kpi-value { color: var(--pf-text-disabled); }
+@media (max-width: 1200px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* Trend: one bar per sync, oldest left (the Activity sparkline of AWX, as in Runbook Automation) */
+.ns-spark { display: inline-flex; align-items: flex-end; gap: 2px; height: 28px; vertical-align: middle; }
+.ns-spark span { display: block; width: 6px; min-height: 2px; border-radius: 1px; background: var(--pf-text-disabled); }
+.ns-spark span.is-last { background: var(--pf-primary); }
+
+/* Expandable rows (PatternFly Table, expandable; as the checks of Runbook Automation) */
+.ns-table td.ns-toggle-col { width: 1%; padding-right: 0; }
+.ns-table tr.ns-row { cursor: pointer; }
+.ns-table tr.ns-row:hover td { background: var(--pf-bg-hover); }
+.ns-table tr.ns-row.is-expanded td { border-bottom: 0; }
+.ns-table tr.ns-detail td { padding-top: 0; padding-bottom: var(--pf-space-lg); }
+.ns-table tr.ns-detail .pf-dl { font-size: var(--pf-font-sm); }
+.ns-table tr.ns-detail .pf-code-block { max-height: 320px; overflow: auto; }
+.ns-table .ns-name { font-weight: 500; overflow-wrap: break-word; }
+.ns-table td.ns-nowrap, .ns-table th.ns-nowrap { white-space: nowrap; }
+.pf-table__toggle { display: inline-grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: var(--pf-radius); background: none; color: var(--pf-text-secondary); cursor: pointer; }
+.pf-table__toggle:hover { color: var(--pf-text); }
+.pf-table__toggle:focus-visible { outline: 2px solid var(--pf-primary); outline-offset: -2px; }
+.pf-table__toggle .pf-icon { transition: transform 150ms ease-in-out; }
+.pf-table__toggle[aria-expanded="true"] .pf-icon { transform: rotate(90deg); }
+.ns-hosts { display: flex; flex-wrap: wrap; gap: var(--pf-space-xs) var(--pf-space-md); margin: 0; padding: 0; list-style: none; }
+.ns-hosts a { font-family: var(--pf-font-mono); font-size: 13px; }
+
+/* the dialog of a launch / stop / verify */
+#sdRisk:not(:empty) { margin-bottom: var(--pf-space-md); }
+#sdWhere .pf-dl { margin-bottom: var(--pf-space-md); }
+#sdWhere .pf-code-block { margin: 0; max-height: 120px; overflow: auto; }
+#sdError { margin-top: var(--pf-space-md); }
+
+/* How to fix it: the numbered steps, "run on" label, command block with a copy button and vendor links of Runbook
+   Automation's How to fix it (wi.css .wi-rec, .wi-cmd), with the versions as a compact table */
+.ns-fix { margin: 0 0 var(--pf-space-md); padding: var(--pf-space-md); border: 1px solid var(--pf-border-light); background: var(--pf-bg); }
+.ns-fix__head { display: flex; align-items: center; flex-wrap: wrap; gap: var(--pf-space-sm); margin-bottom: var(--pf-space-sm); }
+.ns-fix__title { margin: 0; font-family: var(--pf-font-heading); font-size: var(--pf-font-md); font-weight: 500; }
+.ns-fix__facts { display: inline-flex; flex-wrap: wrap; gap: var(--pf-space-xs); }
+.ns-fix__shell, .ns-shell { display: inline-flex; align-items: center; flex-wrap: wrap; gap: var(--pf-space-sm); margin-left: auto; }
+.ns-fix__lead { margin-bottom: var(--pf-space-sm); }
+.ns-fix__versions { margin: 0 0 var(--pf-space-md); }
+.ns-fix__versions .pf-table { font-size: var(--pf-font-xs); }
+.ns-fix__versions .pf-table th, .ns-fix__versions .pf-table td { padding: 4px 8px; }
+.ns-rec + .ns-rec { margin-top: var(--pf-space-md); padding-top: var(--pf-space-md); border-top: 1px solid var(--pf-border-light); }
+.ns-rec__head { display: grid; grid-template-columns: 24px 1fr; gap: var(--pf-space-sm); align-items: start; }
+.ns-rec__num { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: var(--pf-bg-muted); box-shadow: inset 0 0 0 1px var(--pf-border); font-size: var(--pf-font-xs); font-weight: 700; }
+.ns-rec__title { margin-bottom: var(--pf-space-sm); }
+.ns-rec__where { margin: 0 0 var(--pf-space-sm) 32px; }
+.ns-rec__where .pf-label { white-space: normal; text-align: left; }
+.ns-cmd { position: relative; margin-left: 32px; }
+.ns-cmd .pf-code-block { padding-right: 44px; }
+.ns-cmd [data-copy] { position: absolute; top: 4px; right: 4px; }
+.ns-fix__notes { margin: var(--pf-space-md) 0 0; padding-left: 20px; color: var(--pf-text-secondary); font-size: var(--pf-font-sm); }
+.ns-fix__tenable { margin-top: var(--pf-space-md); padding: var(--pf-space-sm) var(--pf-space-md); border-left: 3px solid var(--pf-border); background: var(--pf-bg-muted); font-size: var(--pf-font-sm); }
+.ns-fix__tenable p { margin: 2px 0 0; }
+.ns-rec__refs { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px var(--pf-space-md); margin-top: var(--pf-space-sm); font-size: var(--pf-font-xs); }
+.ns-rec__refs .pf-icon { width: 12px; height: 12px; margin-left: 3px; vertical-align: -1px; }
+.ns-details-title { margin: var(--pf-space-md) 0 var(--pf-space-sm); }
+
+/* Networks seen (administrators, Overview): a suggestion for sites.yml, laid out like a step of How to fix it */
+.ns-seen { margin-top: var(--pf-space-md); padding-top: var(--pf-space-md); border-top: 1px solid var(--pf-border-light); }
+.ns-seen p { margin-bottom: var(--pf-space-sm); }
+.ns-seen .ns-cmd { margin-left: 0; }

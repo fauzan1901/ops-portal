@@ -1,0 +1,31 @@
+# One attempt of the wait after the reboot of a VyOS (vyos_upgrade.yml loops over this file): SSH, read the boot ID, then
+# a pause. A loop of attempts, not until/retries: Ansible does not retry a host that is unreachable (the VyOS while it
+# boots), so until/retries ended at the first attempt that found it down.
+# Vars: vu (wait, poll seconds), vu_boot_id (before the reboot), vu_wait_start (epoch seconds), vu_up, vu_attempts, vu_last.
+- name: One attempt
+  when: not (vu_up | bool) and (now(fmt='%s') | int) - (vu_wait_start | int) < (vu.wait | int)
+  block:
+    - name: Boot ID now
+      ansible.builtin.raw: "{{ (host_prefix ~ ' ' ~ ('alive' | wi_vu_step({}) | quote)) if host_prefix | default('') else ('alive' | wi_vu_step({})) }}"
+      delegate_to: wi_target
+      register: vu_alive
+      changed_when: false
+      failed_when: false
+      ignore_unreachable: true
+      timeout: 60
+
+    - name: A new boot ID?
+      ansible.builtin.set_fact:
+        vu_attempts: "{{ vu_attempts | int + 1 }}"
+        vu_up: >-
+          {{ not (vu_alive.unreachable | default(false)) and vu_alive.rc | default(1) == 0
+             and (vu_alive.stdout | default('') | trim | length) > 0 and (vu_alive.stdout | default('') | trim) != vu_boot_id }}
+        vu_last: >-
+          {{ 'the same boot ID: not rebooted yet' if (vu_alive.stdout | default('') | trim) == vu_boot_id else
+             (((vu_alive.msg | default('')) ~ ' ' ~ (vu_alive.stderr | default(''))) | trim | truncate(300)) }}
+
+    - name: Pause before the next attempt
+      ansible.builtin.wait_for:
+        timeout: "{{ vu.poll | int }}"
+      delegate_to: localhost
+      when: not (vu_up | bool)

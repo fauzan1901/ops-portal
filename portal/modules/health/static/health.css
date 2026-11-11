@@ -1,0 +1,75 @@
+/* Status: only layout glue the shared portal styles (portal.css) do not have, taken from the other modules so the page
+   looks the same: the title actions and the KPI tiles of Nessus (from the ACI report, docs/UI-SPEC.md "KPI"), the
+   expandable rows of Runbook Automation → Checks (wi.css .pf-table__toggle, ck-row / ck-detail). */
+.pf-title-row .hc-title-actions { display: inline-flex; align-items: center; flex-wrap: wrap; gap: var(--pf-space-sm); margin-left: auto; }
+.hc-title-actions .pf-text-sm { color: var(--pf-text-secondary); }
+#sidebar { overflow-y: auto; }
+.pf-nav__text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+#hcNotice:not(:empty) { margin-bottom: var(--pf-space-lg); }
+
+/* Summary: one card per product (status, counts); a click shows what is not healthy */
+.hc-card { border-top: 3px solid var(--pf-border); }
+.hc-card.is-ok { border-top-color: var(--pf-success, #3e8635); }
+.hc-card.is-warn { border-top-color: var(--pf-warning, #f0ab00); }
+.hc-card.is-problem { border-top-color: var(--pf-danger, #c9190b); }
+.hc-card.is-running { border-top-color: var(--pf-info, #2b9af3); }
+.hc-card.is-clickable { cursor: pointer; }
+.hc-card.is-clickable:hover { box-shadow: var(--pf-shadow-md); }
+.hc-card.is-clickable:focus-visible { outline: 2px solid var(--pf-primary); outline-offset: 2px; }
+.hc-card.is-selected { box-shadow: inset 0 0 0 2px var(--pf-primary); }
+.hc-card .pf-card__header { display: flex; align-items: center; gap: var(--pf-space-sm); }
+.hc-card .pf-card__title { flex: 1; min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.hc-card .pf-card__actions { flex: none; }
+.hc-card-foot { display: flex; align-items: center; flex-wrap: wrap; gap: var(--pf-space-sm); font-size: var(--pf-font-sm); }
+.hc-card-foot .pf-icon { margin-right: 4px; vertical-align: -2px; }
+.hc-link { display: inline-flex; align-items: center; gap: 4px; color: var(--pf-link, var(--pf-primary)); font-weight: 600; }
+.hc-card.is-selected .hc-link .pf-icon { transform: rotate(90deg); }
+.hc-ok { color: var(--pf-success-text, #3e8635); }
+
+.kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--pf-space-sm); margin-bottom: var(--pf-space-md); }
+.kpi { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; padding: var(--pf-space-sm); border: 1px solid var(--pf-border); background: var(--pf-bg); color: var(--pf-text); }
+.kpi-value { font-family: var(--pf-font-heading); font-size: var(--pf-font-2xl); font-variant-numeric: tabular-nums; line-height: 1.2; }
+.kpi-label { color: var(--pf-text-secondary); font-size: var(--pf-font-sm); line-height: 1.3; overflow-wrap: normal; word-break: normal; hyphens: none; }   /* whole words only ("Problem", not "Proble m") */
+.kpi.is-critical .kpi-value { color: var(--pf-danger); }
+.kpi.is-high .kpi-value { color: var(--pf-orange-text, #8f4700); }
+.kpi.is-ok .kpi-value { color: var(--pf-success-text, #3e8635); }
+.kpi.is-zero .kpi-value { color: var(--pf-text-disabled); }
+@media (max-width: 480px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* The product clicked: its checks that are not healthy, each row opens on its detail */
+.hc-detail-section { margin-top: var(--pf-space-lg); scroll-margin-top: var(--pf-space-lg); }
+.hc-detail-section .pf-card__header { display: flex; align-items: center; gap: var(--pf-space-sm); }
+.hc-detail-section .pf-card__title { flex: 1; min-width: 0; margin: 0; }
+.hc-table { table-layout: fixed; }   /* the detail of a row wraps inside the card, never wider than it */
+.hc-table td { vertical-align: top; }
+.hc-table .hc-toggle-col { width: 48px; }
+.hc-table .hc-col-status { width: 160px; white-space: nowrap; }
+.hc-table .hc-col-when { width: 130px; white-space: nowrap; }
+.hc-table .hc-col-check, .hc-table .hc-detail-cell { overflow-wrap: anywhere; }
+@media (max-width: 720px) {
+  .hc-table .hc-col-when { display: none; }
+  .hc-table .hc-col-status { width: 136px; }
+  .hc-table .hc-toggle-col { width: 36px; }
+}
+.hc-table tr.hc-row { cursor: pointer; }
+.hc-table tr.hc-row:hover td { background: var(--pf-bg-hover); }
+.hc-table tr.hc-row.is-expanded td { border-bottom: 0; }
+.hc-table tr.hc-detail td { padding-top: 0; padding-bottom: var(--pf-space-lg); }
+.pf-table__toggle { display: inline-grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: var(--pf-radius); background: none; color: var(--pf-text-secondary); cursor: pointer; }
+.pf-table__toggle:hover { color: var(--pf-text); }
+.pf-table__toggle:focus-visible { outline: 2px solid var(--pf-primary); outline-offset: -2px; }
+.pf-table__toggle .pf-icon { transition: transform 150ms ease-in-out; }
+.pf-table__toggle[aria-expanded="true"] .pf-icon { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .pf-table__toggle .pf-icon { transition: none; } }
+
+.hc-blocks { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: var(--pf-space-md) var(--pf-space-xl, 32px); }
+.hc-block { min-width: 0; }
+.hc-h { margin: 0 0 var(--pf-space-xs, 4px); font-size: var(--pf-font-sm); font-weight: 700; }
+.hc-list { margin: 0; padding-left: 1.2em; }
+.hc-list li { margin: 4px 0; overflow-wrap: anywhere; }
+.hc-list a { overflow-wrap: anywhere; }
+.hc-sub { display: block; color: var(--pf-text-secondary); font-size: var(--pf-font-sm); }
+.hc-open-run { margin: var(--pf-space-md) 0 0; }
+.hc-rest { border-top: 1px solid var(--pf-border); }
+.hc-rest-line { margin: 0 0 var(--pf-space-xs, 4px); font-size: var(--pf-font-sm); color: var(--pf-text-secondary); overflow-wrap: anywhere; }
+.hc-rest-line .pf-label { margin-right: 4px; }

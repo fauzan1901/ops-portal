@@ -1,0 +1,96 @@
+# Portal modules: contract
+
+Every tool of the Ops Portal is a **module**: a Python package under `portal/modules/<id>/` that the portal
+loads as a Flask blueprint (see `app.py`, `core.py`, decision in `docs/ADR-003-one-portal.md`). The portal owns the
+sign-in, users, module access, Administration (Users, Credentials, Activity) and the application launcher; a module
+owns its own pages, API, playbooks and tables.
+
+| Module | id | URL | Comes from |
+|---|---|---|---|
+| Runbook Automation | `wi` | `/runbook/` | new |
+| Snapshot Restore | `ontap` | `/restore/` | `snapshot_restore/` |
+| ACI | `aci` | `/fabric/` | `fabric_ui/` |
+| Shell | `shell` | `/terminal/` | new (needs `wi`: its hosts and SSH credentials) |
+| Nessus | `nessus` | `/vulns/` | new (Tenable Vulnerability Management; `docs/NESSUS.md`) |
+| Status | `health` | `/status/` | new (needs `wi`: its checks run as user `health` every 4 h; `docs/HEALTH.md`) |
+
+## Files that belong to the portal (a module never edits them)
+
+`app.py`, `core.py`, `settings.py`, `sites.py`, `jobs.py`, `portal_auth.py`, `templates/shell.html`,
+`templates/_sprite.html`, `static/portal.css`, `static/shell.js`, `static/switcher.css`, `static/switcher.js`,
+`static/guide.js`, `static/guide.css`, `static/fonts/`. A module that needs a change there says so instead.
+
+## Python side
+
+```python
+from flask import Blueprint
+from core import PORTAL, register
+import settings, sites
+
+blueprint = Blueprint("<id>", __name__, url_prefix="/<id>", template_folder="templates",
+                      static_folder="static", static_url_path="/static")
+register("<id>", "<Title>", "<one-line description>", "/<id>/", "<icon: checklist|database|network|terminal|lock>",
+         targets=<fn -> [{"name", "label", "host", "kind", "site"}]>, tester=<fn(target, user, password) -> message>,
+         on_credential_change=<fn(name)>, running_jobs=<fn -> list of running jobs>, explicit=<bool>,
+         permissions=<[{"id", "title"}]: rights inside the module, ticked one by one on the Users page>)
+```
+
+- **explicit=True** (Shell): the module itself is never part of "all modules" on the Users page; it must be ticked.
+- **Access.** Every view of the module calls `PORTAL.require("<id>")` (signed in *and* allowed to use the module;
+  raises `portal_auth.NotSignedIn` → 401 or `portal_auth.Forbidden` → 403). Administrator-only actions call
+  `PORTAL.admin()`. A module never calls `PORTAL.install()` (the portal already serves `/api/login`, `/api/logout`,
+  `/auth/...`, `/api/admin/...`, `/export/events.csv`).
+- **Routes.** Everything of the module lives under its prefix: page `/<id>/`, API `/<id>/api/...`, files
+  `/<id>/export/...`, static `/<id>/static/...`. `/<id>/api/session` returns the module's session payload:
+  `{"ui_version", **PORTAL.payload(), "allowed": <bool>, ...module data such as sites}`; it never fails with 403, so the
+  page can show "no access" itself.
+- **Service accounts.** Target names keep their old form (`apic:DCB`, `ontap:DCB`); Runbook Automation uses `ro-<kind>:<site>`.
+  `PORTAL.credential(name)` returns `{"username", "password"}`.
+- **Database.** One SQLite file for everything: `settings.DB_PATH`. Table names must not collide; the portal uses
+  `portal_users`, `portal_local_users`, `portal_events`, `service_credentials`. Module tables: ONTAP `restores`,
+  `restore_groups`, `deletions`; ACI `aci_*`; Runbook Automation `wi_runs`, `wi_actions`, `wi_alert_*`; Shell `shell_sessions`, `shell_snippets`;
+  Nessus `nessus_findings`, `nessus_syncs`, `nessus_trend`, `nessus_meta`; Status `health_rounds`, `health_items`.
+- **Sites.** `sites.sites()` (re-read when sites.yml changes) and `sites.get(name)`. Keys per site: `apic` (ACI),
+  `ontap`, `mgmt`, `director`, `openstack` (Snapshot Restore and Runbook Automation), `vcenter`, `vcd`, `nsxt`, `hosts` (Runbook Automation),
+  `tenable` (Nessus: `scanner` and the management `networks` its scans may cover).
+- **Ansible.** `jobs.Jobs(playbook_dir, timeouts)`; `start(kind, params, secrets={...env...}, key=..., owner=...)`.
+  The playbook gets `-e @<sites.yml> -e @<vars.json>` and writes `{"ok": ..., "error": ...}` to `result_file`.
+- **Activity.** `PORTAL.store.event(actor, action, target, detail, client)` with actions named `<area>.<what>`
+  (e.g. `restore.start`, `static_port.applied`, `wi.ok`) — the Users page filters and colours them.
+
+## Browser side
+
+The UI of a module stays what it was (same HTML, CSS and JS, PatternFly v5 look like AWX, `docs/UI-SPEC.md`).
+Only these changes:
+
+1. Masthead: `<div id="portalLauncher" data-current="<id>"></div>` just before the user menu, plus
+   `<link rel="stylesheet" href="/static/switcher.css">` and `<script src="/static/switcher.js"></script>`
+   (PatternFly application launcher, as in the OpenShift console masthead).
+2. No sign-in form in the module: without a session (no `user`, or a 401) the page calls `PortalLauncher.signIn()`,
+   which opens the portal sign-in and comes back afterwards.
+3. Signed in but `allowed` is false: a PatternFly empty state "No access to <Title>" with a link to the portal home.
+4. No Users / Credentials pages in the module: for administrators the sidebar section "Administration" links to
+   `/#/users` and `/#/credentials` on the portal.
+5. Sign out: `POST /api/logout`, then `location.assign('/')`.
+6. Every request of the module goes to `/<id>/...` (one `BASE` constant), fonts come from `/static/fonts/`.
+7. Guides: every page ends with a fold "Guide: …" that shows with an animation how the page is used, on a copy of the
+   page as it is now (`static/guide.js` + `static/guide.css` of the portal: `PortalGuide.mount({<page>: {title, width?,
+   build()}}, {page: name => element})`). The guides of a module are in `static/guides.js` of the module and are built
+   with the module's own markup functions (rows, dialogs, plans), so they follow the page; a guide only reads (the same
+   GET requests as the page) and never sends a change. When a page, its ids or its dialogs change, check its guide.
+   A page with steps can have a guide per part: `{page: '<page>', when: () => <applies now>}` on each guide, and the page
+   calls `PortalGuide.refresh()` when its state changes (Snapshot Restore: one guide for Volume, Snapshot and Target
+   project, one for the Review step). The miniature is drawn wider (smaller) when a table would not fit, so nothing is
+   cut; logs and code blocks that scroll sideways on the page do not count.
+
+## Tests
+
+`portal/tests/test_<id>.py` (stdlib `unittest`), run from `portal/`:
+
+```
+.venv/bin/python -m unittest tests.test_<id> -v
+```
+
+Set `OPS_SITES`, `OPS_DATA`, `OPS_DB`, `OPS_AUTH`, `OPS_CREDENTIALS_KEY` (and `OPS_MODULES=<id>`
+when only this module is needed) before `import app`. Fakes and mocks live in `portal/tests/` (`fake_ldap.py`,
+`fake_duo.py`, `fake_sso.py` are shared).

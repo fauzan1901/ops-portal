@@ -1,0 +1,299 @@
+# Presets of alert rules (Runbook Automation -> Alerts): the rules of the alerts that may come.
+#
+# Create rule on a received alert fills the form from the FIRST preset (in this order) whose alert name patterns
+# (any one of them, * any text, any case) and labels (every one, a regular expression of the whole value, any case)
+# fit the alert; Add rule -> Start from a preset fills it with the preset's first pattern. Nothing is saved by a
+# preset: an administrator reads the form and saves it (alerts.clean_rule checks it as any rule).
+#
+#   rule.site       a site, or a label ({{labels.site}}: "dca" -> DCA)
+#   rule.checks     check id (Checks that can run from an alert) and parameters ({{labels.nodename}},
+#                   {{labels.instance|host}} as in a rule)
+#   action          (optional) the automatic action of that check: fix = a text of the title of the fix the check
+#                   offers (any case); it is filled only when that fix was seen in a run of the portal, observe only.
+#                   order smallest first (the RAM of the flavor), at most max_items per alert, measured by check
+#                   number measure (0 = Check 1) with its thresholds (mem_warn, cpu_warn: % of the node)
+#
+# Order matters: hardware before memory ("Memory ECC error" is not a full memory), the OpenStack computes (their
+# nodename) before the CDN and the Linux hosts, the Linux hosts last. tests/test_wi_alerts.py checks every preset.
+presets:
+  - id: hardware
+    title: "Hardware: DIMM, power, fan, temperature, BMC"
+    help: "Reads the BMC event log and sensors. Nothing is moved by itself: a hardware fault needs a person."
+    alertname: ["*hardware*", "*dimm*", "*memory error*", "*ecc error*", "*psu*", "*power supply*", "*fan fail*", "*temperature*", "*bmc*", "*ipmi*", "*idrac*"]
+    rule:
+      site: "{{labels.site}}"
+      checks:
+        - check: bmc-health
+          params: {bmc: "{{labels.instance|host}}"}
+
+  - id: openstack-compute-memory
+    title: "OpenStack compute: memory high (live migrate, smallest first)"
+    help: >-
+      Check 1 measures the compute (memory % of the node), Check 2 lists its instances. The automatic action
+      live-migrates the smallest instance first, one at a time, measuring after each, until the memory of the compute
+      is under the threshold (mem_warn), at most 5 per alert. Observe only until you switch it to Run (Run needs the
+      owner's approval: an OpenStack change).
+    alertname: ["*memory*", "*mem *", "*mem_*", "*_mem*", "* ram*", "*_ram*"]
+    labels: {nodename: "(?i).*compute.*"}
+    rule:
+      site: "{{labels.site}}"
+      checks:
+        - check: overcloud-node-health
+          params: {role: compute, node: "{{labels.nodename}}", mem_warn: "80"}
+        - check: compute-drain
+          params: {compute: "{{labels.nodename}}"}
+          action: {fix: "live-migrate the instances you tick off", label: "Live-migrate instances off the compute",
+                   order: smallest, max_items: 5, measure: 0, thresholds: {mem_warn: "80"}}
+
+  - id: openstack-compute-cpu
+    title: "OpenStack compute: CPU high (live migrate, smallest first)"
+    help: >-
+      As the memory preset, measured on the CPU: the smallest instance first, one at a time, until the CPU of the
+      compute is under the threshold (cpu_warn), at most 5 per alert. Observe only until you switch it to Run.
+    alertname: ["*cpu*", "*load average*", "*system load*", "*load_*"]
+    labels: {nodename: "(?i).*compute.*"}
+    rule:
+      site: "{{labels.site}}"
+      checks:
+        - check: overcloud-node-health
+          params: {role: compute, node: "{{labels.nodename}}", cpu_warn: "80"}
+        - check: compute-drain
+          params: {compute: "{{labels.nodename}}"}
+          action: {fix: "live-migrate the instances you tick off", label: "Live-migrate instances off the compute",
+                   order: smallest, max_items: 5, measure: 0, thresholds: {cpu_warn: "80"}}
+
+  - id: openstack-controller-resources
+    title: "OpenStack controller: memory or CPU high"
+    help: "Reads the controller and the cluster. Nothing moves by itself on a controller."
+    alertname: ["*memory*", "*mem *", "*mem_*", "*_mem*", "*cpu*", "*load average*", "*system load*", "*load_*"]
+    labels: {nodename: "(?i).*controller.*"}
+    rule:
+      site: "{{labels.site}}"
+      checks:
+        - check: overcloud-node-health
+          params: {role: controller, node: "{{labels.nodename}}"}
+        - check: pacemaker-health
+
+  - id: compute-storage-paths
+    title: "OpenStack compute: disk paths, iSCSI, I/O errors"
+    help: "Reads the multipath maps and the kernel errors of the compute (which LUN, which instance). Re-scans the lost paths of up to 4 disks (each WWID checked), measured again. Observe only until you switch it to Run. Moving leftover instance directories stays for a person."
+    alertname: ["*multipath*", "*iscsi*", "*i/o error*", "*io error*", "*scsi*"]
+    labels: {nodename: "(?i).*compute.*"}
+    rule:
+      site: "{{labels.site}}"
+      checks:
+        - check: compute-disks
+          params: {compute: "{{labels.nodename}}"}
+          action: {fix: "Give the disks without any path their paths back", label: "Re-scan the lost LUNs", max_items: 4, measure: 0}
+
+  - id: cdn-run
+    title: "CDN: /run full"
+    help: "Frees /run (the temporary AIDE files), measured again by the same check. Observe only until you switch it to Run."
+    alertname: ["*cdn*run*", "*run*cdn*"]
+    rule:
+      site: "{{labels.site}}"
+      checks:
+        - check: cdn-disk-run
+          params: {host: "{{labels.instance|host}}"}
+          action: {fix: "temporary aide files", label: "Delete the temporary AIDE files on /run", measure: 0}
+
+  - id: cdn-root
+    title: "CDN: root disk full"
+    help: "Empties the HAProxy log with truncate (the file stays), measured again by the same check. Observe only until you switch it to Run."
+    alertname: ["*cdn*root*", "*cdn*disk*", "*cdn*filesystem*", "*cdn*space*"]
+    rule:
+      site: "{{labels.site}}"
+      checks:
+        - check: cdn-root-disk
+          params: {host: "{{labels.instance|host}}"}
+          action: {fix: "empty /var/log/haproxy.log", label: "Empty the HAProxy log", measure: 0}
+
+  - id: cdn-memory
+    title: "CDN: memory high"
+    help: "Stops the stuck logparser processes (they do not serve traffic), measured again. Restarting Varnish or lb stays for a person."
+    alertname: ["*cdn*mem*", "*cdn*ram*"]
+    rule:
+      site: "{{labels.site}}"
+      checks:
+        - check: cdn-memory
+          params: {host: "{{labels.instance|host}}"}
+          action: {fix: "stuck logparser processes", label: "Stop the stuck logparser processes", measure: 0}
+
+  - id: cdn-datasource
+    title: "CDN: no data, Prometheus or lb down"
+    help: "Reads the lb container and its Prometheus. Starts the lb container when it is stopped, measured again. Observe only until you switch it to Run. Restarting a running lb stays for a person (it carries traffic)."
+    alertname: ["*cdn*datasource*", "*cdn*prometheus*", "*cdn*no data*", "*cdn* down*", "*cdn*_down*"]
+    rule:
+      site: "{{labels.site}}"
+      checks:
+        - check: cdn-datasource
+          params: {host: "{{labels.instance|host}}"}
+          action: {fix: "Start the stopped lb container", label: "Start the stopped lb container", measure: 0}
+
+  - id: openstack-node-disk
+    title: "OpenStack node: disk or filesystem full"
+    help: "Reads the filesystems, the biggest consumers and the containers of the node."
+    alertname: ["*disk*", "*filesystem*", "*space*", "*inode*"]
+    labels: {nodename: "(?i).*(overcloud|compute|controller).*"}
+    rule:
+      site: "{{labels.site}}"
+      checks:
+        - check: overcloud-node-health
+          params: {role: all, node: "{{labels.nodename}}"}
+
+  - id: openstack-node-down
+    title: "OpenStack node: down, unreachable, no data"
+    help: "Reads the node through the director and the cluster (Pacemaker) around it."
+    alertname: ["* down*", "*_down*", "*unreachable*", "*not responding*", "*no data*", "*absent*"]
+    labels: {nodename: "(?i).*(overcloud|compute|controller).*"}
+    rule:
+      site: "{{labels.site}}"
+      checks:
+        - check: overcloud-node-health
+          params: {role: all, node: "{{labels.nodename}}"}
+        - check: pacemaker-health
+
+  - id: galera
+    title: "OpenStack database: Galera, MySQL"
+    help: "Reads the Galera cluster (wsrep) and Pacemaker. A database change is always an operator's."
+    alertname: ["*galera*", "*mysql*", "*mariadb*", "*wsrep*", "*clustercheck*"]
+    rule:
+      site: "{{labels.site}}"
+      checks:
+        - check: galera-wsrep
+        - check: pacemaker-health
+
+  - id: rabbitmq
+    title: "OpenStack messaging: RabbitMQ"
+    alertname: ["*rabbit*", "*amqp*"]
+    rule:
+      site: "{{labels.site}}"
+      checks:
+        - check: rabbitmq-queues
+        - check: pacemaker-health
+
+  - id: pacemaker
+    title: "OpenStack cluster: Pacemaker, Corosync, STONITH"
+    alertname: ["*pacemaker*", "*pcs*", "*corosync*", "*stonith*", "*fencing*"]
+    rule:
+      site: "{{labels.site}}"
+      checks:
+        - check: pacemaker-health
+
+  - id: ovn
+    title: "OpenStack network: OVN databases"
+    alertname: ["*ovn*", "*ovsdb*"]
+    rule:
+      site: "{{labels.site}}"
+      checks:
+        - check: ovn-db-cluster
+
+  - id: openstack-ip
+    title: "OpenStack: floating IP pool"
+    alertname: ["*floating*", "*ip*pool*", "*ip address*"]
+    rule:
+      site: "{{labels.site}}"
+      checks:
+        - check: openstack-services
+
+  - id: cinder-pool
+    title: "Cinder: pool usage (old snapshots first, then migrate volumes, smallest first)"
+    help: >-
+      One check measures the pool and offers both fixes. The automatic action deletes the snapshots older than 14 days,
+      volume by volume, measuring after each; while the pool is still at or above "Bring the pool under (%)" it then
+      migrates volumes one at a time, the smallest first, until the pool is under it. A volume that still has snapshots
+      is never migrated by itself (its snapshots would go too): an operator ticks it. Set "Cinder pool" to the pool of
+      the alert (fixed, or a label such as {{labels.pool}}) so only that pool is measured. Observe only until you switch
+      it to Run (Run needs the owner's approval: deleting snapshots cannot be undone).
+    alertname: ["*pool*", "*cinder*volume*", "*cinder*usage*", "*cinder*capacity*", "*backend*capacity*", "*volume*capacity*"]
+    rule:
+      site: "{{labels.site}}"
+      checks:
+        - check: cinder-pool-usage
+          params: {snapshot_days: "14", pool_warn: "70"}
+          action: {fix: "delete the snapshots older than", label: "Delete the old snapshots, volume by volume", max_items: 10,
+                   measure: 0, thresholds: {pool_warn: "70"},
+                   then: {fix: "migrate volumes from", label: "Migrate volumes, smallest first", order: smallest, max_items: 5}}
+
+  - id: openstack-api
+    title: "OpenStack: API, endpoint, HAProxy"
+    alertname: ["*api *", "*api_*", "* api*", "*endpoint*", "*haproxy*", "*keystone*", "*nova*", "*neutron*", "*cinder*", "*glance*", "*horizon*"]
+    rule:
+      site: "{{labels.site}}"
+      checks:
+        - check: openstack-services
+        - check: pacemaker-health
+
+  - id: ontap
+    title: "NetApp ONTAP: aggregate, volume, LUN, HA"
+    help: "Reads ONTAP through the portal (REST): capacity, LUN states, HA pairs."
+    alertname: ["*ontap*", "*netapp*", "*aggregate*", "*aggr_*", "*flexvol*", "* lun*", "*lun_*", "*snapmirror*"]
+    rule:
+      site: "{{labels.site}}"
+      checks:
+        - check: ontap-capacity
+        - check: ontap-volume-lun-state
+        - check: ontap-ha-redundancy
+
+  - id: certificates
+    title: "Certificates expiring"
+    help: "Reads certmonger on the overcloud nodes and the certificates of the endpoints. Resubmits up to 5 certmonger requests that expire soon (not the ones certmonger cannot renew), measured again. Observe only until you switch it to Run."
+    alertname: ["*cert*", "*ssl*", "*tls*"]
+    rule:
+      site: "{{labels.site}}"
+      checks:
+        - check: certmonger-status
+          params: {role: all}
+          action: {fix: "Renew the certificates that expire soon", label: "Resubmit the certificates that expire soon", max_items: 5, measure: 0}
+        - check: cert-expiry
+
+  - id: dns
+    title: "DNS recursor"
+    help: "Reads the recursor, its query logging and the disk. Empties /var/log/syslog (and removes its archives) when the disk is full, measured again. Observe only until you switch it to Run. Stopping the query logging (a configuration change and a restart) stays for a person."
+    alertname: ["*dns*", "*recursor*", "*pdns*"]
+    rule:
+      site: "{{labels.site}}"
+      checks:
+        - check: dns-recursor-syslog
+          params: {host: "{{labels.instance|host}}"}
+          action: {fix: "Free the disk", label: "Empty /var/log/syslog", measure: 0}
+
+  - id: siem
+    title: "SIEM: syslog collector"
+    help: "Reads rsyslog, its ports and the newest logs. Restarts rsyslog when it does not run or listen on 514, measured again. Observe only until you switch it to Run. Opening firewalld ports stays for a person."
+    alertname: ["*siem*", "*syslog*", "*rsyslog*", "*collector*"]
+    rule:
+      site: "{{labels.site}}"
+      checks:
+        - check: siem-collector
+          params: {host: "{{labels.instance|host}}"}
+          action: {fix: "rsyslog must run and listen", label: "Restart rsyslog", measure: 0}
+
+  - id: gb200
+    title: "GB200: NIC link"
+    alertname: ["*gb200*", "*nic*link*", "*infiniband*"]
+    rule:
+      site: "{{labels.site}}"
+      checks:
+        - check: gb200-nic-link
+          params: {host: "{{labels.instance|host}}"}
+
+  - id: vmware
+    title: "VMware Cloud: vCenter, ESXi, datastore (read only)"
+    help: "Reads only: VMware Cloud is never changed from the portal."
+    alertname: ["*vcenter*", "*esxi*", "*datastore*", "*vsphere*"]
+    rule:
+      site: "{{labels.site}}"
+      checks:
+        - check: vcenter-health
+        - check: vcenter-datastore
+
+  - id: linux-host
+    title: "Linux host: memory, CPU, disk (any other host)"
+    help: "Reads the memory, CPU and filesystems of the host of the alert. The last preset: the hosts no other one fits."
+    alertname: ["*memory*", "*mem *", "*mem_*", "*_mem*", "*cpu*", "*load average*", "*system load*", "*load_*", "*disk*", "*filesystem*", "*space*", "*inode*"]
+    rule:
+      site: "{{labels.site}}"
+      checks:
+        - check: linux-resources
+          params: {host: "{{labels.instance|host}}"}

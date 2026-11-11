@@ -1,0 +1,28 @@
+# vCenter inventory through the vSphere Web Services API (pyVmomi, PropertyCollector only) with the site's read-only
+# vCenter account (password only in the environment), at the address of rest_access (sites.yml or Administration ->
+# Credentials). Each item names the sets to read: hosts, vms, pools, clusters.
+# sites.yml vcenter.inventory_command replaces the reader (test mode: tests/fake_vsphere.py); it gets --what <sets>.
+- name: "Record: no vCenter access"
+  ansible.builtin.set_fact:
+    wi_data: "{{ wi_data | combine(wi_reads.vsphere | wi_skip(rest_access.vcenter.reason | default('no access'))) }}"
+  when: not (rest_access.vcenter.ok | default(false) | bool)
+
+- name: "vCenter inventory (read-only): {{ wi_reads.vsphere.values() | join(', ') }}"
+  ansible.builtin.command:
+    argv: >-
+      {{ (((cfg.vcenter | default({})).inventory_command | split) if (cfg.vcenter | default({})).inventory_command | default('') | length > 0
+          else [ansible_playbook_python, playbook_dir ~ '/files/vsphere_inventory.py', '--host', rest_access.vcenter.base]
+               + (['--verify'] if rest_access.vcenter.validate_certs | default(false) | bool else []))
+         + ['--what', item.value] }}
+  loop: "{{ wi_reads.vsphere | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: vsphere_out
+  changed_when: false
+  failed_when: false
+  when: rest_access.vcenter.ok | default(false) | bool
+
+- name: "Record: {{ wi_reads.vsphere.keys() | join(', ') }}"
+  ansible.builtin.set_fact:
+    wi_data: "{{ wi_data | combine(vsphere_out.results | wi_command_results) }}"
+  when: rest_access.vcenter.ok | default(false) | bool

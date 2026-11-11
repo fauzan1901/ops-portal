@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="ui-version" content="{{ ui_version }}">
+<title>Status</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='3' fill='%230066cc'/%3E%3Cpath d='M7 17h5l3-7 4 13 3-6h3' stroke='white' stroke-width='2.2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/portal.css">
+<link rel="stylesheet" href="/static/switcher.css">
+<link rel="stylesheet" href="{{ url_for('health.static', filename='health.css', v=ui_version) }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='guide.css', v=ui_version) }}">
+</head>
+<body>
+{% include "_sprite.html" %}
+
+<div class="pf-page" id="appView" hidden>
+  <header class="pf-masthead">
+    <button type="button" class="pf-masthead__toggle" id="navToggle" aria-label="Toggle navigation" aria-expanded="true"><svg class="pf-icon" aria-hidden="true"><use href="#i-bars"></use></svg></button>
+    <div class="pf-masthead__brand"><span class="pf-masthead__logo"><svg class="pf-icon" aria-hidden="true"><use href="#i-checklist"></use></svg></span><span><b>Status</b></span></div>
+    <div class="pf-masthead__content">
+      <div class="pf-toggle-group pf-m-dark" id="siteSwitch" role="radiogroup" aria-label="Site"></div>
+      <div id="portalLauncher" data-current="health"></div>
+      <div class="pf-masthead__user" id="userMenuWrap">
+        <button type="button" class="pf-user-toggle" id="userToggle" aria-haspopup="menu" aria-expanded="false" aria-controls="userMenu">
+          <span class="pf-avatar" id="userAvatar" aria-hidden="true"></span>
+          <span class="pf-user-toggle__name" id="userName"></span>
+          <span class="pf-label pf-m-compact" id="userRole"></span>
+          <svg class="pf-icon" aria-hidden="true"><use href="#i-caret-down"></use></svg>
+        </button>
+        <div class="pf-menu" id="userMenu" role="menu" aria-labelledby="userToggle" hidden>
+          <div class="pf-menu__header">
+            <b id="userMenuName"></b>
+            <span class="mono pf-text-secondary" id="userMenuLogin"></span>
+            <span class="pf-text-secondary pf-text-sm" id="userMenuMfa"></span>
+            <span class="pf-text-secondary pf-text-sm" id="userMenuClient"></span>
+          </div>
+          <button type="button" class="pf-menu__item" role="menuitem" id="logoutBtn"><svg class="pf-icon" aria-hidden="true"><use href="#i-sign-out"></use></svg>Sign out</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <aside class="pf-sidebar" id="sidebar">
+    <nav class="pf-nav" aria-label="Navigation">
+      <div class="pf-nav__section">Status</div>
+      <ul>
+        <li><a class="pf-nav__link is-current" href="#/overview" data-route="overview"><svg class="pf-icon" aria-hidden="true"><use href="#i-home"></use></svg><span class="pf-nav__text">Overview</span></a></li>
+        <li><a class="pf-nav__link" href="/runbook/#/runs"><svg class="pf-icon" aria-hidden="true"><use href="#i-list"></use></svg><span class="pf-nav__text">Runs (Runbook Automation)</span></a></li>
+      </ul>
+      <div class="pf-nav__section admin-only" hidden>Administration</div>
+      <ul class="admin-only" hidden>
+        <li><a class="pf-nav__link" href="/#/users"><svg class="pf-icon" aria-hidden="true"><use href="#i-users"></use></svg>Users</a></li>
+      </ul>
+      <div class="pf-nav__sites" id="navSites"></div>
+    </nav>
+  </aside>
+
+  <main class="pf-page__main">
+    <div id="page-noaccess" data-page="noaccess" hidden>
+      <section class="pf-page__section">
+        <div class="pf-card"><div class="pf-empty-state"><svg class="pf-icon" aria-hidden="true"><use href="#i-lock"></use></svg>
+          <h2 class="pf-title">No access to Status</h2>
+          <span>Your account cannot use this module. Ask an administrator to give it on the Users page.</span>
+          <a class="pf-btn pf-m-primary" href="/#/home">Back to the portal</a></div></div>
+      </section>
+    </div>
+
+    <!-- ---------- The health of one site: one card per product ---------- -->
+    <div id="page-overview" data-page="overview" hidden>
+      <section class="pf-page__section pf-m-light">
+        <div class="pf-title-row"><h1 class="pf-title">Status of <span class="site-name-current"></span></h1>
+          <span class="hc-title-actions"><span class="pf-text-sm" id="hcWhen"></span>
+            <button type="button" class="pf-btn pf-m-secondary" id="hcRun"><svg class="pf-icon" aria-hidden="true"><use href="#i-play"></use></svg>Run now</button>
+            <button type="button" class="pf-btn pf-m-plain" id="hcRefresh" aria-label="Refresh" title="Refresh"><svg class="pf-icon" aria-hidden="true"><use href="#i-refresh"></use></svg></button></span></div>
+        <p>The read-only checks of Runbook Automation for every product of the site, run by themselves every
+          <b id="hcInterval">4</b> hours (as the account <span class="mono">health</span>; nothing is changed). A product is
+          <b>Safe</b> when every check is OK. Click a product for its checks that are not healthy, and a check for what it found,
+          its recommendations and the checks to run next.</p>
+      </section>
+      <section class="pf-page__section">
+        <div id="hcNotice"></div>
+        <div class="pf-l-gallery" id="hcProducts"></div>
+        <div class="hc-detail-section" id="hcDetail" aria-live="polite" hidden></div>
+      </section>
+    </div>
+  </main>
+</div>
+<div class="pf-alert-group" id="toasts" aria-live="polite"></div>
+
+<script src="/static/switcher.js"></script>
+<script src="{{ url_for('health.static', filename='health.js', v=ui_version) }}"></script>
+<script src="{{ url_for('static', filename='guide.js', v=ui_version) }}"></script>
+<script src="{{ url_for('health.static', filename='guides.js', v=ui_version) }}"></script>
+</body>
+</html>

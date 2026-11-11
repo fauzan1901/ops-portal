@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="ui-version" content="{{ ui_version }}">
+<title>Vulnerability Scans</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='3' fill='%230066cc'/%3E%3Crect x='9' y='14' width='14' height='11' rx='2' stroke='white' stroke-width='2' fill='none'/%3E%3Cpath d='M12 14v-3a4 4 0 0 1 8 0v3' stroke='white' stroke-width='2' fill='none'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/portal.css">
+<link rel="stylesheet" href="/static/switcher.css">
+<link rel="stylesheet" href="{{ url_for('nessus.static', filename='nessus.css', v=ui_version) }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='guide.css', v=ui_version) }}">
+</head>
+<body>
+{% include "_sprite.html" %}
+
+<div class="pf-page" id="appView" hidden>
+  <header class="pf-masthead">
+    <button type="button" class="pf-masthead__toggle" id="navToggle" aria-label="Toggle navigation" aria-expanded="true"><svg class="pf-icon" aria-hidden="true"><use href="#i-bars"></use></svg></button>
+    <div class="pf-masthead__brand"><span class="pf-masthead__logo"><svg class="pf-icon" aria-hidden="true"><use href="#i-lock"></use></svg></span><span><b>Vulnerability Scans</b></span></div>
+    <div class="pf-masthead__content">
+      <div class="pf-toggle-group pf-m-dark" id="siteSwitch" role="radiogroup" aria-label="Site"></div>
+      <div id="portalLauncher" data-current="nessus"></div>
+      <div class="pf-masthead__user" id="userMenuWrap">
+        <button type="button" class="pf-user-toggle" id="userToggle" aria-haspopup="menu" aria-expanded="false" aria-controls="userMenu">
+          <span class="pf-avatar" id="userAvatar" aria-hidden="true"></span>
+          <span class="pf-user-toggle__name" id="userName"></span>
+          <span class="pf-label pf-m-compact" id="userRole"></span>
+          <svg class="pf-icon" aria-hidden="true"><use href="#i-caret-down"></use></svg>
+        </button>
+        <div class="pf-menu" id="userMenu" role="menu" aria-labelledby="userToggle" hidden>
+          <div class="pf-menu__header">
+            <b id="userMenuName"></b>
+            <span class="mono pf-text-secondary" id="userMenuLogin"></span>
+            <span class="pf-text-secondary pf-text-sm" id="userMenuMfa"></span>
+            <span class="pf-text-secondary pf-text-sm" id="userMenuClient"></span>
+          </div>
+          <button type="button" class="pf-menu__item" role="menuitem" id="logoutBtn"><svg class="pf-icon" aria-hidden="true"><use href="#i-sign-out"></use></svg>Sign out</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <aside class="pf-sidebar" id="sidebar">
+    <nav class="pf-nav" aria-label="Navigation">
+      <div class="pf-nav__section">Vulnerabilities</div>
+      <ul>
+        <li><a class="pf-nav__link" href="#/overview" data-route="overview"><svg class="pf-icon" aria-hidden="true"><use href="#i-home"></use></svg><span class="pf-nav__text">Overview</span></a></li>
+        <li><a class="pf-nav__link" href="#/findings" data-route="findings"><svg class="pf-icon" aria-hidden="true"><use href="#i-alert"></use></svg><span class="pf-nav__text">Findings</span><span class="pf-nav__count" id="navFindings" hidden></span></a></li>
+        <li><a class="pf-nav__link" href="#/hosts" data-route="hosts"><svg class="pf-icon" aria-hidden="true"><use href="#i-server"></use></svg><span class="pf-nav__text">Hosts</span><span class="pf-nav__count" id="navHosts" hidden></span></a></li>
+        <li><a class="pf-nav__link" href="#/scans" data-route="scans"><svg class="pf-icon" aria-hidden="true"><use href="#i-search"></use></svg><span class="pf-nav__text">Scans</span><span class="pf-nav__count" id="navScans" hidden></span></a></li>
+      </ul>
+      <div class="pf-nav__section admin-only" hidden>Administration</div>
+      <ul class="admin-only" hidden>
+        <li><a class="pf-nav__link" href="/#/users"><svg class="pf-icon" aria-hidden="true"><use href="#i-users"></use></svg>Users</a></li>
+        <li><a class="pf-nav__link" href="/#/credentials"><svg class="pf-icon" aria-hidden="true"><use href="#i-key"></use></svg>Credentials</a></li>
+      </ul>
+      <div class="pf-nav__sites" id="navSites"></div>
+    </nav>
+  </aside>
+
+  <main class="pf-page__main">
+    <!-- ---------- A sync running now (on every page: it goes on on the portal server when the page closes) ---------- -->
+    <section class="pf-page__section ns-running" id="nsRunning" hidden aria-live="polite"></section>
+    <!-- ---------- No access ---------- -->
+    <div id="page-noaccess" data-page="noaccess" hidden>
+      <section class="pf-page__section">
+        <div class="pf-card"><div class="pf-empty-state"><svg class="pf-icon" aria-hidden="true"><use href="#i-lock"></use></svg>
+          <h2 class="pf-title">No access to Nessus</h2>
+          <span>Your account cannot use this module. Ask an administrator to give it on the Users page.</span>
+          <a class="pf-btn pf-m-primary" href="/#/home">Back to the portal</a></div></div>
+      </section>
+    </div>
+    <!-- ---------- Not configured: no Tenable API keys yet ---------- -->
+    <div id="page-notconfigured" data-page="notconfigured" hidden>
+      <section class="pf-page__section">
+        <div class="pf-card"><div class="pf-empty-state"><svg class="pf-icon" aria-hidden="true"><use href="#i-key"></use></svg>
+          <h2 class="pf-title">Tenable is not connected</h2>
+          <span id="ncText">The portal reads the scans and findings of Tenable Vulnerability Management with the API keys of one Tenable user.</span>
+          <a class="pf-btn pf-m-primary admin-only" href="/#/credentials" hidden>Enter the API keys</a>
+          <a class="pf-btn pf-m-link" href="/#/home">Back to the portal</a></div></div>
+      </section>
+    </div>
+
+    <!-- ---------- Overview: per site, the open findings, what was fixed and the trend ---------- -->
+    <div id="page-overview" data-page="overview" hidden>
+      <section class="pf-page__section pf-m-light">
+        <div class="pf-title-row"><h1 class="pf-title">Overview</h1><span class="ns-title-actions" data-sync></span></div>
+        <p>The vulnerabilities Tenable found on the management networks of every site with its Nessus scanner, kept by the portal:
+          what is open, what came back, what was fixed in the last 30 days, and how it went since the first sync.</p>
+      </section>
+      <section class="pf-page__section">
+        <div id="ovNotice"></div>
+        <div class="pf-l-gallery" id="ovSites"></div>
+      </section>
+    </div>
+
+    <!-- ---------- Findings of the site: by plugin (with its hosts), or every finding ---------- -->
+    <div id="page-findings" data-page="findings" hidden>
+      <section class="pf-page__section pf-m-light">
+        <div class="pf-title-row"><h1 class="pf-title">Findings</h1><span class="ns-title-actions" data-sync></span></div>
+        <p>On site <b class="site-name-current"></b>. One row per vulnerability (plugin) with the hosts that have it; open a row for its
+          hosts, or show every finding. A finding is <b>Reopened</b> when Tenable found again what was fixed.</p>
+      </section>
+      <section class="pf-page__section">
+        <div class="pf-card">
+          <div class="pf-toolbar">
+            <input class="pf-form-control pf-m-search" id="fdQ" maxlength="100" placeholder="Search host, IP, plugin, CVE  ( / )" aria-label="Search findings" data-search>
+            <select class="pf-form-control" id="fdSeverity" aria-label="Severity"></select>
+            <select class="pf-form-control" id="fdState" aria-label="State"></select>
+            <div class="pf-toggle-group pf-m-compact" id="fdView" role="radiogroup" aria-label="Show">
+              <label><input type="radio" name="fdView" value="plugins" checked><span>By plugin</span></label>
+              <label><input type="radio" name="fdView" value="list"><span>Every finding</span></label>
+            </div>
+            <span class="pf-toolbar__spacer" id="fdShown" aria-live="polite"></span>
+            <button type="button" class="pf-btn pf-m-secondary pf-m-small" id="fdExport"><svg class="pf-icon" aria-hidden="true"><use href="#i-download"></use></svg>Export CSV</button>
+          </div>
+          <div class="pf-table-wrap">
+            <table class="pf-table ns-table" aria-label="Findings" id="fdTable"></table>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ---------- Hosts of the site ---------- -->
+    <div id="page-hosts" data-page="hosts" hidden>
+      <section class="pf-page__section pf-m-light">
+        <div class="pf-title-row"><h1 class="pf-title">Hosts</h1><span class="ns-title-actions" data-sync></span></div>
+        <p>On site <b class="site-name-current"></b>. Every address of the management networks with findings, the worst first. A host opens
+          its findings with the output of the scanner and the solution.</p>
+      </section>
+      <section class="pf-page__section">
+        <div class="pf-card">
+          <div class="pf-toolbar">
+            <input class="pf-form-control pf-m-search" id="hsQ" maxlength="100" placeholder="Search host, IP, plugin, CVE  ( / )" aria-label="Search hosts" data-search>
+            <select class="pf-form-control" id="hsSeverity" aria-label="Severity"></select>
+            <select class="pf-form-control" id="hsState" aria-label="State"></select>
+            <span class="pf-toolbar__spacer" id="hsShown" aria-live="polite"></span>
+          </div>
+          <div class="pf-table-wrap">
+            <table class="pf-table" aria-label="Hosts">
+              <thead><tr><th>Host</th><th>Critical</th><th>High</th><th>Medium</th><th>Low</th><th>Reopened</th><th>Fixed (30 days)</th><th>Last seen</th></tr></thead>
+              <tbody id="hsList"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ---------- One host ---------- -->
+    <div id="page-host" data-page="host" hidden>
+      <section class="pf-page__section pf-m-light">
+        <nav class="pf-breadcrumb" aria-label="Breadcrumb"><a href="#/hosts">Hosts</a><svg class="pf-icon" aria-hidden="true"><use href="#i-angle-right"></use></svg><span id="hoCrumb"></span></nav>
+        <div class="pf-title-row"><h1 class="pf-title mono" id="hoTitle"></h1><span id="hoName" class="pf-text-secondary"></span>
+          <span class="ns-title-actions">
+            <span class="ns-shell" id="hoShell"></span>
+            <button type="button" class="pf-btn pf-m-secondary pf-m-small" id="hoVerify" hidden><svg class="pf-icon" aria-hidden="true"><use href="#i-refresh"></use></svg>Verify fix</button>
+          </span></div>
+        <div id="hoDetail"></div>
+      </section>
+      <section class="pf-page__section">
+        <div id="hoNotice"></div>
+        <div class="pf-card">
+          <div class="pf-toolbar">
+            <h2 class="pf-card__title">Findings</h2>
+            <select class="pf-form-control" id="hoState" aria-label="State"></select>
+            <span class="pf-toolbar__spacer" id="hoShown"></span>
+          </div>
+          <div class="pf-table-wrap">
+            <table class="pf-table ns-table" aria-label="Findings of this host" id="hoTable"></table>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ---------- Scans of the site ---------- -->
+    <div id="page-scans" data-page="scans" hidden>
+      <section class="pf-page__section pf-m-light">
+        <div class="pf-title-row"><h1 class="pf-title">Scans</h1>
+          <span class="ns-title-actions"><button type="button" class="pf-btn pf-m-secondary pf-m-small" id="scRefresh"><svg class="pf-icon" aria-hidden="true"><use href="#i-refresh"></use></svg>Refresh</button></span></div>
+        <p>On site <b class="site-name-current"></b>: the scans of Tenable that run on its scanner. The portal launches and stops existing scans
+          only (they are made and changed in Tenable), and only a scan whose targets are all inside the management networks of the site.</p>
+      </section>
+      <section class="pf-page__section">
+        <div id="scNotice"></div>
+        <div class="pf-card">
+          <div class="pf-toolbar">
+            <input class="pf-form-control pf-m-search" id="scQ" maxlength="100" placeholder="Search name, target, scanner  ( / )" aria-label="Search scans" data-search>
+            <span class="pf-toolbar__spacer" id="scShown"></span>
+          </div>
+          <div class="pf-table-wrap">
+            <table class="pf-table" aria-label="Scans">
+              <thead><tr><th>Scan</th><th>Status</th><th>Scope</th><th>Last run</th><th>Schedule</th><th><span class="sr-only">Actions</span></th></tr></thead>
+              <tbody id="scList"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ---------- One scan ---------- -->
+    <div id="page-scan" data-page="scan" hidden>
+      <section class="pf-page__section pf-m-light">
+        <nav class="pf-breadcrumb" aria-label="Breadcrumb"><a href="#/scans">Scans</a><svg class="pf-icon" aria-hidden="true"><use href="#i-angle-right"></use></svg><span id="snCrumb"></span></nav>
+        <div class="pf-title-row"><h1 class="pf-title" id="snTitle"></h1><span id="snStatus"></span><span class="ns-title-actions" id="snActions"></span></div>
+        <div id="snDetail"></div>
+      </section>
+      <section class="pf-page__section">
+        <div id="snNotice"></div>
+        <div class="pf-card">
+          <div class="pf-card__header"><h2 class="pf-card__title">Hosts of the last run</h2><span class="pf-card__actions pf-text-secondary pf-text-sm">Open findings per host, as Tenable counts them</span></div>
+          <div class="pf-table-wrap">
+            <table class="pf-table pf-m-compact" aria-label="Hosts of the last run">
+              <thead><tr><th>Host</th><th>Critical</th><th>High</th><th>Medium</th><th>Low</th><th>Info</th></tr></thead>
+              <tbody id="snHosts"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="pf-card">
+          <div class="pf-card__header"><h2 class="pf-card__title">History</h2></div>
+          <div class="pf-table-wrap">
+            <table class="pf-table pf-m-compact" aria-label="Runs of this scan">
+              <thead><tr><th>Started</th><th>Ended</th><th>Status</th><th>Started by</th></tr></thead>
+              <tbody id="snHistory"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<div class="pf-alert-group" id="toasts" aria-live="polite"></div>
+
+<!-- ---------- Launch, stop, Verify fix: typed confirmation ---------- -->
+<dialog class="pf-modal" id="scanDialog" aria-labelledby="sdTitle">
+  <form id="sdForm" novalidate autocomplete="off">
+    <header class="pf-modal__header">
+      <h1 class="pf-title" id="sdTitle">Launch scan</h1>
+      <button type="button" class="pf-btn pf-m-plain" data-close aria-label="Close"><svg class="pf-icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+    </header>
+    <div class="pf-modal__body">
+      <div id="sdRisk"></div>
+      <div id="sdWhere"></div>
+      <div class="pf-form-group" id="sdScanGroup" hidden><label class="pf-form-label" for="sdScan">Scan of the site <span class="pf-required" aria-hidden="true">*</span></label>
+        <select class="pf-form-control" id="sdScan" aria-describedby="sdScanHelp"></select>
+        <span class="pf-helper-text" id="sdScanHelp">Its policy and scanner are used; only this host is scanned (its other targets are not).</span></div>
+      <p class="pf-text-secondary pf-text-sm" id="sdScope"></p>
+      <div class="pf-form-group">
+        <label class="pf-form-label" for="sdConfirm">Type <b class="mono" id="sdConfirmName"></b> to confirm <span class="pf-required" aria-hidden="true">*</span></label>
+        <input class="pf-form-control mono" id="sdConfirm" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="200" data-lpignore="true" data-1p-ignore data-bwignore>
+      </div>
+      <div class="pf-alert pf-m-danger" id="sdError" role="alert" hidden></div>
+    </div>
+    <footer class="pf-modal__footer">
+      <button type="submit" class="pf-btn pf-m-primary" id="sdRun"><svg class="pf-icon" aria-hidden="true"><use href="#i-play"></use></svg>Launch</button>
+      <button type="button" class="pf-btn pf-m-link" data-close>Cancel</button>
+    </footer>
+  </form>
+</dialog>
+
+<script src="/static/switcher.js"></script>
+<script src="{{ url_for('nessus.static', filename='nessus.js', v=ui_version) }}"></script>
+<script src="{{ url_for('static', filename='guide.js', v=ui_version) }}"></script>
+<script src="{{ url_for('nessus.static', filename='guides.js', v=ui_version) }}"></script>
+</body>
+</html>
